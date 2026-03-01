@@ -26,6 +26,7 @@
 
 ## Phase 5: Channel expansion
 
+- Add native DingTalk adapter as next channel milestone.
 - Add native Telegram/Discord/Slack adapters.
 - Keep message contract stable across channels.
 - Add channel-specific rate limit and threading strategies.

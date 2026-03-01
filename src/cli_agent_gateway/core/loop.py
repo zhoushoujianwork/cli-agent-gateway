@@ -28,6 +28,8 @@ class GatewayLoop:
         poll_interval_sec: int,
         progress_notify_interval_sec: int,
         sms_limit: int,
+        reply_style_enabled: bool,
+        reply_style_prompt: str,
     ):
         self.channel = channel
         self.agent = agent
@@ -40,6 +42,8 @@ class GatewayLoop:
         self.poll_interval_sec = poll_interval_sec
         self.progress_notify_interval_sec = progress_notify_interval_sec
         self.sms_limit = sms_limit
+        self.reply_style_enabled = reply_style_enabled
+        self.reply_style_prompt = reply_style_prompt.strip()
 
         self.state: GatewayState = self.state_store.load()
         self.processed_ids = set(self.state.processed_ids)
@@ -99,10 +103,13 @@ class GatewayLoop:
                 last_progress_ts = now
 
             started = time.time()
+            user_text = msg.text
+            if self.reply_style_enabled and self.reply_style_prompt:
+                user_text = f"{self.reply_style_prompt}\n\n用户请求：\n{msg.text}"
             req = TaskRequest(
                 trace_id=msg.id,
                 session_key=session_key,
-                user_text=msg.text,
+                user_text=user_text,
                 sender=msg.sender,
                 channel=msg.channel,
                 thread_id=msg.thread_id,

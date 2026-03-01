@@ -36,6 +36,8 @@ class AppConfig:
     sms_reply_max_chars: int
     acp_agent_cmd: str
     permission_policy: str
+    reply_style_enabled: bool
+    reply_style_prompt: str
 
     @classmethod
     def from_env(cls, repo_root: Path, workdir_arg: str) -> "AppConfig":
@@ -65,4 +67,13 @@ class AppConfig:
             sms_reply_max_chars=int(os.getenv("SMS_REPLY_MAX_CHARS", "8000")),
             acp_agent_cmd=os.getenv("ACP_AGENT_CMD", "codex-acp").strip(),
             permission_policy=os.getenv("ACP_PERMISSION_POLICY", "auto_allow").strip(),
+            reply_style_enabled=os.getenv("REPLY_STYLE_ENABLED", "1").strip() != "0",
+            reply_style_prompt=os.getenv(
+                "REPLY_STYLE_PROMPT",
+                (
+                    "请用 iMessage 友好格式回复：短句优先；先结论后细节；"
+                    "尽量 3-6 行；避免长段落、复杂 Markdown、表格；"
+                    "代码只给最小必要片段；状态词清晰（进行中/阻塞/完成）。"
+                ),
+            ).strip(),
         )

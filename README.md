@@ -22,11 +22,24 @@
 PYTHONPATH=src python3 -m cli_agent_gateway.app.main /path/to/your/workdir
 ```
 
+或使用快捷命令：
+
+```bash
+make run
+```
+
 ## iMessage 接入
 
 1. 在 `.env` 配置 `IMSG_CHAT_ID`、`IMSG_SEND_CHAT_ID`、`REMOTE_USER_ID`。
 2. 确保 `imsg` 已安装且终端有 Full Disk Access（可读取 `~/Library/Messages/chat.db`）。
 3. 默认会自动使用内置 iMessage fetch/send 脚本，无需额外配置 `SMS_FETCH_CMD/SMS_SEND_CMD`。
+
+## 回复格式策略
+
+- 默认会向 agent 注入 iMessage 友好回复规范（短句、少格式、先结论）。
+- 可通过 `.env` 控制：
+  - `REPLY_STYLE_ENABLED=1|0`
+  - `REPLY_STYLE_PROMPT=...`
 
 ## 目录
 

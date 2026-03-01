@@ -49,6 +49,8 @@ def main() -> None:
         poll_interval_sec=cfg.poll_interval_sec,
         progress_notify_interval_sec=cfg.progress_notify_interval_sec,
         sms_limit=cfg.sms_reply_max_chars,
+        reply_style_enabled=cfg.reply_style_enabled,
+        reply_style_prompt=cfg.reply_style_prompt,
     )
     loop.run_forever()
 
