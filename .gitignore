@@ -1,0 +1,24 @@
+# Local env (contains private ids/tokens/paths)
+.env
+.env.local
+.env.*.local
+
+# Runtime state/logs/reports
+.sms_codex_state.json
+.sms_codex_interactions.jsonl
+.sms_codex_loop.lock
+.sms_codex_reports/
+
+# Local screenshots / private media
+docs/screenshots/*.png
+docs/screenshots/*.jpg
+docs/screenshots/*.jpeg
+docs/screenshots/*.webp
+docs/screenshots/*.heic
+
+# Python cache
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
