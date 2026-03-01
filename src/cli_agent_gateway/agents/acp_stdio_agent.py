@@ -34,6 +34,27 @@ class ACPStdioAgentAdapter:
         self._initialized = False
         self.idle_finish_sec = 12
 
+    def _create_session(self, request: TaskRequest) -> str | None:
+        created = self.client.send_request(
+            self.methods.session_new,
+            {
+                "cwd": self.cwd,
+                "mcpServers": [],
+                "session": {
+                    "idempotency_key": request.session_key,
+                    "metadata": {
+                        "channel": request.channel,
+                        "sender": request.sender,
+                        "thread_id": request.thread_id or "",
+                    },
+                },
+            },
+            timeout_sec=30,
+        )
+        if isinstance(created, dict):
+            return str(created.get("sessionId", created.get("session_id", created.get("id", "")))).strip() or None
+        return None
+
     def _ensure_ready(self) -> None:
         self.client.start()
         if self._initialized:
@@ -108,42 +129,21 @@ class ACPStdioAgentAdapter:
 
         session_id = request.session_id
         if not session_id:
-            created = self.client.send_request(
-                self.methods.session_new,
-                {
-                    "cwd": self.cwd,
-                    "mcpServers": [],
-                    "session": {
-                        "idempotency_key": request.session_key,
-                        "metadata": {
-                            "channel": request.channel,
-                            "sender": request.sender,
-                            "thread_id": request.thread_id or "",
-                        },
-                    }
-                },
-                timeout_sec=30,
-            )
-            if isinstance(created, dict):
-                session_id = str(
-                    created.get("sessionId", created.get("session_id", created.get("id", "")))
-                ).strip() or None
+            session_id = self._create_session(request)
 
         raw_events: list[dict[str, Any]] = []
         aggregated_output: list[str] = []
-        prompt_request_id = self.client.start_request(
-            self.methods.session_prompt,
-            {
-                "sessionId": session_id,
-                "prompt": [
-                    {
-                        "type": "text",
-                        "text": request.user_text,
-                    }
-                ],
-                "metadata": request.metadata,
-            },
-        )
+        prompt_params = {
+            "sessionId": session_id,
+            "prompt": [
+                {
+                    "type": "text",
+                    "text": request.user_text,
+                }
+            ],
+            "metadata": request.metadata,
+        }
+        prompt_request_id = self.client.start_request(self.methods.session_prompt, prompt_params)
 
         final_status = "timeout"
         final_summary = "任务超时，未收到终态事件。"
@@ -156,9 +156,13 @@ class ACPStdioAgentAdapter:
             if prompt_response is not None:
                 last_event_at = time.time()
                 if prompt_response.error is not None:
-                    raise RuntimeError(
-                        f"jsonrpc error method={self.methods.session_prompt} error={prompt_response.error}"
-                    )
+                    err_text = str(prompt_response.error)
+                    if "Resource not found" in err_text:
+                        session_id = self._create_session(request)
+                        prompt_params["sessionId"] = session_id
+                        prompt_request_id = self.client.start_request(self.methods.session_prompt, prompt_params)
+                        continue
+                    raise RuntimeError(f"jsonrpc error method={self.methods.session_prompt} error={prompt_response.error}")
                 if isinstance(prompt_response.result, dict):
                     text = self._extract_text(prompt_response.result)
                     if text:
