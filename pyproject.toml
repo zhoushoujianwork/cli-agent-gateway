@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cli-agent-gateway"
+version = "0.1.0"
+description = "Lightweight bridge driver between chat channels and AI CLI tools."
+requires-python = ">=3.9"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+cli-agent-gateway = "cli_agent_gateway.app.main:main"
