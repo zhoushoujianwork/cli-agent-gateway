@@ -32,6 +32,7 @@ class ACPStdioAgentAdapter:
         self.methods = methods or ACPMethodConfig()
         self.client = JsonRpcStdioClient(command=self.command, cwd=self.cwd)
         self._initialized = False
+        self.idle_finish_sec = 12
 
     def _ensure_ready(self) -> None:
         self.client.start()
@@ -40,10 +41,12 @@ class ACPStdioAgentAdapter:
         self.client.send_request(
             self.methods.initialize,
             {
-                "client": {
+                "protocolVersion": "0.2",
+                "clientCapabilities": {},
+                "clientInfo": {
                     "name": "cli-agent-gateway",
                     "version": "0.2.0",
-                }
+                },
             },
             timeout_sec=30,
         )
@@ -55,6 +58,17 @@ class ACPStdioAgentAdapter:
         return {"decision": "allow", "reason": "policy:auto_allow"}
 
     def _extract_text(self, payload: dict[str, Any]) -> str:
+        update = payload.get("update")
+        if isinstance(update, dict):
+            content = update.get("content")
+            if isinstance(content, dict):
+                text = content.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text
+            for key in ("summary", "message", "text", "output"):
+                value = update.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
         for key in ("summary", "message", "text", "output", "content"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
@@ -62,12 +76,22 @@ class ACPStdioAgentAdapter:
         return ""
 
     def _is_terminal(self, payload: dict[str, Any]) -> bool:
+        update = payload.get("update")
+        if isinstance(update, dict):
+            session_update = str(update.get("sessionUpdate", "")).lower().strip()
+            if session_update in {"turn_complete", "agent_turn_complete", "task_complete", "completed"}:
+                return True
         status = str(payload.get("status", payload.get("state", ""))).lower().strip()
         if status in {"completed", "done", "success", "failed", "error", "cancelled"}:
             return True
         return bool(payload.get("is_terminal", False))
 
     def _status_from_payload(self, payload: dict[str, Any]) -> str:
+        update = payload.get("update")
+        if isinstance(update, dict):
+            session_update = str(update.get("sessionUpdate", "")).lower().strip()
+            if session_update in {"turn_complete", "agent_turn_complete", "task_complete", "completed"}:
+                return "ok"
         status = str(payload.get("status", payload.get("state", ""))).lower().strip()
         if status in {"completed", "done", "success"}:
             return "ok"
@@ -87,6 +111,8 @@ class ACPStdioAgentAdapter:
             created = self.client.send_request(
                 self.methods.session_new,
                 {
+                    "cwd": self.cwd,
+                    "mcpServers": [],
                     "session": {
                         "idempotency_key": request.session_key,
                         "metadata": {
@@ -99,43 +125,52 @@ class ACPStdioAgentAdapter:
                 timeout_sec=30,
             )
             if isinstance(created, dict):
-                session_id = str(created.get("session_id", created.get("id", ""))).strip() or None
-
-        prompt_result = self.client.send_request(
-            self.methods.session_prompt,
-            {
-                "session_id": session_id,
-                "prompt": request.user_text,
-                "metadata": request.metadata,
-            },
-            timeout_sec=min(60, self.timeout_sec),
-        )
+                session_id = str(
+                    created.get("sessionId", created.get("session_id", created.get("id", "")))
+                ).strip() or None
 
         raw_events: list[dict[str, Any]] = []
         aggregated_output: list[str] = []
-        if isinstance(prompt_result, dict):
-            text = self._extract_text(prompt_result)
-            if text:
-                aggregated_output.append(text)
-            if self._is_terminal(prompt_result):
-                elapsed = int(time.time() - start)
-                summary = text or "任务已处理完成。"
-                return TaskResult(
-                    trace_id=request.trace_id,
-                    status=self._status_from_payload(prompt_result),
-                    summary=summary,
-                    elapsed_sec=elapsed,
-                    session_id=session_id,
-                    output_text="\n".join(aggregated_output).strip(),
-                    raw_events=raw_events,
-                )
+        prompt_request_id = self.client.start_request(
+            self.methods.session_prompt,
+            {
+                "sessionId": session_id,
+                "prompt": [
+                    {
+                        "type": "text",
+                        "text": request.user_text,
+                    }
+                ],
+                "metadata": request.metadata,
+            },
+        )
 
         final_status = "timeout"
         final_summary = "任务超时，未收到终态事件。"
+        last_event_at = time.time()
+        saw_tool_completed = False
+        saw_agent_message = False
 
         while time.time() < deadline:
+            prompt_response = self.client.poll_response(prompt_request_id, timeout_sec=0.05)
+            if prompt_response is not None:
+                last_event_at = time.time()
+                if prompt_response.error is not None:
+                    raise RuntimeError(
+                        f"jsonrpc error method={self.methods.session_prompt} error={prompt_response.error}"
+                    )
+                if isinstance(prompt_response.result, dict):
+                    text = self._extract_text(prompt_response.result)
+                    if text:
+                        aggregated_output.append(text)
+                    if self._is_terminal(prompt_response.result):
+                        final_status = self._status_from_payload(prompt_response.result)
+                        final_summary = text or "任务已处理完成。"
+                        break
+
             server_req = self.client.pop_request(timeout_sec=0.1)
             if server_req is not None:
+                last_event_at = time.time()
                 try:
                     if "request_permission" in server_req.method.lower():
                         result = self._permission_response(server_req.method, server_req.params)
@@ -151,13 +186,29 @@ class ACPStdioAgentAdapter:
 
             event = self.client.pop_notification(timeout_sec=0.1)
             if event is None:
+                if (
+                    (time.time() - last_event_at) >= self.idle_finish_sec
+                    and aggregated_output
+                    and (saw_tool_completed or saw_agent_message)
+                ):
+                    final_status = "ok"
+                    final_summary = "".join(aggregated_output).strip()[-300:] or "任务已处理完成。"
+                    break
                 continue
+            last_event_at = time.time()
 
             raw_events.append({"method": event.method, "params": event.params})
+            update = event.params.get("update", {}) if isinstance(event.params, dict) else {}
+            if isinstance(update, dict):
+                su = str(update.get("sessionUpdate", "")).lower().strip()
+                if su == "tool_call_update" and str(update.get("status", "")).lower().strip() == "completed":
+                    saw_tool_completed = True
+                if su == "agent_message_chunk":
+                    saw_agent_message = True
             text = self._extract_text(event.params)
             if text:
                 aggregated_output.append(text)
-                if on_progress and not self._is_terminal(event.params):
+                if on_progress and not self._is_terminal(event.params) and len(text.strip()) >= 4:
                     on_progress(text)
 
             if self._is_terminal(event.params):

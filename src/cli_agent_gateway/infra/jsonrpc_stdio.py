@@ -78,7 +78,7 @@ class JsonRpcStdioClient:
             self.proc.stdin.write(line + "\n")
             self.proc.stdin.flush()
 
-    def send_request(self, method: str, params: dict[str, Any] | None = None, timeout_sec: int = 30) -> Any:
+    def start_request(self, method: str, params: dict[str, Any] | None = None) -> int:
         request_id = self._next_id
         self._next_id += 1
         response_queue: queue.Queue[JsonRpcResponse] = queue.Queue(maxsize=1)
@@ -91,11 +91,25 @@ class JsonRpcStdioClient:
                 "params": params or {},
             }
         )
+        return request_id
+
+    def poll_response(self, request_id: int, timeout_sec: float = 0.0) -> JsonRpcResponse | None:
+        response_queue = self._pending.get(request_id)
+        if response_queue is None:
+            return None
         try:
             response = response_queue.get(timeout=timeout_sec)
-        except queue.Empty as exc:
+        except queue.Empty:
+            return None
+        self._pending.pop(request_id, None)
+        return response
+
+    def send_request(self, method: str, params: dict[str, Any] | None = None, timeout_sec: int = 30) -> Any:
+        request_id = self.start_request(method, params=params)
+        response = self.poll_response(request_id, timeout_sec=timeout_sec)
+        if response is None:
             self._pending.pop(request_id, None)
-            raise TimeoutError(f"request timeout method={method}") from exc
+            raise TimeoutError(f"request timeout method={method}")
         if response.error is not None:
             raise RuntimeError(f"jsonrpc error method={method} error={response.error}")
         return response.result
