@@ -41,8 +41,8 @@ class AppConfig:
     def from_env(cls, repo_root: Path, workdir_arg: str) -> "AppConfig":
         load_dotenv(repo_root / ".env")
 
-        default_fetch_cmd = "python3 -c 'import json; print(json.dumps([]))'"
-        default_send_cmd = "python3 -c 'import sys; sys.exit(0)'"
+        default_fetch_cmd = f"python3 {repo_root / 'src/cli_agent_gateway/channels/imessage_fetch.py'}"
+        default_send_cmd = f"python3 {repo_root / 'src/cli_agent_gateway/channels/imessage_send.py'}"
 
         remote_user = os.getenv("REMOTE_USER_ID", "<USER_IMESSAGE_ID>").strip()
         allowlist = os.getenv("ALLOWED_FROM", remote_user).strip()

@@ -16,3 +16,5 @@ where = ["src"]
 
 [project.scripts]
 cli-agent-gateway = "cli_agent_gateway.app.main:main"
+imessage-fetch = "cli_agent_gateway.channels.imessage_fetch:main"
+imessage-send = "cli_agent_gateway.channels.imessage_send:main"
