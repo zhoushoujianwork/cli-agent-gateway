@@ -48,18 +48,27 @@ class GatewayLoop:
         self.state: GatewayState = self.state_store.load()
         self.processed_ids = set(self.state.processed_ids)
 
+    def _log(self, message: str) -> None:
+        print(f"[{utc_now()}] {message}")
+
+    def _preview(self, text: str, limit: int = 120) -> str:
+        compact = " ".join((text or "").split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: max(0, limit - 3)] + "..."
+
     def run_forever(self) -> None:
-        print(f"[{utc_now()}] ACP gateway loop started")
+        self._log("ACP gateway loop started")
         while True:
             try:
                 self._tick()
             except KeyboardInterrupt:
                 self._persist()
                 self.agent.close()
-                print(f"[{utc_now()}] loop stopped")
+                self._log("loop stopped")
                 return
             except Exception as exc:
-                print(f"[{utc_now()}] loop error: {exc}")
+                self._log(f"loop error: {exc}")
             time.sleep(self.poll_interval_sec)
 
     def _tick(self) -> None:
@@ -68,9 +77,11 @@ class GatewayLoop:
             return
 
         if self.process_only_latest and len(messages) > 1:
+            self._log(f"process_only_latest enabled: dropping {len(messages) - 1} older messages")
             messages = sorted(messages, key=lambda x: x.ts)[-1:]
 
         for msg in messages:
+            self._log(f"inbound id={msg.id} from={msg.sender} text={self._preview(msg.text)}")
             self.interaction_log.append(
                 "inbound_received",
                 msg_id=msg.id,
@@ -79,6 +90,7 @@ class GatewayLoop:
                 ts=msg.ts,
             )
             if self.allowed_from and msg.sender not in self.allowed_from:
+                self._log(f"skip unauthorized sender={msg.sender} id={msg.id}")
                 self._mark_processed(msg.id)
                 self.interaction_log.append("inbound_skipped", msg_id=msg.id, sender=msg.sender, reason="unauthorized")
                 continue
@@ -88,6 +100,7 @@ class GatewayLoop:
                 to=self.remote_user_id,
                 message_id=f"ack-{msg.id}",
             )
+            self._log(f"ack sent id={msg.id}")
 
             session_key = build_session_key(msg.channel, msg.sender, msg.thread_id)
             session_id = self.state.session_map.get(session_key)
@@ -100,6 +113,7 @@ class GatewayLoop:
                     return
                 progress = f"任务 {msg.id} 处理中: {update_text[:80]}"
                 self.channel.send(progress, to=self.remote_user_id, message_id=f"progress-{msg.id}-{int(now)}")
+                self._log(f"progress sent id={msg.id} text={self._preview(progress, 100)}")
                 last_progress_ts = now
 
             started = time.time()
@@ -124,6 +138,10 @@ class GatewayLoop:
             report_path = self._write_report(msg.id, req.user_text, result)
             summary = build_user_summary(result, self.sms_limit)
             self.channel.send(summary, to=self.remote_user_id, message_id=msg.id, report_file=str(report_path))
+            self._log(
+                f"final sent id={msg.id} status={result.status} elapsed={result.elapsed_sec}s "
+                f"report={report_path.name}"
+            )
 
             self.interaction_log.append(
                 "exec_finished",
@@ -137,6 +155,7 @@ class GatewayLoop:
             self._mark_processed(msg.id)
 
         self._persist()
+        self._log(f"state persisted processed_ids={len(self.state.processed_ids)} sessions={len(self.state.session_map)}")
 
     def _mark_processed(self, msg_id: str) -> None:
         if msg_id not in self.processed_ids:
