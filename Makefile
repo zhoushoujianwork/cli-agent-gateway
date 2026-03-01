@@ -10,3 +10,7 @@ run:
 		exit 1; \
 	fi
 	PYTHONPATH=$(PYTHONPATH) python3 -m cli_agent_gateway.app.main "$(WORKDIR)"
+
+.PHONY: run-dingtalk-callback
+run-dingtalk-callback:
+	PYTHONPATH=$(PYTHONPATH) python3 -m cli_agent_gateway.channels.dingtalk_callback_server

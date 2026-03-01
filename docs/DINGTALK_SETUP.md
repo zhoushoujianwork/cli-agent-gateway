@@ -1,4 +1,4 @@
-# DingTalk Setup (MVP)
+# DingTalk Setup (Bi-directional)
 
 ## 1. Enable DingTalk channel commands
 
@@ -7,6 +7,7 @@ In `.env` set:
 ```bash
 SMS_FETCH_CMD="python3 /abs/path/to/src/cli_agent_gateway/channels/dingtalk_fetch.py"
 SMS_SEND_CMD="python3 /abs/path/to/src/cli_agent_gateway/channels/dingtalk_send.py"
+DINGTALK_SEND_MODE=api
 ```
 
 ## 2. Inbound queue file
@@ -28,18 +29,43 @@ Supported inbound fields:
 - `chatType` / `conversationType` / `isGroup`
 - `isAtBot` / `atBot`
 
-## 3. Outbound webhook
+## 3. Inbound callback server (required for two-way)
+
+Start callback receiver:
+
+```bash
+PYTHONPATH=src python3 src/cli_agent_gateway/channels/dingtalk_callback_server.py
+```
+
+Configure DingTalk event subscription callback URL to this server.
+Incoming events are normalized and appended into `DINGTALK_QUEUE_FILE`.
+
+## 4. Outbound send mode
+
+### API mode (recommended; two-way primary path)
+
+```bash
+DINGTALK_SEND_MODE=api
+DINGTALK_APP_KEY=...
+DINGTALK_APP_SECRET=...
+DINGTALK_AGENT_ID=123456
+```
+
+Gateway will use `SMS_TO` as the target DingTalk user id (`senderStaffId`).
+
+### Webhook mode (system notification only)
 
 Set webhook config:
 
 ```bash
 DINGTALK_BOT_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=...
 DINGTALK_BOT_SECRET=SEC...
+DINGTALK_SEND_MODE=webhook
 ```
 
-`dingtalk_send.py` sends plain text and treats `errcode=0` as success.
+`dingtalk_send.py` treats `errcode=0` as success.
 
-## 4. Access policy
+## 5. Access policy
 
 ```bash
 DINGTALK_DM_POLICY=allowlist|open|disabled
@@ -55,6 +81,6 @@ DINGTALK_REQUIRE_MENTION_IN_GROUP=1
 # Fetch test
 PYTHONPATH=src python3 src/cli_agent_gateway/channels/dingtalk_fetch.py
 
-# Send test
+# Send test (api/webhook depends on DINGTALK_SEND_MODE)
 PYTHONPATH=src python3 src/cli_agent_gateway/channels/dingtalk_send.py 'gateway ping'
 ```

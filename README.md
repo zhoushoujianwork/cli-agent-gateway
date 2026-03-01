@@ -39,9 +39,11 @@ make run
 - 已提供：
   - `src/cli_agent_gateway/channels/dingtalk_fetch.py`
   - `src/cli_agent_gateway/channels/dingtalk_send.py`
+  - `src/cli_agent_gateway/channels/dingtalk_callback_server.py`
 - 当前模式：
   - fetch 从 `DINGTALK_QUEUE_FILE` 读取 JSONL 入站队列；
-  - send 通过 `DINGTALK_BOT_WEBHOOK` 发送文本消息。
+  - callback server 接收钉钉回调并写入队列（双向入站）；
+  - send 默认走应用 API（双向主链路），webhook 可作为系统通知模式。
 
 ## 回复格式策略
 
