@@ -34,6 +34,9 @@ class ACPStdioAgentAdapter:
         self._initialized = False
         self.idle_finish_sec = 12
 
+    def _normalize_text(self, text: str) -> str:
+        return " ".join(text.replace("\r", " ").replace("\n", " ").split()).strip()
+
     def _create_session(self, request: TaskRequest) -> str | None:
         created = self.client.send_request(
             self.methods.session_new,
@@ -132,7 +135,10 @@ class ACPStdioAgentAdapter:
             session_id = self._create_session(request)
 
         raw_events: list[dict[str, Any]] = []
-        aggregated_output: list[str] = []
+        highlights: list[str] = []
+        message_chunks: list[str] = []
+        progress_buffer = ""
+        last_progress_text = ""
         prompt_params = {
             "sessionId": session_id,
             "prompt": [
@@ -166,7 +172,9 @@ class ACPStdioAgentAdapter:
                 if isinstance(prompt_response.result, dict):
                     text = self._extract_text(prompt_response.result)
                     if text:
-                        aggregated_output.append(text)
+                        clean = self._normalize_text(text)
+                        if clean and clean not in highlights:
+                            highlights.append(clean)
                     if self._is_terminal(prompt_response.result):
                         final_status = self._status_from_payload(prompt_response.result)
                         final_summary = text or "任务已处理完成。"
@@ -192,11 +200,17 @@ class ACPStdioAgentAdapter:
             if event is None:
                 if (
                     (time.time() - last_event_at) >= self.idle_finish_sec
-                    and aggregated_output
+                    and (message_chunks or highlights)
                     and (saw_tool_completed or saw_agent_message)
                 ):
                     final_status = "ok"
-                    final_summary = "".join(aggregated_output).strip()[-300:] or "任务已处理完成。"
+                    normalized = self._normalize_text("".join(message_chunks))
+                    if normalized:
+                        final_summary = normalized[-300:]
+                    elif highlights:
+                        final_summary = highlights[-1][-300:]
+                    else:
+                        final_summary = "任务已处理完成。"
                     break
                 continue
             last_event_at = time.time()
@@ -209,11 +223,27 @@ class ACPStdioAgentAdapter:
                     saw_tool_completed = True
                 if su == "agent_message_chunk":
                     saw_agent_message = True
+                    content = update.get("content")
+                    if isinstance(content, dict):
+                        chunk_text = content.get("text")
+                        if isinstance(chunk_text, str) and chunk_text:
+                            message_chunks.append(chunk_text)
+                            progress_buffer += chunk_text
+                            normalized_progress = self._normalize_text(progress_buffer)
+                            if (
+                                on_progress
+                                and normalized_progress
+                                and normalized_progress != last_progress_text
+                                and (len(normalized_progress) >= 24 or progress_buffer.endswith(("。", "！", "？", ".", "!", "?")))
+                            ):
+                                on_progress(normalized_progress[-120:])
+                                last_progress_text = normalized_progress
+                                progress_buffer = ""
             text = self._extract_text(event.params)
             if text:
-                aggregated_output.append(text)
-                if on_progress and not self._is_terminal(event.params) and len(text.strip()) >= 4:
-                    on_progress(text)
+                clean = self._normalize_text(text)
+                if clean and clean not in highlights:
+                    highlights.append(clean)
 
             if self._is_terminal(event.params):
                 final_status = self._status_from_payload(event.params)
@@ -232,7 +262,7 @@ class ACPStdioAgentAdapter:
             summary=final_summary,
             elapsed_sec=elapsed,
             session_id=session_id,
-            output_text="\n".join(aggregated_output).strip(),
+            output_text=self._normalize_text("".join(message_chunks)) or "\n".join(highlights[-6:]).strip(),
             raw_events=raw_events,
         )
 

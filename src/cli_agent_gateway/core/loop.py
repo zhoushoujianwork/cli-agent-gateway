@@ -98,7 +98,7 @@ class GatewayLoop:
                 now = time.time()
                 if now - last_progress_ts < self.progress_notify_interval_sec:
                     return
-                progress = f"任务 {msg.id} 处理中: {update_text[:160]}"
+                progress = f"任务 {msg.id} 处理中: {update_text[:80]}"
                 self.channel.send(progress, to=self.remote_user_id, message_id=f"progress-{msg.id}-{int(now)}")
                 last_progress_ts = now
 

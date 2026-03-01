@@ -24,6 +24,12 @@ def build_user_summary(result: TaskResult, sms_limit: int) -> str:
         f"耗时: {result.elapsed_sec}s",
     ]
     body = result.summary.strip() or "任务已结束。"
-    if result.output_text.strip():
-        body = body + "\n\n输出摘录:\n" + result.output_text.strip()
+
+    output = " ".join(result.output_text.strip().split())
+    if output:
+        excerpt = output[:220].rstrip()
+        if len(output) > 220:
+            excerpt += "..."
+        if excerpt and excerpt not in body:
+            body = body + "\n\n输出摘录: " + excerpt
     return clip_text("\n".join(header + ["", body]).strip(), sms_limit)
