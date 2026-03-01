@@ -18,3 +18,5 @@ where = ["src"]
 cli-agent-gateway = "cli_agent_gateway.app.main:main"
 imessage-fetch = "cli_agent_gateway.channels.imessage_fetch:main"
 imessage-send = "cli_agent_gateway.channels.imessage_send:main"
+dingtalk-fetch = "cli_agent_gateway.channels.dingtalk_fetch:main"
+dingtalk-send = "cli_agent_gateway.channels.dingtalk_send:main"

@@ -34,6 +34,15 @@ make run
 2. 确保 `imsg` 已安装且终端有 Full Disk Access（可读取 `~/Library/Messages/chat.db`）。
 3. 默认会自动使用内置 iMessage fetch/send 脚本，无需额外配置 `SMS_FETCH_CMD/SMS_SEND_CMD`。
 
+## DingTalk 接入（MVP）
+
+- 已提供：
+  - `src/cli_agent_gateway/channels/dingtalk_fetch.py`
+  - `src/cli_agent_gateway/channels/dingtalk_send.py`
+- 当前模式：
+  - fetch 从 `DINGTALK_QUEUE_FILE` 读取 JSONL 入站队列；
+  - send 通过 `DINGTALK_BOT_WEBHOOK` 发送文本消息。
+
 ## 回复格式策略
 
 - 默认会向 agent 注入 iMessage 友好回复规范（短句、少格式、先结论）。
