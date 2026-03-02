@@ -31,6 +31,7 @@ class AppConfig:
     report_dir: Path
     state_file: Path
     interaction_log_file: Path
+    lock_file: Path
     process_only_latest: bool
     progress_notify_interval_sec: int
     sms_reply_max_chars: int
@@ -62,6 +63,7 @@ class AppConfig:
             interaction_log_file=Path(
                 os.getenv("INTERACTION_LOG_FILE", str(repo_root / ".agent_gateway_interactions.jsonl"))
             ).expanduser().resolve(),
+            lock_file=Path(os.getenv("LOCK_FILE", str(repo_root / ".cli_agent_gateway.lock"))).expanduser().resolve(),
             process_only_latest=os.getenv("PROCESS_ONLY_LATEST", "0").strip() != "0",
             progress_notify_interval_sec=int(os.getenv("PROGRESS_NOTIFY_INTERVAL_SEC", "60")),
             sms_reply_max_chars=int(os.getenv("SMS_REPLY_MAX_CHARS", "8000")),

@@ -14,7 +14,7 @@
 
 ## 快速启动
 
-1. 复制 `.env.example` 到 `.env` 并填入实际值。
+1. 复制 `.env.example` 到 `.env` 并填入实际值（可选）。
 2. 确保 `ACP_AGENT_CMD` 可执行（例如已经安装 `codex-acp`）。
 3. 启动：
 
@@ -26,6 +26,25 @@ PYTHONPATH=src python3 -m cli_agent_gateway.app.main /path/to/your/workdir
 
 ```bash
 make run
+```
+
+单实例保护：
+- 启动时会抢占 `LOCK_FILE`（默认 `.cli_agent_gateway.lock`）；
+- 若已有实例运行，新进程会直接退出并打印已运行实例的 PID/启动时间；
+- 可执行 `make status` 查看当前运行状态。
+
+如果 `.env` 缺失，程序会自动进入交互式初始化：
+- 默认只询问必要项（例如 iMessage 的手机号/AppleID/Chat ID）；
+- 其余配置自动探测并自动填充；
+- 选择项使用方向键（↑/↓ 或 ←/→）切换，回车确认；
+- 输入 `-` 可暂时跳过当前项；
+- 如需细项调整，可进入“高级配置”；
+- 完成后会自动写入 `.env` 并继续启动。
+
+如需在 `.env` 已存在时重新进入配置页面并修改已有值，可执行：
+
+```bash
+make config
 ```
 
 ## iMessage 接入
