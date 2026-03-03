@@ -4,13 +4,13 @@ import json
 import time
 from pathlib import Path
 
-from cli_agent_gateway.agents.base import AgentAdapter
-from cli_agent_gateway.channels.base import ChannelAdapter
-from cli_agent_gateway.core.contracts import TaskRequest, utc_now
-from cli_agent_gateway.core.router import build_session_key
-from cli_agent_gateway.infra.interaction_log import InteractionLog
-from cli_agent_gateway.infra.state_store import GatewayState, JsonStateStore
-from cli_agent_gateway.services.summarizer import build_user_summary
+from agents.base import AgentAdapter
+from channels.base import ChannelAdapter
+from core.contracts import TaskRequest, utc_now
+from core.router import build_session_key
+from infra.interaction_log import InteractionLog
+from infra.state_store import GatewayState, JsonStateStore
+from services.summarizer import build_user_summary
 
 
 class GatewayLoop:
@@ -48,6 +48,12 @@ class GatewayLoop:
         self.state: GatewayState = self.state_store.load()
         self.processed_ids = set(self.state.processed_ids)
 
+    def _resolve_reply_target(self, sender: str) -> str:
+        target = (sender or "").strip()
+        if target:
+            return target
+        return self.remote_user_id
+
     def _log(self, message: str) -> None:
         print(f"[{utc_now()}] {message}")
 
@@ -81,6 +87,7 @@ class GatewayLoop:
             messages = sorted(messages, key=lambda x: x.ts)[-1:]
 
         for msg in messages:
+            reply_to = self._resolve_reply_target(msg.sender)
             self._log(f"inbound id={msg.id} from={msg.sender} text={self._preview(msg.text)}")
             self.interaction_log.append(
                 "inbound_received",
@@ -97,7 +104,7 @@ class GatewayLoop:
 
             self.channel.send(
                 f"已收到消息，开始处理（id={msg.id}）",
-                to=self.remote_user_id,
+                to=reply_to,
                 message_id=f"ack-{msg.id}",
             )
             self._log(f"ack sent id={msg.id}")
@@ -112,7 +119,7 @@ class GatewayLoop:
                 if now - last_progress_ts < self.progress_notify_interval_sec:
                     return
                 progress = f"任务 {msg.id} 处理中: {update_text[:80]}"
-                self.channel.send(progress, to=self.remote_user_id, message_id=f"progress-{msg.id}-{int(now)}")
+                self.channel.send(progress, to=reply_to, message_id=f"progress-{msg.id}-{int(now)}")
                 self._log(f"progress sent id={msg.id} text={self._preview(progress, 100)}")
                 last_progress_ts = now
 
@@ -137,7 +144,7 @@ class GatewayLoop:
 
             report_path = self._write_report(msg.id, req.user_text, result)
             summary = build_user_summary(result, self.sms_limit)
-            self.channel.send(summary, to=self.remote_user_id, message_id=msg.id, report_file=str(report_path))
+            self.channel.send(summary, to=reply_to, message_id=msg.id, report_file=str(report_path))
             self._log(
                 f"final sent id={msg.id} status={result.status} elapsed={result.elapsed_sec}s "
                 f"report={report_path.name}"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable, Protocol
 
-from cli_agent_gateway.core.contracts import TaskRequest, TaskResult
+from core.contracts import TaskRequest, TaskResult
 
 ProgressCallback = Callable[[str], None]
 PermissionHandler = Callable[[str, dict], dict]

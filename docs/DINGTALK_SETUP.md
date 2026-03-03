@@ -5,8 +5,8 @@
 In `.env` set:
 
 ```bash
-SMS_FETCH_CMD="python3 /abs/path/to/src/cli_agent_gateway/channels/dingtalk_fetch.py"
-SMS_SEND_CMD="python3 /abs/path/to/src/cli_agent_gateway/channels/dingtalk_send.py"
+SMS_FETCH_CMD="python3 /abs/path/to/src/channels/dingtalk_fetch.py"
+SMS_SEND_CMD="python3 /abs/path/to/src/channels/dingtalk_send.py"
 DINGTALK_SEND_MODE=api
 ```
 
@@ -34,7 +34,7 @@ Supported inbound fields:
 Start callback receiver:
 
 ```bash
-PYTHONPATH=src python3 src/cli_agent_gateway/channels/dingtalk_callback_server.py
+PYTHONPATH=src python3 src/channels/dingtalk_callback_server.py
 ```
 
 Configure DingTalk event subscription callback URL to this server.
@@ -79,8 +79,8 @@ DINGTALK_REQUIRE_MENTION_IN_GROUP=1
 
 ```bash
 # Fetch test
-PYTHONPATH=src python3 src/cli_agent_gateway/channels/dingtalk_fetch.py
+PYTHONPATH=src python3 src/channels/dingtalk_fetch.py
 
 # Send test (api/webhook depends on DINGTALK_SEND_MODE)
-PYTHONPATH=src python3 src/cli_agent_gateway/channels/dingtalk_send.py 'gateway ping'
+PYTHONPATH=src python3 src/channels/dingtalk_send.py 'gateway ping'
 ```

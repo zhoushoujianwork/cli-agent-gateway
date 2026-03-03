@@ -7,7 +7,7 @@ import shlex
 import subprocess
 from typing import Any
 
-from cli_agent_gateway.core.contracts import InboundMessage
+from core.contracts import InboundMessage
 
 
 def _sanitize(value: Any) -> str:
@@ -19,9 +19,18 @@ def _sanitize(value: Any) -> str:
 class CommandChannelAdapter:
     channel_id = "command"
 
-    def __init__(self, fetch_cmd: str, send_cmd: str, fetch_timeout_sec: int = 120, send_timeout_sec: int = 120):
+    def __init__(
+        self,
+        fetch_cmd: str,
+        send_cmd: str,
+        *,
+        channel_id: str = "command",
+        fetch_timeout_sec: int = 120,
+        send_timeout_sec: int = 120,
+    ):
         self.fetch_cmd = fetch_cmd
         self.send_cmd = send_cmd
+        self.channel_id = _sanitize(channel_id) or "command"
         self.fetch_timeout_sec = fetch_timeout_sec
         self.send_timeout_sec = send_timeout_sec
 

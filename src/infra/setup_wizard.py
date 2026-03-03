@@ -125,8 +125,8 @@ def _detect_defaults(repo_root: Path, workdir_arg: str) -> dict[str, str]:
     defaults["SMS_REPLY_MAX_CHARS"] = "8000"
     defaults["REPLY_STYLE_ENABLED"] = "1"
 
-    dingtalk_fetch = repo_root / "src/cli_agent_gateway/channels/dingtalk_fetch.py"
-    dingtalk_send = repo_root / "src/cli_agent_gateway/channels/dingtalk_send.py"
+    dingtalk_fetch = repo_root / "src/channels/dingtalk_fetch.py"
+    dingtalk_send = repo_root / "src/channels/dingtalk_send.py"
     defaults["SMS_FETCH_CMD"] = f"python3 {dingtalk_fetch}"
     defaults["SMS_SEND_CMD"] = f"python3 {dingtalk_send}"
     defaults["DINGTALK_QUEUE_FILE"] = ".dingtalk_inbox.jsonl"
@@ -301,7 +301,7 @@ def run_setup_wizard(repo_root: Path, workdir_arg: str, force: bool = False) -> 
     if channel == "imessage" and values.get("IMSG_CHAT_ID") and not values.get("IMSG_SEND_CHAT_ID"):
         values["IMSG_SEND_CHAT_ID"] = values["IMSG_CHAT_ID"]
 
-    if "ALLOWED_FROM" not in values and values.get("REMOTE_USER_ID"):
+    if channel != "dingtalk" and "ALLOWED_FROM" not in values and values.get("REMOTE_USER_ID"):
         values["ALLOWED_FROM"] = values["REMOTE_USER_ID"]
 
     advanced = _select_menu(

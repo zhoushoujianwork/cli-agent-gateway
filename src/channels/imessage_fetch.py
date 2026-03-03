@@ -63,7 +63,7 @@ def _flatten_json_payload(raw: str) -> list[dict[str, Any]]:
 
 
 def main() -> None:
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).resolve().parents[2]
     load_dotenv(repo_root / ".env")
 
     chat_id = os.getenv("IMSG_CHAT_ID", "").strip()

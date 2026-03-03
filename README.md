@@ -8,18 +8,21 @@
 ## 当前实现
 
 - `CommandChannelAdapter`：通过 `SMS_FETCH_CMD` / `SMS_SEND_CMD` 对接任意聊天入口。
-- 内置 iMessage adapter：`src/cli_agent_gateway/channels/imessage_fetch.py`、`imessage_send.py`。
+- 内置 iMessage adapter：`src/channels/imessage_fetch.py`、`imessage_send.py`。
 - `ACPStdioAgentAdapter`：通过 `ACP_AGENT_CMD` 对接 ACP agent（例如 `codex-acp`）。
 - 主循环：去重、鉴权、session 路由、进度回包、报告与交互日志持久化。
 
 ## 快速启动
 
 1. 复制 `.env.example` 到 `.env` 并填入实际值（可选）。
+   - 用 `CHANNEL_TYPE=imessage|dingtalk` 选择通道；
+   - 默认会按通道自动选择内置 fetch/send 脚本；
+   - 如需自定义可继续覆盖 `SMS_FETCH_CMD` / `SMS_SEND_CMD`。
 2. 确保 `ACP_AGENT_CMD` 可执行（例如已经安装 `codex-acp`）。
 3. 启动：
 
 ```bash
-PYTHONPATH=src python3 -m cli_agent_gateway.app.main /path/to/your/workdir
+PYTHONPATH=src python3 -m app.main /path/to/your/workdir
 ```
 
 或使用快捷命令：
@@ -51,14 +54,16 @@ make config
 
 1. 在 `.env` 配置 `IMSG_CHAT_ID`、`IMSG_SEND_CHAT_ID`、`REMOTE_USER_ID`。
 2. 确保 `imsg` 已安装且终端有 Full Disk Access（可读取 `~/Library/Messages/chat.db`）。
-3. 默认会自动使用内置 iMessage fetch/send 脚本，无需额外配置 `SMS_FETCH_CMD/SMS_SEND_CMD`。
+3. 设置 `CHANNEL_TYPE=imessage` 时，默认会自动使用内置 iMessage fetch/send 脚本，无需额外配置 `SMS_FETCH_CMD/SMS_SEND_CMD`。
 
 ## DingTalk 接入（MVP）
 
+- 启用方式：`.env` 里设置 `CHANNEL_TYPE=dingtalk`（或显式覆盖 `SMS_FETCH_CMD/SMS_SEND_CMD`）。
+- 多用户模式：默认 `ALLOWED_FROM` 为空即不限制发送者；会按 `channel+sender+thread` 隔离会话，并回复到各自发送者。
 - 已提供：
-  - `src/cli_agent_gateway/channels/dingtalk_fetch.py`
-  - `src/cli_agent_gateway/channels/dingtalk_send.py`
-  - `src/cli_agent_gateway/channels/dingtalk_callback_server.py`
+  - `src/channels/dingtalk_fetch.py`
+  - `src/channels/dingtalk_send.py`
+  - `src/channels/dingtalk_callback_server.py`
 - 当前模式：
   - fetch 从 `DINGTALK_QUEUE_FILE` 读取 JSONL 入站队列；
   - callback server 接收钉钉回调并写入队列（双向入站）；
@@ -73,8 +78,8 @@ make config
 
 ## 目录
 
-- `src/cli_agent_gateway/app/main.py`: 入口
-- `src/cli_agent_gateway/core/loop.py`: 网关主循环
-- `src/cli_agent_gateway/agents/acp_stdio_agent.py`: ACP 执行适配器
-- `src/cli_agent_gateway/infra/jsonrpc_stdio.py`: JSON-RPC stdio 传输
+- `src/app/main.py`: 入口
+- `src/core/loop.py`: 网关主循环
+- `src/agents/acp_stdio_agent.py`: ACP 执行适配器
+- `src/infra/jsonrpc_stdio.py`: JSON-RPC stdio 传输
 - `docs/ARCHITECTURE.md`: 架构说明

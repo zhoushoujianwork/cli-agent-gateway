@@ -20,8 +20,8 @@ Design baseline follows Clawbot/OpenClaw channel ideas:
 
 ## Scope (MVP)
 
-- Add `src/cli_agent_gateway/channels/dingtalk_fetch.py`.
-- Add `src/cli_agent_gateway/channels/dingtalk_send.py`.
+- Add `src/channels/dingtalk_fetch.py`.
+- Add `src/channels/dingtalk_send.py`.
 - Add DingTalk config fields in `.env.example` and `infra/config.py`.
 - Keep existing gateway loop unchanged by preserving normalized contract:
   - `{id, from, text, ts, thread_id}`

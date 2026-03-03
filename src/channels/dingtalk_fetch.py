@@ -98,7 +98,7 @@ def _normalize(node: dict[str, Any]) -> dict[str, str] | None:
 
 
 def main() -> None:
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).resolve().parents[2]
     load_dotenv(repo_root / ".env")
 
     queue_path = _resolve_queue_path(os.getenv("DINGTALK_QUEUE_FILE", ".dingtalk_inbox.jsonl"), repo_root)

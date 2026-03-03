@@ -139,7 +139,7 @@ class DingTalkCallbackHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).resolve().parents[2]
     load_dotenv(repo_root / ".env")
 
     host = os.getenv("DINGTALK_CALLBACK_HOST", "0.0.0.0").strip() or "0.0.0.0"

@@ -125,7 +125,7 @@ def main() -> None:
         print("message text is required as $1", file=sys.stderr)
         raise SystemExit(2)
 
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).resolve().parents[2]
     load_dotenv(repo_root / ".env")
 
     text = sys.argv[1].strip()

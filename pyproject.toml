@@ -15,9 +15,9 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [project.scripts]
-cli-agent-gateway = "cli_agent_gateway.app.main:main"
-imessage-fetch = "cli_agent_gateway.channels.imessage_fetch:main"
-imessage-send = "cli_agent_gateway.channels.imessage_send:main"
-dingtalk-fetch = "cli_agent_gateway.channels.dingtalk_fetch:main"
-dingtalk-send = "cli_agent_gateway.channels.dingtalk_send:main"
-dingtalk-callback-server = "cli_agent_gateway.channels.dingtalk_callback_server:main"
+cli-agent-gateway = "app.main:main"
+imessage-fetch = "channels.imessage_fetch:main"
+imessage-send = "channels.imessage_send:main"
+dingtalk-fetch = "channels.dingtalk_fetch:main"
+dingtalk-send = "channels.dingtalk_send:main"
+dingtalk-callback-server = "channels.dingtalk_callback_server:main"

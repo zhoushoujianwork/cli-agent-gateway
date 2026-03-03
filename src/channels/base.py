@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from cli_agent_gateway.core.contracts import InboundMessage
+from core.contracts import InboundMessage
 
 
 class ChannelAdapter(Protocol):

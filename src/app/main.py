@@ -6,22 +6,22 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from cli_agent_gateway.agents.acp_stdio_agent import ACPStdioAgentAdapter
-from cli_agent_gateway.channels.command_channel import CommandChannelAdapter
-from cli_agent_gateway.core.loop import GatewayLoop
-from cli_agent_gateway.infra.config import AppConfig
-from cli_agent_gateway.infra.interaction_log import InteractionLog
-from cli_agent_gateway.infra.process_lock import ProcessLock, inspect_lock
-from cli_agent_gateway.infra.setup_wizard import bootstrap_env_if_missing
-from cli_agent_gateway.infra.state_store import JsonStateStore
+from agents.acp_stdio_agent import ACPStdioAgentAdapter
+from channels.command_channel import CommandChannelAdapter
+from core.loop import GatewayLoop
+from infra.config import AppConfig
+from infra.interaction_log import InteractionLog
+from infra.process_lock import ProcessLock, inspect_lock
+from infra.setup_wizard import bootstrap_env_if_missing
+from infra.state_store import JsonStateStore
 
 
 def usage() -> None:
-    print("Usage: python3 -m cli_agent_gateway.app.main <agent_workdir>", file=sys.stderr)
+    print("Usage: python3 -m app.main <agent_workdir>", file=sys.stderr)
 
 
 def main() -> None:
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).resolve().parents[2]
     if len(sys.argv) < 2:
         usage()
         raise SystemExit(2)
@@ -56,7 +56,7 @@ def main() -> None:
         }
     )
 
-    channel = CommandChannelAdapter(fetch_cmd=cfg.fetch_cmd, send_cmd=cfg.send_cmd)
+    channel = CommandChannelAdapter(fetch_cmd=cfg.fetch_cmd, send_cmd=cfg.send_cmd, channel_id=cfg.channel_type)
     agent = ACPStdioAgentAdapter(
         command=cfg.acp_agent_cmd,
         cwd=str(cfg.workdir),

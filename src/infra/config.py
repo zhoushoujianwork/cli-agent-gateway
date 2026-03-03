@@ -21,6 +21,7 @@ def load_dotenv(path: Path) -> None:
 
 @dataclass
 class AppConfig:
+    channel_type: str
     workdir: Path
     fetch_cmd: str
     send_cmd: str
@@ -44,13 +45,34 @@ class AppConfig:
     def from_env(cls, repo_root: Path, workdir_arg: str) -> "AppConfig":
         load_dotenv(repo_root / ".env")
 
-        default_fetch_cmd = f"python3 {repo_root / 'src/cli_agent_gateway/channels/imessage_fetch.py'}"
-        default_send_cmd = f"python3 {repo_root / 'src/cli_agent_gateway/channels/imessage_send.py'}"
+        channel_type = os.getenv("CHANNEL_TYPE", "imessage").strip().lower()
+        if channel_type not in {"imessage", "dingtalk", "command"}:
+            channel_type = "imessage"
 
-        remote_user = os.getenv("REMOTE_USER_ID", "<USER_IMESSAGE_ID>").strip()
-        allowlist = os.getenv("ALLOWED_FROM", remote_user).strip()
+        default_fetch_cmd_map = {
+            "imessage": f"python3 {repo_root / 'src/channels/imessage_fetch.py'}",
+            "dingtalk": f"python3 {repo_root / 'src/channels/dingtalk_fetch.py'}",
+            "command": f"python3 {repo_root / 'src/channels/imessage_fetch.py'}",
+        }
+        default_send_cmd_map = {
+            "imessage": f"python3 {repo_root / 'src/channels/imessage_send.py'}",
+            "dingtalk": f"python3 {repo_root / 'src/channels/dingtalk_send.py'}",
+            "command": f"python3 {repo_root / 'src/channels/imessage_send.py'}",
+        }
+        default_fetch_cmd = default_fetch_cmd_map[channel_type]
+        default_send_cmd = default_send_cmd_map[channel_type]
+
+        if channel_type == "dingtalk":
+            remote_user_default = "<USER_DINGTALK_ID>"
+        else:
+            remote_user_default = "<USER_IMESSAGE_ID>"
+
+        remote_user = os.getenv("REMOTE_USER_ID", remote_user_default).strip()
+        allowlist_default = "" if channel_type == "dingtalk" else remote_user
+        allowlist = os.getenv("ALLOWED_FROM", allowlist_default).strip()
 
         return cls(
+            channel_type=channel_type,
             workdir=Path(workdir_arg).expanduser().resolve(),
             fetch_cmd=os.getenv("SMS_FETCH_CMD", default_fetch_cmd).strip(),
             send_cmd=os.getenv("SMS_SEND_CMD", default_send_cmd).strip(),

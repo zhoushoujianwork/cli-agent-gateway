@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cli_agent_gateway.core.contracts import TaskResult
+from core.contracts import TaskResult
 
 
 def clip_text(text: str, limit: int) -> str:

@@ -4,9 +4,9 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from cli_agent_gateway.agents.base import PermissionHandler, ProgressCallback
-from cli_agent_gateway.core.contracts import TaskRequest, TaskResult
-from cli_agent_gateway.infra.jsonrpc_stdio import JsonRpcNotification, JsonRpcStdioClient
+from agents.base import PermissionHandler, ProgressCallback
+from core.contracts import TaskRequest, TaskResult
+from infra.jsonrpc_stdio import JsonRpcNotification, JsonRpcStdioClient
 
 
 @dataclass

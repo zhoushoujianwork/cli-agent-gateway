@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from cli_agent_gateway.core.contracts import utc_now
+from core.contracts import utc_now
 
 
 class InteractionLog:
