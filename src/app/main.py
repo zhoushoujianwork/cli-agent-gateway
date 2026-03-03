@@ -8,6 +8,7 @@ from pathlib import Path
 
 from agents.acp_stdio_agent import ACPStdioAgentAdapter
 from channels.command_channel import CommandChannelAdapter
+from channels.dingtalk_stream_channel import DingTalkStreamChannelAdapter
 from core.loop import GatewayLoop
 from infra.config import AppConfig
 from infra.interaction_log import InteractionLog
@@ -18,6 +19,34 @@ from infra.state_store import JsonStateStore
 
 def usage() -> None:
     print("Usage: python3 -m app.main <agent_workdir>", file=sys.stderr)
+
+
+def _mask_value(value: str, *, keep_left: int = 3, keep_right: int = 2) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if len(raw) <= keep_left + keep_right:
+        return "*" * len(raw)
+    return f"{raw[:keep_left]}***{raw[-keep_right:]}"
+
+
+def _log_startup(cfg: AppConfig) -> None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[{now}] startup channel={cfg.channel_type} workdir={cfg.workdir}")
+    print(f"[{now}] startup acp_cmd={cfg.acp_agent_cmd} permission_policy={cfg.permission_policy}")
+    print(f"[{now}] startup fetch_cmd={cfg.fetch_cmd}")
+    print(f"[{now}] startup send_cmd={cfg.send_cmd}")
+
+    if cfg.channel_type == "dingtalk":
+        send_mode = os.getenv("DINGTALK_SEND_MODE", "api").strip() or "api"
+        send_msgtype = os.getenv("DINGTALK_SEND_MSGTYPE", "markdown").strip() or "markdown"
+        card_fallback = os.getenv("DINGTALK_CARD_FALLBACK_MARKDOWN", "1").strip() or "1"
+        app_key = _mask_value(os.getenv("DINGTALK_APP_KEY", ""))
+        agent_id = os.getenv("DINGTALK_AGENT_ID", "").strip()
+        print(
+            f"[{now}] startup dingtalk inbound=stream send_mode={send_mode} msgtype={send_msgtype} "
+            f"card_fallback={card_fallback} app_key={app_key or '(empty)'} agent_id={agent_id or '(empty)'}"
+        )
 
 
 def main() -> None:
@@ -31,6 +60,7 @@ def main() -> None:
     if not cfg.workdir.exists() or not cfg.workdir.is_dir():
         print(f"[FATAL] invalid workdir: {cfg.workdir}", file=sys.stderr)
         raise SystemExit(2)
+    _log_startup(cfg)
 
     process_lock = ProcessLock(cfg.lock_file)
     if not process_lock.acquire():
@@ -56,7 +86,10 @@ def main() -> None:
         }
     )
 
-    channel = CommandChannelAdapter(fetch_cmd=cfg.fetch_cmd, send_cmd=cfg.send_cmd, channel_id=cfg.channel_type)
+    if cfg.channel_type == "dingtalk":
+        channel = DingTalkStreamChannelAdapter(send_cmd=cfg.send_cmd)
+    else:
+        channel = CommandChannelAdapter(fetch_cmd=cfg.fetch_cmd, send_cmd=cfg.send_cmd, channel_id=cfg.channel_type)
     agent = ACPStdioAgentAdapter(
         command=cfg.acp_agent_cmd,
         cwd=str(cfg.workdir),
@@ -80,6 +113,7 @@ def main() -> None:
         sms_limit=cfg.sms_reply_max_chars,
         reply_style_enabled=cfg.reply_style_enabled,
         reply_style_prompt=cfg.reply_style_prompt,
+        debug_user_profile=cfg.debug_user_profile,
     )
     try:
         loop.run_forever()

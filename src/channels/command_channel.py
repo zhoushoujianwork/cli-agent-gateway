@@ -16,6 +16,31 @@ def _sanitize(value: Any) -> str:
     return str(value).replace("\x00", "").strip()
 
 
+def _extract_metadata(node: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+
+    user_profile = {
+        "sender_id": _sanitize(node.get("sender_staff_id", node.get("from", ""))),
+        "sender_name": _sanitize(node.get("sender_name", "")),
+        "sender_union_id": _sanitize(node.get("sender_union_id", "")),
+    }
+    user_profile = {k: v for k, v in user_profile.items() if v}
+    if user_profile:
+        metadata["user_profile"] = user_profile
+
+    dingtalk_meta = {
+        "conversation_id": _sanitize(node.get("conversation_id", "")),
+        "chat_type": _sanitize(node.get("chat_type", "")),
+        "is_group": bool(node.get("is_group", False)),
+        "is_at_bot": bool(node.get("is_at_bot", False)),
+    }
+    dingtalk_meta = {k: v for k, v in dingtalk_meta.items() if v not in ("", None)}
+    if dingtalk_meta:
+        metadata["dingtalk"] = dingtalk_meta
+
+    return metadata
+
+
 class CommandChannelAdapter:
     channel_id = "command"
 
@@ -90,6 +115,7 @@ class CommandChannelAdapter:
                     ts=ts,
                     channel=self.channel_id,
                     thread_id=thread_id,
+                    metadata=_extract_metadata(node),
                 )
             )
         return messages

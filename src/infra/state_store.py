@@ -9,6 +9,7 @@ from pathlib import Path
 class GatewayState:
     processed_ids: list[str] = field(default_factory=list)
     session_map: dict[str, str] = field(default_factory=dict)
+    inflight_tasks: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 class JsonStateStore:
@@ -25,11 +26,23 @@ class JsonStateStore:
             return GatewayState()
         ids = node.get("processed_ids", [])
         mapping = node.get("session_map", {})
+        inflight = node.get("inflight_tasks", {})
         if not isinstance(ids, list):
             ids = []
         if not isinstance(mapping, dict):
             mapping = {}
-        return GatewayState(processed_ids=[str(x) for x in ids], session_map={str(k): str(v) for k, v in mapping.items()})
+        if not isinstance(inflight, dict):
+            inflight = {}
+        normalized_inflight: dict[str, dict[str, str]] = {}
+        for k, v in inflight.items():
+            if not isinstance(v, dict):
+                continue
+            normalized_inflight[str(k)] = {str(vk): str(vv) for vk, vv in v.items()}
+        return GatewayState(
+            processed_ids=[str(x) for x in ids],
+            session_map={str(k): str(v) for k, v in mapping.items()},
+            inflight_tasks=normalized_inflight,
+        )
 
     def save(self, state: GatewayState) -> None:
         if len(state.processed_ids) > self.max_processed:
@@ -40,6 +53,7 @@ class JsonStateStore:
                 {
                     "processed_ids": state.processed_ids,
                     "session_map": state.session_map,
+                    "inflight_tasks": state.inflight_tasks,
                 },
                 ensure_ascii=False,
                 indent=2,

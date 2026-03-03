@@ -20,7 +20,8 @@ Design baseline follows Clawbot/OpenClaw channel ideas:
 
 ## Scope (MVP)
 
-- Add `src/channels/dingtalk.py` (single-file channel module; includes fetch/send/callback-server).
+- Add `src/channels/dingtalk_stream_channel.py` as the built-in stream inbound adapter.
+- Keep `src/channels/dingtalk.py send` for outbound API/webhook send.
 - Add DingTalk config fields in `.env.example` and `infra/config.py`.
 - Keep existing gateway loop unchanged by preserving normalized contract:
   - `{id, from, text, ts, thread_id}`
@@ -53,19 +54,10 @@ Design baseline follows Clawbot/OpenClaw channel ideas:
 
 ## API strategy
 
-MVP uses pull-style command adapters first (compatible with current gateway):
-
-- `dingtalk.py fetch`:
-  - Reads pending inbound messages from local queue file (fed by callback receiver or poller).
-  - Emits normalized JSON array.
-- `dingtalk.py send`:
-  - Sends text reply via DingTalk robot/API.
-
-Phase-2 adds optional callback receiver:
-
-- `dingtalk.py callback-server`:
-  - Verifies signatures.
-  - Writes normalized inbound events into queue file.
+MVP inbound uses built-in DingTalk Stream SDK adapter in gateway process:
+- Push events are consumed in-process and converted to unified message contract.
+- No callback HTTP server and no local queue file required.
+- `dingtalk.py send` continues to send text reply via DingTalk robot/API.
 
 ## Config draft
 
@@ -82,7 +74,6 @@ DINGTALK_ALLOWED_FROM=staffA,staffB
 DINGTALK_GROUP_ALLOWLIST=cidA,cidB
 DINGTALK_REQUIRE_MENTION_IN_GROUP=1
 
-DINGTALK_QUEUE_FILE=.dingtalk_inbox.jsonl
 ```
 
 ## Milestones

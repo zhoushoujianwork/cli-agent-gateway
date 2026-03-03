@@ -40,6 +40,7 @@ class AppConfig:
     permission_policy: str
     reply_style_enabled: bool
     reply_style_prompt: str
+    debug_user_profile: bool
 
     @classmethod
     def from_env(cls, repo_root: Path, workdir_arg: str) -> "AppConfig":
@@ -51,7 +52,7 @@ class AppConfig:
 
         default_fetch_cmd_map = {
             "imessage": f"python3 {repo_root / 'src/channels/imessage.py'} fetch",
-            "dingtalk": f"python3 {repo_root / 'src/channels/dingtalk.py'} fetch",
+            "dingtalk": "builtin:dingtalk-stream",
             "command": f"python3 {repo_root / 'src/channels/imessage.py'} fetch",
         }
         default_send_cmd_map = {
@@ -100,4 +101,7 @@ class AppConfig:
                     "代码只给最小必要片段；状态词清晰（进行中/阻塞/完成）。"
                 ),
             ).strip(),
+            debug_user_profile=(
+                os.getenv("DINGTALK_DEBUG_USER_PROFILE", os.getenv("DEBUG_USER_PROFILE", "0")).strip() != "0"
+            ),
         )
