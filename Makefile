@@ -20,4 +20,4 @@ status:
 
 .PHONY: run-dingtalk-callback
 run-dingtalk-callback:
-	PYTHONPATH=$(PYTHONPATH) python3 -m channels.dingtalk_callback_server
+	PYTHONPATH=$(PYTHONPATH) python3 -m channels.dingtalk callback-server

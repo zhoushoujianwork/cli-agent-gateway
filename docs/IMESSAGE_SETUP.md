@@ -29,11 +29,11 @@ If `IMSG_SEND_CHAT_ID` is empty, send adapter will use `SMS_TO`.
 
 ```bash
 # Fetch latest messages as unified JSON
-PYTHONPATH=src python3 src/channels/imessage_fetch.py
+PYTHONPATH=src python3 src/channels/imessage.py fetch
 
 # Send one message to configured chat
 PYTHONPATH=src SMS_TO='<fallback-id>' \
-  python3 src/channels/imessage_send.py 'gateway test message'
+  python3 src/channels/imessage.py send 'gateway test message'
 ```
 
 ## 4. Run gateway

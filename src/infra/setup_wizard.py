@@ -125,10 +125,9 @@ def _detect_defaults(repo_root: Path, workdir_arg: str) -> dict[str, str]:
     defaults["SMS_REPLY_MAX_CHARS"] = "8000"
     defaults["REPLY_STYLE_ENABLED"] = "1"
 
-    dingtalk_fetch = repo_root / "src/channels/dingtalk_fetch.py"
-    dingtalk_send = repo_root / "src/channels/dingtalk_send.py"
-    defaults["SMS_FETCH_CMD"] = f"python3 {dingtalk_fetch}"
-    defaults["SMS_SEND_CMD"] = f"python3 {dingtalk_send}"
+    dingtalk_script = repo_root / "src/channels/dingtalk.py"
+    defaults["SMS_FETCH_CMD"] = f"python3 {dingtalk_script} fetch"
+    defaults["SMS_SEND_CMD"] = f"python3 {dingtalk_script} send"
     defaults["DINGTALK_QUEUE_FILE"] = ".dingtalk_inbox.jsonl"
     defaults["DINGTALK_FETCH_MAX_EVENTS"] = "30"
     defaults["DINGTALK_DM_POLICY"] = "allowlist"

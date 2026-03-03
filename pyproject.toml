@@ -16,8 +16,8 @@ where = ["src"]
 
 [project.scripts]
 cli-agent-gateway = "app.main:main"
-imessage-fetch = "channels.imessage_fetch:main"
-imessage-send = "channels.imessage_send:main"
-dingtalk-fetch = "channels.dingtalk_fetch:main"
-dingtalk-send = "channels.dingtalk_send:main"
-dingtalk-callback-server = "channels.dingtalk_callback_server:main"
+imessage-fetch = "channels.imessage:fetch_main"
+imessage-send = "channels.imessage:send_main"
+dingtalk-fetch = "channels.dingtalk:fetch_main"
+dingtalk-send = "channels.dingtalk:send_main"
+dingtalk-callback-server = "channels.dingtalk:callback_server_main"

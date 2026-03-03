@@ -62,8 +62,12 @@ def _flatten_json_payload(raw: str) -> list[dict[str, Any]]:
     return nodes
 
 
-def main() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def fetch_main() -> None:
+    repo_root = _repo_root()
     load_dotenv(repo_root / ".env")
 
     chat_id = os.getenv("IMSG_CHAT_ID", "").strip()
@@ -104,6 +108,50 @@ def main() -> None:
         )
 
     print(json.dumps(messages, ensure_ascii=False))
+
+
+def send_main() -> None:
+    if len(sys.argv) < 2:
+        print("message text is required as $1", file=sys.stderr)
+        raise SystemExit(2)
+
+    repo_root = _repo_root()
+    load_dotenv(repo_root / ".env")
+
+    text = sys.argv[1]
+    service = os.getenv("IMSG_SEND_SERVICE", "auto").strip() or "auto"
+    chat_id = os.getenv("IMSG_SEND_CHAT_ID", "").strip()
+    to = os.getenv("SMS_TO", "").strip()
+    imsg_bin = os.getenv("IMSG_BIN", "imsg").strip() or "imsg"
+
+    cmd = [imsg_bin, "send"]
+    if chat_id:
+        cmd.extend(["--chat-id", chat_id])
+    else:
+        if not to:
+            print("SMS_TO is required when IMSG_SEND_CHAT_ID is empty", file=sys.stderr)
+            raise SystemExit(2)
+        cmd.extend(["--to", to])
+
+    cmd.extend(["--text", text, "--service", service])
+    proc = subprocess.run(cmd, text=True, capture_output=True)
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or proc.stdout.strip()
+        print(f"imsg send failed: {err}", file=sys.stderr)
+        raise SystemExit(proc.returncode)
+
+
+def main() -> None:
+    if len(sys.argv) < 2 or sys.argv[1] not in {"fetch", "send"}:
+        print("Usage: python3 src/channels/imessage.py <fetch|send> [message_text]", file=sys.stderr)
+        raise SystemExit(2)
+
+    command = sys.argv[1]
+    sys.argv = [sys.argv[0]] + sys.argv[2:]
+    if command == "fetch":
+        fetch_main()
+        return
+    send_main()
 
 
 if __name__ == "__main__":

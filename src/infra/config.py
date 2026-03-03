@@ -50,14 +50,14 @@ class AppConfig:
             channel_type = "imessage"
 
         default_fetch_cmd_map = {
-            "imessage": f"python3 {repo_root / 'src/channels/imessage_fetch.py'}",
-            "dingtalk": f"python3 {repo_root / 'src/channels/dingtalk_fetch.py'}",
-            "command": f"python3 {repo_root / 'src/channels/imessage_fetch.py'}",
+            "imessage": f"python3 {repo_root / 'src/channels/imessage.py'} fetch",
+            "dingtalk": f"python3 {repo_root / 'src/channels/dingtalk.py'} fetch",
+            "command": f"python3 {repo_root / 'src/channels/imessage.py'} fetch",
         }
         default_send_cmd_map = {
-            "imessage": f"python3 {repo_root / 'src/channels/imessage_send.py'}",
-            "dingtalk": f"python3 {repo_root / 'src/channels/dingtalk_send.py'}",
-            "command": f"python3 {repo_root / 'src/channels/imessage_send.py'}",
+            "imessage": f"python3 {repo_root / 'src/channels/imessage.py'} send",
+            "dingtalk": f"python3 {repo_root / 'src/channels/dingtalk.py'} send",
+            "command": f"python3 {repo_root / 'src/channels/imessage.py'} send",
         }
         default_fetch_cmd = default_fetch_cmd_map[channel_type]
         default_send_cmd = default_send_cmd_map[channel_type]

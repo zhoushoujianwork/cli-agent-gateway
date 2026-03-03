@@ -5,14 +5,14 @@
 In `.env` set:
 
 ```bash
-SMS_FETCH_CMD="python3 /abs/path/to/src/channels/dingtalk_fetch.py"
-SMS_SEND_CMD="python3 /abs/path/to/src/channels/dingtalk_send.py"
+SMS_FETCH_CMD="python3 /abs/path/to/src/channels/dingtalk.py fetch"
+SMS_SEND_CMD="python3 /abs/path/to/src/channels/dingtalk.py send"
 DINGTALK_SEND_MODE=api
 ```
 
 ## 2. Inbound queue file
 
-`dingtalk_fetch.py` reads JSONL events from `DINGTALK_QUEUE_FILE`.
+`dingtalk.py fetch` reads JSONL events from `DINGTALK_QUEUE_FILE`.
 Each line should be a JSON object, example:
 
 ```json
@@ -34,7 +34,7 @@ Supported inbound fields:
 Start callback receiver:
 
 ```bash
-PYTHONPATH=src python3 src/channels/dingtalk_callback_server.py
+PYTHONPATH=src python3 src/channels/dingtalk.py callback-server
 ```
 
 Configure DingTalk event subscription callback URL to this server.
@@ -63,7 +63,7 @@ DINGTALK_BOT_SECRET=SEC...
 DINGTALK_SEND_MODE=webhook
 ```
 
-`dingtalk_send.py` treats `errcode=0` as success.
+`dingtalk.py send` treats `errcode=0` as success.
 
 ## 5. Access policy
 
@@ -79,8 +79,8 @@ DINGTALK_REQUIRE_MENTION_IN_GROUP=1
 
 ```bash
 # Fetch test
-PYTHONPATH=src python3 src/channels/dingtalk_fetch.py
+PYTHONPATH=src python3 src/channels/dingtalk.py fetch
 
 # Send test (api/webhook depends on DINGTALK_SEND_MODE)
-PYTHONPATH=src python3 src/channels/dingtalk_send.py 'gateway ping'
+PYTHONPATH=src python3 src/channels/dingtalk.py send 'gateway ping'
 ```

@@ -8,7 +8,7 @@
 ## 当前实现
 
 - `CommandChannelAdapter`：通过 `SMS_FETCH_CMD` / `SMS_SEND_CMD` 对接任意聊天入口。
-- 内置 iMessage adapter：`src/channels/imessage_fetch.py`、`imessage_send.py`。
+- 内置 iMessage adapter：`src/channels/imessage.py`（单文件，含 fetch/send 子命令）。
 - `ACPStdioAgentAdapter`：通过 `ACP_AGENT_CMD` 对接 ACP agent（例如 `codex-acp`）。
 - 主循环：去重、鉴权、session 路由、进度回包、报告与交互日志持久化。
 
@@ -61,9 +61,8 @@ make config
 - 启用方式：`.env` 里设置 `CHANNEL_TYPE=dingtalk`（或显式覆盖 `SMS_FETCH_CMD/SMS_SEND_CMD`）。
 - 多用户模式：默认 `ALLOWED_FROM` 为空即不限制发送者；会按 `channel+sender+thread` 隔离会话，并回复到各自发送者。
 - 已提供：
-  - `src/channels/dingtalk_fetch.py`
-  - `src/channels/dingtalk_send.py`
-  - `src/channels/dingtalk_callback_server.py`
+  - `src/channels/dingtalk.py`
+  - （同文件内含 `fetch` / `send` / `callback-server` 子命令）
 - 当前模式：
   - fetch 从 `DINGTALK_QUEUE_FILE` 读取 JSONL 入站队列；
   - callback server 接收钉钉回调并写入队列（双向入站）；

@@ -20,8 +20,7 @@ Design baseline follows Clawbot/OpenClaw channel ideas:
 
 ## Scope (MVP)
 
-- Add `src/channels/dingtalk_fetch.py`.
-- Add `src/channels/dingtalk_send.py`.
+- Add `src/channels/dingtalk.py` (single-file channel module; includes fetch/send/callback-server).
 - Add DingTalk config fields in `.env.example` and `infra/config.py`.
 - Keep existing gateway loop unchanged by preserving normalized contract:
   - `{id, from, text, ts, thread_id}`
@@ -56,15 +55,15 @@ Design baseline follows Clawbot/OpenClaw channel ideas:
 
 MVP uses pull-style command adapters first (compatible with current gateway):
 
-- `dingtalk_fetch.py`:
+- `dingtalk.py fetch`:
   - Reads pending inbound messages from local queue file (fed by callback receiver or poller).
   - Emits normalized JSON array.
-- `dingtalk_send.py`:
+- `dingtalk.py send`:
   - Sends text reply via DingTalk robot/API.
 
 Phase-2 adds optional callback receiver:
 
-- `dingtalk_callback_server.py`:
+- `dingtalk.py callback-server`:
   - Verifies signatures.
   - Writes normalized inbound events into queue file.
 
