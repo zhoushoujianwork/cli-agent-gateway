@@ -124,16 +124,21 @@ def _detect_defaults(repo_root: Path, workdir_arg: str) -> dict[str, str]:
     defaults["PROGRESS_NOTIFY_INTERVAL_SEC"] = "60"
     defaults["SMS_REPLY_MAX_CHARS"] = "8000"
     defaults["REPLY_STYLE_ENABLED"] = "1"
+    defaults["DINGTALK_DEBUG_USER_PROFILE"] = "0"
 
     dingtalk_script = repo_root / "src/channels/dingtalk.py"
-    defaults["SMS_FETCH_CMD"] = f"python3 {dingtalk_script} fetch"
+    defaults["SMS_FETCH_CMD"] = "builtin:dingtalk-stream"
     defaults["SMS_SEND_CMD"] = f"python3 {dingtalk_script} send"
-    defaults["DINGTALK_QUEUE_FILE"] = ".dingtalk_inbox.jsonl"
-    defaults["DINGTALK_FETCH_MAX_EVENTS"] = "30"
     defaults["DINGTALK_DM_POLICY"] = "allowlist"
     defaults["DINGTALK_GROUP_POLICY"] = "allowlist"
-    defaults["DINGTALK_REQUIRE_MENTION_IN_GROUP"] = "1"
+    defaults["DINGTALK_REQUIRE_MENTION_IN_GROUP"] = "0"
+    defaults["DINGTALK_STREAM_DEBUG"] = "1"
     defaults["DINGTALK_SEND_MODE"] = "api"
+    defaults["DINGTALK_SEND_MSGTYPE"] = "markdown"
+    defaults["DINGTALK_PRETTY_STATUS"] = "1"
+    defaults["DINGTALK_MARKDOWN_TITLE"] = "CLI Agent Gateway"
+    defaults["DINGTALK_CARD_TEMPLATE_ID"] = "StandardCard"
+    defaults["DINGTALK_CARD_FALLBACK_MARKDOWN"] = "1"
 
     return defaults
 
@@ -176,6 +181,7 @@ def _advanced_fields(channel: str, defaults: dict[str, str]) -> list[PromptField
         PromptField("ACP_PERMISSION_POLICY", "权限策略", defaults.get("ACP_PERMISSION_POLICY")),
         PromptField("AGENT_TIMEOUT_SEC", "Agent 超时秒数", defaults.get("AGENT_TIMEOUT_SEC")),
         PromptField("POLL_INTERVAL_SEC", "轮询间隔秒数", defaults.get("POLL_INTERVAL_SEC")),
+        PromptField("DINGTALK_DEBUG_USER_PROFILE", "打印用户画像调试日志(0/1)", defaults.get("DINGTALK_DEBUG_USER_PROFILE")),
     ]
 
     if channel == "imessage":
@@ -191,8 +197,6 @@ def _advanced_fields(channel: str, defaults: dict[str, str]) -> list[PromptField
     return base_fields + [
         PromptField("SMS_FETCH_CMD", "自定义 fetch 命令", defaults.get("SMS_FETCH_CMD")),
         PromptField("SMS_SEND_CMD", "自定义 send 命令", defaults.get("SMS_SEND_CMD")),
-        PromptField("DINGTALK_QUEUE_FILE", "DingTalk 入站队列文件", defaults.get("DINGTALK_QUEUE_FILE")),
-        PromptField("DINGTALK_FETCH_MAX_EVENTS", "DingTalk 每次抓取上限", defaults.get("DINGTALK_FETCH_MAX_EVENTS")),
         PromptField("DINGTALK_DM_POLICY", "DingTalk 私聊策略", defaults.get("DINGTALK_DM_POLICY")),
         PromptField("DINGTALK_GROUP_POLICY", "DingTalk 群聊策略", defaults.get("DINGTALK_GROUP_POLICY")),
         PromptField(
@@ -201,6 +205,16 @@ def _advanced_fields(channel: str, defaults: dict[str, str]) -> list[PromptField
             defaults.get("DINGTALK_REQUIRE_MENTION_IN_GROUP"),
         ),
         PromptField("DINGTALK_SEND_MODE", "DingTalk 发送模式", defaults.get("DINGTALK_SEND_MODE")),
+        PromptField("DINGTALK_SEND_MSGTYPE", "DingTalk 消息格式(text/markdown/card)", defaults.get("DINGTALK_SEND_MSGTYPE")),
+        PromptField("DINGTALK_PRETTY_STATUS", "状态样式美化(0/1)", defaults.get("DINGTALK_PRETTY_STATUS")),
+        PromptField("DINGTALK_MARKDOWN_TITLE", "Markdown 标题", defaults.get("DINGTALK_MARKDOWN_TITLE")),
+        PromptField("DINGTALK_CARD_TEMPLATE_ID", "互动卡片模板ID", defaults.get("DINGTALK_CARD_TEMPLATE_ID")),
+        PromptField(
+            "DINGTALK_CARD_FALLBACK_MARKDOWN",
+            "卡片失败时回退markdown(0/1)",
+            defaults.get("DINGTALK_CARD_FALLBACK_MARKDOWN"),
+        ),
+        PromptField("DINGTALK_STREAM_DEBUG", "Stream 原始消息调试日志(0/1)", defaults.get("DINGTALK_STREAM_DEBUG")),
         PromptField("ALLOWED_FROM", "允许来源 ID 列表(逗号分隔)", defaults.get("ALLOWED_FROM")),
     ]
 
@@ -221,6 +235,7 @@ def _allowed_keys_for_channel(channel: str) -> set[str]:
         "REMOTE_USER_ID",
         "ALLOWED_FROM",
         "CHANNEL_TYPE",
+        "DINGTALK_DEBUG_USER_PROFILE",
     }
     if channel == "imessage":
         return common | {
@@ -234,12 +249,16 @@ def _allowed_keys_for_channel(channel: str) -> set[str]:
     return common | {
         "SMS_FETCH_CMD",
         "SMS_SEND_CMD",
-        "DINGTALK_QUEUE_FILE",
-        "DINGTALK_FETCH_MAX_EVENTS",
         "DINGTALK_DM_POLICY",
         "DINGTALK_GROUP_POLICY",
         "DINGTALK_REQUIRE_MENTION_IN_GROUP",
         "DINGTALK_SEND_MODE",
+        "DINGTALK_SEND_MSGTYPE",
+        "DINGTALK_PRETTY_STATUS",
+        "DINGTALK_MARKDOWN_TITLE",
+        "DINGTALK_CARD_TEMPLATE_ID",
+        "DINGTALK_CARD_FALLBACK_MARKDOWN",
+        "DINGTALK_STREAM_DEBUG",
         "DINGTALK_APP_KEY",
         "DINGTALK_APP_SECRET",
         "DINGTALK_AGENT_ID",

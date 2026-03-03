@@ -58,15 +58,18 @@ make config
 
 ## DingTalk 接入（MVP）
 
+- 依赖安装：`pip install dingtalk-stream`
 - 启用方式：`.env` 里设置 `CHANNEL_TYPE=dingtalk`（或显式覆盖 `SMS_FETCH_CMD/SMS_SEND_CMD`）。
 - 多用户模式：默认 `ALLOWED_FROM` 为空即不限制发送者；会按 `channel+sender+thread` 隔离会话，并回复到各自发送者。
-- 已提供：
-  - `src/channels/dingtalk.py`
-  - （同文件内含 `fetch` / `send` / `callback-server` 子命令）
-- 当前模式：
-  - fetch 从 `DINGTALK_QUEUE_FILE` 读取 JSONL 入站队列；
-  - callback server 接收钉钉回调并写入队列（双向入站）；
-  - send 默认走应用 API（双向主链路），webhook 可作为系统通知模式。
+- 用户信息透传：会把 DingTalk 的 `senderStaffId/senderName/conversationId` 等写入 `TaskRequest.metadata` 与交互日志。
+- 调试开关：设置 `DINGTALK_DEBUG_USER_PROFILE=1` 可在网关日志里打印“当前说话人画像”。
+- 当前模式（仅 Stream）：
+  - 入站：网关进程内置 `dingtalk-stream` 监听（无需 callback server / queue 文件）；
+  - 出站：`src/channels/dingtalk.py send` 默认走应用 API，webhook 可作为系统通知模式。
+  - 出站消息默认使用 `markdown` 并按 `ack/progress/final/error` 渲染状态样式（`DINGTALK_SEND_MSGTYPE` 支持 `text|markdown|card`）。
+  - 可开启 `RECOVER_UNFINISHED_TASKS_AS_FAILED=1`：服务重启后会把未完成任务自动标记失败并回发。
+  - 默认群聊不要求 `@机器人`（`DINGTALK_REQUIRE_MENTION_IN_GROUP=0`）。
+  - 默认开启 `DINGTALK_STREAM_DEBUG=1`，会打印每条原始 stream 回调与过滤原因日志。
 
 ## 回复格式策略
 

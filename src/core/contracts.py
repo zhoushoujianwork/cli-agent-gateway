@@ -20,6 +20,7 @@ class InboundMessage:
     ts: str
     channel: str = "command"
     thread_id: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

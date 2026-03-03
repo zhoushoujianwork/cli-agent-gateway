@@ -4,6 +4,8 @@
 .env.*.local
 .env.backups/
 
+logs/
+
 # Runtime state/logs/reports (current name)
 .agent_gateway_state.json
 .agent_gateway_interactions.jsonl
