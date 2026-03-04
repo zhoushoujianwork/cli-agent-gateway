@@ -99,9 +99,14 @@ def main() -> None:
     )
 
     if cfg.channel_type == "dingtalk":
-        channel = DingTalkStreamChannelAdapter(send_cmd=cfg.send_cmd)
+        channel = DingTalkStreamChannelAdapter(send_cmd=cfg.send_cmd, run_cwd=str(repo_root))
     else:
-        channel = CommandChannelAdapter(fetch_cmd=cfg.fetch_cmd, send_cmd=cfg.send_cmd, channel_id=cfg.channel_type)
+        channel = CommandChannelAdapter(
+            fetch_cmd=cfg.fetch_cmd,
+            send_cmd=cfg.send_cmd,
+            channel_id=cfg.channel_type,
+            run_cwd=str(repo_root),
+        )
     agent = ACPStdioAgentAdapter(
         command=cfg.acp_agent_cmd,
         cwd=str(cfg.workdir),

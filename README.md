@@ -65,7 +65,7 @@ make build-macos-gui-app
 构建时会先尝试关闭旧版 GUI App，成功后自动打开新版 App。
 
 该 GUI App 提供按钮：
-- 顶部主操作区：`Start` / `Stop` / `Open Logs`（紧邻运行状态）
+- 顶部主操作区：`Start` / `Stop` / `Restart` / `Open Logs`（紧邻运行状态）
 - `Config` 页面：统一修改配置（含 `Channel` 切换）与 `Health Board` 检查/修复
 - `Sessions` 面板：按会话展示最近聊天信息（来自 `state.json + interactions.jsonl`）
 - 支持 `Delete Selected` / `Delete All` 删除会话映射

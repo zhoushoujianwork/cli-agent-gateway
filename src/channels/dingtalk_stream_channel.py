@@ -85,9 +85,10 @@ def _should_keep(node: dict[str, Any]) -> bool:
 class DingTalkStreamChannelAdapter:
     channel_id = "dingtalk"
 
-    def __init__(self, send_cmd: str, send_timeout_sec: int = 120):
+    def __init__(self, send_cmd: str, send_timeout_sec: int = 120, run_cwd: str | None = None):
         self.send_cmd = send_cmd
         self.send_timeout_sec = send_timeout_sec
+        self.run_cwd = _sanitize(run_cwd)
         self._inbox: deque[InboundMessage] = deque()
         self._lock = threading.Lock()
         self._started = False
@@ -222,12 +223,14 @@ class DingTalkStreamChannelAdapter:
         return items
 
     def _run(self, cmd: str, *, env: dict[str, str] | None = None, timeout_sec: int = 60) -> tuple[int, str, str]:
+        run_cwd = self.run_cwd or "/"
         proc = subprocess.run(
             cmd,
             shell=True,
             text=True,
             capture_output=True,
             env=env,
+            cwd=run_cwd,
             timeout=timeout_sec,
         )
         return proc.returncode, proc.stdout, proc.stderr

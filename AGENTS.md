@@ -75,22 +75,23 @@ Run these checks before every commit:
 
 If any sensitive value is found, remove it from code/history before commit.
 
-## Branch Rule for New Features
+## Worktree Rule for New Features
 
-- If the user asks for a new feature, start the work on a new git branch first.
-- Never implement new features directly on `main`.
-- Branch names must use the `codex/` prefix.
+- If the user asks for a new feature, start from a new git worktree.
+- Create the worktree from a base branch (normally `main`) before coding.
+- Use a `codex/*` branch name inside that worktree.
 - Recommended format: `codex/feat/<short-topic>` (example: `codex/feat/add-dingtalk-retry`).
-- Before opening PR, rebase or merge latest `main` and resolve conflicts.
+- Do not code new features directly in the primary workspace checkout.
+- Before opening PR, sync with latest base branch and resolve conflicts.
 
 ## Multi-Agent Collaboration Rules
 
-- One task, one branch, one owner agent.
+- One task, one worktree, one owner agent.
 - Split parallel work by module boundaries (`channels/`, `core/`, `agents/`, `infra/`, `docs/`) to reduce conflicts.
 - Do not edit the same file from multiple agents at the same time unless explicitly coordinated.
 - Each agent should publish a short plan before coding: scope, touched files, risks.
 - Commit in small, reviewable units; avoid mixed-purpose commits.
-- Synchronize with `main` frequently for long-running branches.
+- Synchronize with base branch frequently for long-running worktrees.
 - If conflicts occur, prefer keeping behavior-compatible code and document tradeoffs in PR notes.
 - Before merge, run validation checklist and secret hygiene checks again.
 
