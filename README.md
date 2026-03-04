@@ -36,6 +36,56 @@ make run
 - 若已有实例运行，新进程会直接退出并打印已运行实例的 PID/启动时间；
 - 可执行 `make status` 查看当前运行状态。
 
+## macOS 桌面启动器（Phase 6）
+
+可一键生成可点击启动的 macOS `.app`：
+
+```bash
+make create-macos-launcher
+```
+
+默认会在 `~/Desktop` 生成 `CLI Agent Gateway.app`，点击后会打开 Terminal 并执行网关启动命令。
+
+也可按需定制：
+
+```bash
+./scripts/create_macos_launcher.sh \
+  --output-dir "$HOME/Applications" \
+  --app-name "CLI Agent Gateway (Prod)" \
+  --workdir "/path/to/your/workdir"
+```
+
+如果你要“真正桌面 GUI（非 Terminal）”版本，可构建原生 SwiftUI App：
+
+```bash
+make build-macos-gui-app
+```
+
+默认输出：`~/Desktop/CLI Agent Gateway GUI.app`
+构建时会先尝试关闭旧版 GUI App，成功后自动打开新版 App。
+
+该 GUI App 提供按钮：
+- 顶部主操作区：`Start` / `Stop` / `Open Logs`（紧邻运行状态）
+- `Config` 页面：统一修改配置（含 `Channel` 切换）与 `Health Board` 检查/修复
+- `Sessions` 面板：按会话展示最近聊天信息（来自 `state.json + interactions.jsonl`）
+- 支持 `Delete Selected` / `Delete All` 删除会话映射
+- 点击某个会话后，下方 `Chat` 区会展示该会话的问答历史（用户提问 + 助手回复）
+- 内置会话命令提醒：`/new` 开新会话，`/clear` 清空当前会话映射
+- 点击助手回复气泡可查看 `AI Process Detail` 时间线（ACP 阶段、工具调用、完成/错误事件）
+
+聊天命令（CAG 网关内置）：
+- `/new`：清空当前会话映射并开启新会话
+- `/new <你的问题>`：开启新会话并立刻以该问题继续
+- `/clear`：清空当前会话映射（下一条消息会新建会话）
+
+可选参数（直接调用脚本）：
+- `--no-kill-old`：构建前不关闭旧 App
+- `--no-open`：构建后不自动打开
+- `--icon-svg /path/to/logo.svg`：用 SVG 自动生成 macOS 图标并写入 `.app`
+
+默认 SVG 图标文件：
+- `macos/CLIApp/Assets/AppLogo.svg`
+
 如果 `.env` 缺失，程序会自动进入交互式初始化：
 - 默认只询问必要项（例如 iMessage 的手机号/AppleID/Chat ID）；
 - 其余配置自动探测并自动填充；

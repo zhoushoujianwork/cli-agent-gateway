@@ -30,3 +30,9 @@
 - Add native Telegram/Discord/Slack adapters.
 - Keep message contract stable across channels.
 - Add channel-specific rate limit and threading strategies.
+
+## Phase 6: Desktop app launcher (macOS)
+
+- Provide a one-command launcher generator that builds a clickable `.app`.
+- Default launcher should open Terminal and start gateway with repo-local settings.
+- Allow overriding output directory, app name, and workdir for multi-env users.
