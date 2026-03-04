@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="CAG logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0A1322"/>
+      <stop offset="100%" stop-color="#16345E"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#63E1FF"/>
+      <stop offset="100%" stop-color="#43CC74"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="96" y="96" width="832" height="832" rx="190" fill="url(#bg)"/>
+  <path d="M220 700C360 540 520 520 700 360" stroke="url(#accent)" stroke-width="42" fill="none" stroke-linecap="round" opacity="0.9"/>
+
+  <!-- C -->
+  <path d="M360 360c-70 0-122 58-122 152s52 152 122 152c36 0 66-10 92-34" fill="none" stroke="#F5FAFF" stroke-width="64" stroke-linecap="round"/>
+
+  <!-- A -->
+  <path d="M500 664l84-304h90l84 304h-92l-16-60h-84l-16 60zM609 534h48l-24-89z" fill="#F5FAFF"/>
+
+  <!-- G -->
+  <path d="M770 360c-75 0-128 58-128 152s53 152 128 152c45 0 79-13 108-44v-88h-102v64h34v0c-11 6-23 8-38 8-38 0-66-35-66-92 0-55 30-92 74-92 27 0 47 10 67 28l45-53c-34-26-72-39-122-39z" fill="#F5FAFF"/>
+</svg>

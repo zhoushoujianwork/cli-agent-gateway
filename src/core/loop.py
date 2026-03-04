@@ -161,6 +161,17 @@ class GatewayLoop:
             return "No running tasks for you right now."
         return "Your running tasks:\n" + "\n".join(rows)
 
+    def _parse_session_command(self, text: str) -> tuple[str | None, str]:
+        raw = (text or "").strip()
+        if not raw.startswith("/"):
+            return None, raw
+        parts = raw.split(None, 1)
+        cmd = parts[0].lower()
+        payload = parts[1].strip() if len(parts) > 1 else ""
+        if cmd in {"/clear", "/new"}:
+            return cmd, payload
+        return None, raw
+
     def _is_greeting(self, text: str) -> bool:
         t = (text or "").strip().lower()
         if not t:
@@ -384,6 +395,44 @@ class GatewayLoop:
                     self.interaction_log.append("inbound_skipped", msg_id=msg.id, sender=msg.sender, reason="unauthorized")
                     continue
 
+                session_key = build_session_key(msg.channel, msg.sender, msg.thread_id)
+                cmd, payload = self._parse_session_command(msg.text)
+                if cmd == "/clear":
+                    existed = self.state.session_map.pop(session_key, None)
+                    self._persist()
+                    confirm = "会话已清空，下条消息将开启新会话。"
+                    if not existed:
+                        confirm = "当前没有可清空的会话；下条消息会新建会话。"
+                    self.channel.send(confirm, to=reply_to, message_id=msg.id)
+                    self.interaction_log.append(
+                        "session_command",
+                        msg_id=msg.id,
+                        sender=msg.sender,
+                        command=cmd,
+                        session_key=session_key,
+                        had_session=int(bool(existed)),
+                    )
+                    self._mark_processed(msg.id)
+                    continue
+
+                if cmd == "/new":
+                    old = self.state.session_map.pop(session_key, None)
+                    self._persist()
+                    self.interaction_log.append(
+                        "session_command",
+                        msg_id=msg.id,
+                        sender=msg.sender,
+                        command=cmd,
+                        session_key=session_key,
+                        had_session=int(bool(old)),
+                        inline_prompt=int(bool(payload)),
+                    )
+                    if not payload:
+                        self.channel.send("已切换到新会话。请发送你的新问题。", to=reply_to, message_id=msg.id)
+                        self._mark_processed(msg.id)
+                        continue
+                    msg.text = payload
+
                 human_mode = self._dingtalk_human_mode(msg.channel)
                 self._trace("routing_mode", msg_id=msg.id, human_mode=int(human_mode))
                 if not human_mode:
@@ -394,7 +443,6 @@ class GatewayLoop:
                     )
                     self._log(f"ack sent id={msg.id} to={reply_to}")
 
-                session_key = build_session_key(msg.channel, msg.sender, msg.thread_id)
                 session_id = self.state.session_map.get(session_key)
                 self._trace(
                     "session_resolved",
