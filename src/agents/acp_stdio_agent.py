@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from agents.base import PermissionHandler, ProgressCallback
+from agents.base import DebugCallback, PermissionHandler, ProgressCallback
 from core.contracts import TaskRequest, TaskResult
 from infra.jsonrpc_stdio import JsonRpcNotification, JsonRpcStdioClient
 
@@ -24,6 +24,14 @@ class ACPStdioAgentAdapter:
         timeout_sec: int,
         permission_policy: str = "auto_allow",
         methods: ACPMethodConfig | None = None,
+        initialize_timeout_sec: int = 30,
+        session_new_timeout_sec: int = 30,
+        session_new_retries: int = 0,
+        session_new_retry_backoff_sec: float = 1.0,
+        debug_trace_enabled: bool = False,
+        debug_acp_event_details: bool = False,
+        debug_acp_log_chunks: bool = False,
+        debug_payload_chars: int = 280,
     ):
         self.command = command
         self.cwd = cwd
@@ -33,35 +41,98 @@ class ACPStdioAgentAdapter:
         self.client = JsonRpcStdioClient(command=self.command, cwd=self.cwd)
         self._initialized = False
         self.idle_finish_sec = 12
+        self.prompt_recover_retries = 1
+        self.initialize_timeout_sec = max(1, int(initialize_timeout_sec))
+        self.session_new_timeout_sec = max(1, int(session_new_timeout_sec))
+        self.session_new_retries = max(0, int(session_new_retries))
+        self.session_new_retry_backoff_sec = max(0.0, float(session_new_retry_backoff_sec))
+        self.debug_trace_enabled = bool(debug_trace_enabled)
+        self.debug_acp_event_details = bool(debug_acp_event_details)
+        self.debug_acp_log_chunks = bool(debug_acp_log_chunks)
+        self.debug_payload_chars = max(80, int(debug_payload_chars))
 
     def _normalize_text(self, text: str) -> str:
         return " ".join(text.replace("\r", " ").replace("\n", " ").split()).strip()
 
-    def _create_session(self, request: TaskRequest) -> str | None:
-        created = self.client.send_request(
-            self.methods.session_new,
-            {
-                "cwd": self.cwd,
-                "mcpServers": [],
-                "session": {
-                    "idempotency_key": request.session_key,
-                    "metadata": {
-                        "channel": request.channel,
-                        "sender": request.sender,
-                        "thread_id": request.thread_id or "",
-                    },
+    def _debug(self, on_debug: DebugCallback | None, event: str, **data: Any) -> None:
+        if on_debug is None:
+            return
+        if not self.debug_trace_enabled and event in {
+            "initialize_start",
+            "initialize_ok",
+            "session_new_start",
+            "session_new_ok",
+            "session_new_timeout",
+            "execute_start",
+            "prompt_start",
+            "prompt_error",
+            "prompt_retry_with_min_metadata",
+            "prompt_restart",
+            "server_request",
+            "client_restart_start",
+            "client_restart_ok",
+            "execute_done",
+        }:
+            return
+        safe: dict[str, Any] = {}
+        for k, v in data.items():
+            if isinstance(v, str):
+                safe[k] = v if len(v) <= self.debug_payload_chars else v[: self.debug_payload_chars - 3] + "..."
+            else:
+                safe[k] = v
+        on_debug(event, safe)
+
+    def _create_session(self, request: TaskRequest, on_debug: DebugCallback | None = None) -> str | None:
+        payload = {
+            "cwd": self.cwd,
+            "mcpServers": [],
+            "session": {
+                "idempotency_key": request.session_key,
+                "metadata": {
+                    "channel": request.channel,
+                    "sender": request.sender,
+                    "thread_id": request.thread_id or "",
                 },
             },
-            timeout_sec=30,
-        )
-        if isinstance(created, dict):
-            return str(created.get("sessionId", created.get("session_id", created.get("id", "")))).strip() or None
+        }
+        last_exc: Exception | None = None
+        for attempt in range(self.session_new_retries + 1):
+            try:
+                self._debug(
+                    on_debug,
+                    "session_new_start",
+                    attempt=attempt + 1,
+                    max_attempts=self.session_new_retries + 1,
+                    timeout_sec=self.session_new_timeout_sec,
+                    session_key=request.session_key,
+                )
+                created = self.client.send_request(
+                    self.methods.session_new,
+                    payload,
+                    timeout_sec=self.session_new_timeout_sec,
+                )
+                if isinstance(created, dict):
+                    session_id = str(created.get("sessionId", created.get("session_id", created.get("id", "")))).strip() or None
+                    self._debug(on_debug, "session_new_ok", session_id=session_id or "", attempt=attempt + 1)
+                    return session_id
+                self._debug(on_debug, "session_new_ok", session_id="", attempt=attempt + 1)
+                return None
+            except TimeoutError as exc:
+                last_exc = exc
+                self._debug(on_debug, "session_new_timeout", attempt=attempt + 1, error=str(exc))
+                if attempt >= self.session_new_retries:
+                    break
+                if self.session_new_retry_backoff_sec > 0:
+                    time.sleep(self.session_new_retry_backoff_sec * (2**attempt))
+        if last_exc is not None:
+            raise last_exc
         return None
 
-    def _ensure_ready(self) -> None:
+    def _ensure_ready(self, on_debug: DebugCallback | None = None) -> None:
         self.client.start()
         if self._initialized:
             return
+        self._debug(on_debug, "initialize_start", timeout_sec=self.initialize_timeout_sec)
         self.client.send_request(
             self.methods.initialize,
             {
@@ -72,9 +143,18 @@ class ACPStdioAgentAdapter:
                     "version": "0.2.0",
                 },
             },
-            timeout_sec=30,
+            timeout_sec=self.initialize_timeout_sec,
         )
         self._initialized = True
+        self._debug(on_debug, "initialize_ok")
+
+    def _restart_client(self, on_debug: DebugCallback | None = None) -> None:
+        self._debug(on_debug, "client_restart_start")
+        self.client.close()
+        self.client = JsonRpcStdioClient(command=self.command, cwd=self.cwd)
+        self._initialized = False
+        self._ensure_ready(on_debug=on_debug)
+        self._debug(on_debug, "client_restart_ok")
 
     def _permission_response(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if self.permission_policy == "auto_deny":
@@ -125,14 +205,27 @@ class ACPStdioAgentAdapter:
             return "error"
         return "ok"
 
-    def execute(self, request: TaskRequest, on_progress: ProgressCallback | None = None) -> TaskResult:
-        self._ensure_ready()
+    def execute(
+        self,
+        request: TaskRequest,
+        on_progress: ProgressCallback | None = None,
+        on_debug: DebugCallback | None = None,
+    ) -> TaskResult:
+        self._ensure_ready(on_debug=on_debug)
         start = time.time()
         deadline = start + self.timeout_sec
 
         session_id = request.session_id
         if not session_id:
-            session_id = self._create_session(request)
+            session_id = self._create_session(request, on_debug=on_debug)
+        self._debug(
+            on_debug,
+            "execute_start",
+            trace_id=request.trace_id,
+            session_key=request.session_key,
+            session_id=session_id or "",
+            timeout_sec=self.timeout_sec,
+        )
 
         raw_events: list[dict[str, Any]] = []
         highlights: list[str] = []
@@ -150,6 +243,9 @@ class ACPStdioAgentAdapter:
             "metadata": request.metadata,
         }
         prompt_request_id = self.client.start_request(self.methods.session_prompt, prompt_params)
+        self._debug(on_debug, "prompt_start", session_id=session_id or "", request_id=prompt_request_id)
+        prompt_recover_count = 0
+        prompt_metadata_fallback_used = False
 
         final_status = "timeout"
         final_summary = "任务超时，未收到终态事件。"
@@ -163,11 +259,39 @@ class ACPStdioAgentAdapter:
                 last_event_at = time.time()
                 if prompt_response.error is not None:
                     err_text = str(prompt_response.error)
-                    if "Resource not found" in err_text:
-                        session_id = self._create_session(request)
+                    recoverable = (
+                        "resource not found" in err_text.lower()
+                        or "failed to deserialize response" in err_text.lower()
+                    )
+                    self._debug(
+                        on_debug,
+                        "prompt_error",
+                        request_id=prompt_request_id,
+                        recoverable=recoverable,
+                        error=err_text,
+                    )
+                    if recoverable and prompt_recover_count < self.prompt_recover_retries:
+                        prompt_recover_count += 1
+                        self._restart_client(on_debug=on_debug)
+                        if not prompt_metadata_fallback_used:
+                            prompt_params["metadata"] = {
+                                "received_ts": request.metadata.get("received_ts", ""),
+                                "user_profile": request.metadata.get("user_profile", {}),
+                            }
+                            prompt_metadata_fallback_used = True
+                        self._debug(on_debug, "prompt_retry_with_min_metadata", retry=prompt_recover_count)
+                        session_id = self._create_session(request, on_debug=on_debug)
                         prompt_params["sessionId"] = session_id
                         prompt_request_id = self.client.start_request(self.methods.session_prompt, prompt_params)
+                        self._debug(on_debug, "prompt_restart", request_id=prompt_request_id, session_id=session_id or "")
                         continue
+                    stderr_lines = self.client.drain_stderr()
+                    stderr_tail = stderr_lines[-1] if stderr_lines else ""
+                    if stderr_tail:
+                        raise RuntimeError(
+                            f"jsonrpc error method={self.methods.session_prompt} error={prompt_response.error} "
+                            f"agent_stderr={stderr_tail}"
+                        )
                     raise RuntimeError(f"jsonrpc error method={self.methods.session_prompt} error={prompt_response.error}")
                 if isinstance(prompt_response.result, dict):
                     text = self._extract_text(prompt_response.result)
@@ -184,6 +308,7 @@ class ACPStdioAgentAdapter:
             if server_req is not None:
                 last_event_at = time.time()
                 try:
+                    self._debug(on_debug, "server_request", method=server_req.method, request_id=server_req.id)
                     if "request_permission" in server_req.method.lower():
                         result = self._permission_response(server_req.method, server_req.params)
                         self.client.send_response(server_req.id, result=result)
@@ -219,6 +344,21 @@ class ACPStdioAgentAdapter:
             update = event.params.get("update", {}) if isinstance(event.params, dict) else {}
             if isinstance(update, dict):
                 su = str(update.get("sessionUpdate", "")).lower().strip()
+                should_emit_session_update = (
+                    su in {"tool_call", "tool_call_update"} or (
+                        self.debug_acp_event_details and (self.debug_acp_log_chunks or su != "agent_message_chunk")
+                    )
+                )
+                if should_emit_session_update:
+                    self._debug(
+                        on_debug,
+                        "session_update",
+                        method=event.method,
+                        session_update=su,
+                        status=str(update.get("status", "")),
+                        tool_call_id=str(update.get("toolCallId", "")),
+                        title=str(update.get("title", "")),
+                    )
                 if su == "tool_call_update" and str(update.get("status", "")).lower().strip() == "completed":
                     saw_tool_completed = True
                 if su == "agent_message_chunk":
@@ -255,6 +395,15 @@ class ACPStdioAgentAdapter:
             stderr_lines = self.client.drain_stderr()
             if stderr_lines:
                 final_summary = f"任务超时，agent stderr: {stderr_lines[-1]}"
+        self._debug(
+            on_debug,
+            "execute_done",
+            trace_id=request.trace_id,
+            status=final_status,
+            elapsed_sec=elapsed,
+            session_id=session_id or "",
+            raw_events=len(raw_events),
+        )
 
         return TaskResult(
             trace_id=request.trace_id,

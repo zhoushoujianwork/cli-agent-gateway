@@ -34,8 +34,20 @@ def _log_startup(cfg: AppConfig) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"[{now}] startup channel={cfg.channel_type} workdir={cfg.workdir}")
     print(f"[{now}] startup acp_cmd={cfg.acp_agent_cmd} permission_policy={cfg.permission_policy}")
+    print(
+        f"[{now}] startup acp_timeouts init={cfg.acp_initialize_timeout_sec}s "
+        f"session_new={cfg.acp_session_new_timeout_sec}s retries={cfg.acp_session_new_retries} "
+        f"backoff={cfg.acp_session_new_retry_backoff_sec}s"
+    )
     print(f"[{now}] startup fetch_cmd={cfg.fetch_cmd}")
     print(f"[{now}] startup send_cmd={cfg.send_cmd}")
+    print(f"[{now}] startup show_tool_trace={int(cfg.show_tool_trace)}")
+    print(
+        f"[{now}] startup debug trace_chain={int(cfg.debug_trace_chain)} "
+        f"acp_events={int(cfg.debug_acp_events)} acp_log_chunks={int(cfg.debug_acp_log_chunks)} "
+        f"acp_payload_chars={cfg.debug_acp_event_payload_chars} "
+        f"tool_progress_notify={int(cfg.tool_progress_notify_enabled)}"
+    )
 
     if cfg.channel_type == "dingtalk":
         send_mode = os.getenv("DINGTALK_SEND_MODE", "api").strip() or "api"
@@ -95,6 +107,14 @@ def main() -> None:
         cwd=str(cfg.workdir),
         timeout_sec=cfg.timeout_sec,
         permission_policy=cfg.permission_policy,
+        initialize_timeout_sec=cfg.acp_initialize_timeout_sec,
+        session_new_timeout_sec=cfg.acp_session_new_timeout_sec,
+        session_new_retries=cfg.acp_session_new_retries,
+        session_new_retry_backoff_sec=cfg.acp_session_new_retry_backoff_sec,
+        debug_trace_enabled=cfg.debug_trace_chain,
+        debug_acp_event_details=cfg.debug_acp_events,
+        debug_acp_log_chunks=cfg.debug_acp_log_chunks,
+        debug_payload_chars=cfg.debug_acp_event_payload_chars,
     )
     state_store = JsonStateStore(cfg.state_file)
     interaction_log = InteractionLog(cfg.interaction_log_file)
@@ -114,6 +134,10 @@ def main() -> None:
         reply_style_enabled=cfg.reply_style_enabled,
         reply_style_prompt=cfg.reply_style_prompt,
         debug_user_profile=cfg.debug_user_profile,
+        show_tool_trace=cfg.show_tool_trace,
+        debug_trace_chain=cfg.debug_trace_chain,
+        debug_acp_events=cfg.debug_acp_events,
+        tool_progress_notify_enabled=cfg.tool_progress_notify_enabled,
     )
     try:
         loop.run_forever()

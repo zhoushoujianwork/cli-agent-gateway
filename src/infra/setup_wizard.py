@@ -120,11 +120,20 @@ def _detect_defaults(repo_root: Path, workdir_arg: str) -> dict[str, str]:
     defaults["POLL_INTERVAL_SEC"] = "5"
     defaults["AGENT_TIMEOUT_SEC"] = "1800"
     defaults["ACP_PERMISSION_POLICY"] = "auto_allow"
+    defaults["ACP_INITIALIZE_TIMEOUT_SEC"] = "30"
+    defaults["ACP_SESSION_NEW_TIMEOUT_SEC"] = "90"
+    defaults["ACP_SESSION_NEW_RETRIES"] = "2"
+    defaults["ACP_SESSION_NEW_RETRY_BACKOFF_SEC"] = "1"
     defaults["PROCESS_ONLY_LATEST"] = "0"
     defaults["PROGRESS_NOTIFY_INTERVAL_SEC"] = "60"
     defaults["SMS_REPLY_MAX_CHARS"] = "8000"
     defaults["REPLY_STYLE_ENABLED"] = "1"
     defaults["DINGTALK_DEBUG_USER_PROFILE"] = "0"
+    defaults["DEBUG_TRACE_CHAIN"] = "0"
+    defaults["DEBUG_ACP_EVENTS"] = "0"
+    defaults["DEBUG_ACP_LOG_CHUNKS"] = "0"
+    defaults["DEBUG_ACP_EVENT_PAYLOAD_CHARS"] = "280"
+    defaults["TOOL_PROGRESS_NOTIFY_ENABLED"] = "1"
 
     dingtalk_script = repo_root / "src/channels/dingtalk.py"
     defaults["SMS_FETCH_CMD"] = "builtin:dingtalk-stream"
@@ -179,9 +188,30 @@ def _advanced_fields(channel: str, defaults: dict[str, str]) -> list[PromptField
         PromptField("LOCK_FILE", "单实例锁文件", defaults.get("LOCK_FILE")),
         PromptField("ACP_AGENT_CMD", "ACP 命令", defaults.get("ACP_AGENT_CMD")),
         PromptField("ACP_PERMISSION_POLICY", "权限策略", defaults.get("ACP_PERMISSION_POLICY")),
+        PromptField("ACP_INITIALIZE_TIMEOUT_SEC", "ACP initialize 超时秒数", defaults.get("ACP_INITIALIZE_TIMEOUT_SEC")),
+        PromptField("ACP_SESSION_NEW_TIMEOUT_SEC", "ACP session/new 超时秒数", defaults.get("ACP_SESSION_NEW_TIMEOUT_SEC")),
+        PromptField("ACP_SESSION_NEW_RETRIES", "ACP session/new 重试次数", defaults.get("ACP_SESSION_NEW_RETRIES")),
+        PromptField(
+            "ACP_SESSION_NEW_RETRY_BACKOFF_SEC",
+            "ACP session/new 重试退避秒数",
+            defaults.get("ACP_SESSION_NEW_RETRY_BACKOFF_SEC"),
+        ),
         PromptField("AGENT_TIMEOUT_SEC", "Agent 超时秒数", defaults.get("AGENT_TIMEOUT_SEC")),
         PromptField("POLL_INTERVAL_SEC", "轮询间隔秒数", defaults.get("POLL_INTERVAL_SEC")),
         PromptField("DINGTALK_DEBUG_USER_PROFILE", "打印用户画像调试日志(0/1)", defaults.get("DINGTALK_DEBUG_USER_PROFILE")),
+        PromptField("DEBUG_TRACE_CHAIN", "打印消息全链路 trace(0/1)", defaults.get("DEBUG_TRACE_CHAIN")),
+        PromptField("DEBUG_ACP_EVENTS", "打印 ACP 行为事件(0/1)", defaults.get("DEBUG_ACP_EVENTS")),
+        PromptField("DEBUG_ACP_LOG_CHUNKS", "打印 agent_message_chunk 事件(0/1)", defaults.get("DEBUG_ACP_LOG_CHUNKS")),
+        PromptField(
+            "DEBUG_ACP_EVENT_PAYLOAD_CHARS",
+            "ACP 调试字段最大长度",
+            defaults.get("DEBUG_ACP_EVENT_PAYLOAD_CHARS"),
+        ),
+        PromptField(
+            "TOOL_PROGRESS_NOTIFY_ENABLED",
+            "工具调用进度通知给用户(0/1)",
+            defaults.get("TOOL_PROGRESS_NOTIFY_ENABLED"),
+        ),
     ]
 
     if channel == "imessage":
@@ -224,6 +254,10 @@ def _allowed_keys_for_channel(channel: str) -> set[str]:
         "CODEX_WORKDIR",
         "ACP_AGENT_CMD",
         "ACP_PERMISSION_POLICY",
+        "ACP_INITIALIZE_TIMEOUT_SEC",
+        "ACP_SESSION_NEW_TIMEOUT_SEC",
+        "ACP_SESSION_NEW_RETRIES",
+        "ACP_SESSION_NEW_RETRY_BACKOFF_SEC",
         "AGENT_TIMEOUT_SEC",
         "POLL_INTERVAL_SEC",
         "PROCESS_ONLY_LATEST",
@@ -236,6 +270,11 @@ def _allowed_keys_for_channel(channel: str) -> set[str]:
         "ALLOWED_FROM",
         "CHANNEL_TYPE",
         "DINGTALK_DEBUG_USER_PROFILE",
+        "DEBUG_TRACE_CHAIN",
+        "DEBUG_ACP_EVENTS",
+        "DEBUG_ACP_LOG_CHUNKS",
+        "DEBUG_ACP_EVENT_PAYLOAD_CHARS",
+        "TOOL_PROGRESS_NOTIFY_ENABLED",
     }
     if channel == "imessage":
         return common | {
