@@ -77,6 +77,26 @@ make config
 - 可通过 `.env` 控制：
   - `REPLY_STYLE_ENABLED=1|0`
   - `REPLY_STYLE_PROMPT=...`
+  - `SHOW_TOOL_TRACE=1|0`（是否在最终用户回复里附加工具使用摘要）
+- 无论 `SHOW_TOOL_TRACE` 是否开启，服务端日志与交互日志都会记录工具调用轨迹（用于排障与审计）。
+
+## ACP 超时与重试（建议）
+
+- `ACP_INITIALIZE_TIMEOUT_SEC`：`initialize` 超时（默认 `30`）
+- `ACP_SESSION_NEW_TIMEOUT_SEC`：`session/new` 超时（默认 `90`）
+- `ACP_SESSION_NEW_RETRIES`：`session/new` 超时重试次数（默认 `2`）
+- `ACP_SESSION_NEW_RETRY_BACKOFF_SEC`：重试退避秒数（默认 `1`，指数退避）
+- DingTalk 用户侧失败提示默认不回传内部异常细节；详细错误仅写入服务端日志与交互日志。
+
+## 全链路 Debug（问题排查）
+
+- `DEBUG_TRACE_CHAIN=1`：开启每条消息的全链路 trace（入站、鉴权、会话路由、ACP 执行、回包、错误）
+- `DEBUG_ACP_EVENTS=1`：输出 ACP 行为事件（initialize/session/new/session/prompt/恢复重试/session/update 摘要）
+- `DEBUG_ACP_LOG_CHUNKS=1`：输出高频 `agent_message_chunk` 事件（默认关闭，避免刷屏）
+- `DEBUG_ACP_EVENT_PAYLOAD_CHARS=280`：调试字段截断长度，避免日志过大
+- `TOOL_PROGRESS_NOTIFY_ENABLED=1`：每次工具调用开始/结束时，给用户推送进度消息
+- `SHOW_TOOL_TRACE=1`：是否在用户最终回复中展示工具摘要（不影响服务端日志）
+- 结构化调试事件会写入交互日志：`INTERACTION_LOG_FILE`（默认 `logs/interactions.jsonl`）
 
 ## 目录
 

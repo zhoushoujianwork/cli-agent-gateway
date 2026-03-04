@@ -38,9 +38,19 @@ class AppConfig:
     sms_reply_max_chars: int
     acp_agent_cmd: str
     permission_policy: str
+    acp_initialize_timeout_sec: int
+    acp_session_new_timeout_sec: int
+    acp_session_new_retries: int
+    acp_session_new_retry_backoff_sec: float
     reply_style_enabled: bool
     reply_style_prompt: str
     debug_user_profile: bool
+    show_tool_trace: bool
+    debug_trace_chain: bool
+    debug_acp_events: bool
+    debug_acp_log_chunks: bool
+    debug_acp_event_payload_chars: int
+    tool_progress_notify_enabled: bool
 
     @classmethod
     def from_env(cls, repo_root: Path, workdir_arg: str) -> "AppConfig":
@@ -92,6 +102,10 @@ class AppConfig:
             sms_reply_max_chars=int(os.getenv("SMS_REPLY_MAX_CHARS", "8000")),
             acp_agent_cmd=os.getenv("ACP_AGENT_CMD", "codex-acp").strip(),
             permission_policy=os.getenv("ACP_PERMISSION_POLICY", "auto_allow").strip(),
+            acp_initialize_timeout_sec=int(os.getenv("ACP_INITIALIZE_TIMEOUT_SEC", "30")),
+            acp_session_new_timeout_sec=int(os.getenv("ACP_SESSION_NEW_TIMEOUT_SEC", "90")),
+            acp_session_new_retries=int(os.getenv("ACP_SESSION_NEW_RETRIES", "2")),
+            acp_session_new_retry_backoff_sec=float(os.getenv("ACP_SESSION_NEW_RETRY_BACKOFF_SEC", "1")),
             reply_style_enabled=os.getenv("REPLY_STYLE_ENABLED", "1").strip() != "0",
             reply_style_prompt=os.getenv(
                 "REPLY_STYLE_PROMPT",
@@ -104,4 +118,10 @@ class AppConfig:
             debug_user_profile=(
                 os.getenv("DINGTALK_DEBUG_USER_PROFILE", os.getenv("DEBUG_USER_PROFILE", "0")).strip() != "0"
             ),
+            show_tool_trace=os.getenv("SHOW_TOOL_TRACE", "0").strip() != "0",
+            debug_trace_chain=os.getenv("DEBUG_TRACE_CHAIN", "0").strip() != "0",
+            debug_acp_events=os.getenv("DEBUG_ACP_EVENTS", "0").strip() != "0",
+            debug_acp_log_chunks=os.getenv("DEBUG_ACP_LOG_CHUNKS", "0").strip() != "0",
+            debug_acp_event_payload_chars=int(os.getenv("DEBUG_ACP_EVENT_PAYLOAD_CHARS", "280")),
+            tool_progress_notify_enabled=os.getenv("TOOL_PROGRESS_NOTIFY_ENABLED", "1").strip() != "0",
         )
