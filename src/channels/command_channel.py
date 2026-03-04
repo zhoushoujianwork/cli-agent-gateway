@@ -52,20 +52,24 @@ class CommandChannelAdapter:
         channel_id: str = "command",
         fetch_timeout_sec: int = 120,
         send_timeout_sec: int = 120,
+        run_cwd: str | None = None,
     ):
         self.fetch_cmd = fetch_cmd
         self.send_cmd = send_cmd
         self.channel_id = _sanitize(channel_id) or "command"
         self.fetch_timeout_sec = fetch_timeout_sec
         self.send_timeout_sec = send_timeout_sec
+        self.run_cwd = _sanitize(run_cwd)
 
     def _run(self, cmd: str, *, env: dict[str, str] | None = None, timeout_sec: int = 60) -> tuple[int, str, str]:
+        run_cwd = self.run_cwd or "/"
         proc = subprocess.run(
             cmd,
             shell=True,
             text=True,
             capture_output=True,
             env=env,
+            cwd=run_cwd,
             timeout=timeout_sec,
         )
         return proc.returncode, proc.stdout, proc.stderr

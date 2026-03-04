@@ -204,6 +204,18 @@ stop_gateway() {
   fi
 }
 
+restart_gateway() {
+  if is_running; then
+    stop_gateway
+    sleep 1
+    if is_running; then
+      show_ok "Restart failed: gateway is still running."
+      return 1
+    fi
+  fi
+  start_gateway
+}
+
 status_gateway() {
   local pid
   pid="$(get_lock_pid)"
@@ -219,7 +231,7 @@ open_logs() {
 }
 
 ACTION="$(osascript <<'APPLESCRIPT'
-set selected to button returned of (display dialog "Choose an action" buttons {"Cancel", "Status", "Stop", "Open Logs", "Start"} default button "Start" with title "CLI Agent Gateway")
+set selected to button returned of (display dialog "Choose an action" buttons {"Cancel", "Status", "Stop", "Restart", "Open Logs", "Start"} default button "Start" with title "CLI Agent Gateway")
 return selected
 APPLESCRIPT
 )"
@@ -230,6 +242,9 @@ case "$ACTION" in
     ;;
   "Stop")
     stop_gateway
+    ;;
+  "Restart")
+    restart_gateway
     ;;
   "Status")
     status_gateway

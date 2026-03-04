@@ -4,11 +4,7 @@ PYTHONPATH ?= src
 WORKDIR ?= $(shell if [ -f $(ENV_FILE) ]; then awk -F= '/^CODEX_WORKDIR=/{print $$2; exit}' $(ENV_FILE); fi)
 DEFAULT_WORKDIR := $(shell pwd)
 
-.PHONY: run config status create-macos-launcher create-macos-app build-macos-gui-app clean
-run:
-	@APP_WORKDIR="$(WORKDIR)"; \
-	if [ -z "$$APP_WORKDIR" ]; then APP_WORKDIR="$(DEFAULT_WORKDIR)"; fi; \
-	PYTHONPATH=$(PYTHONPATH) python3 -m app.main "$$APP_WORKDIR"
+.PHONY: config status create-macos-launcher create-macos-app build-macos-gui-app clean
 
 config:
 	@APP_WORKDIR="$(WORKDIR)"; \
@@ -18,21 +14,9 @@ config:
 status:
 	@PYTHONPATH=$(PYTHONPATH) python3 -c 'import os; from pathlib import Path; from infra.config import load_dotenv; from infra.process_lock import inspect_lock; root = Path(os.getcwd()); load_dotenv(root / ".env"); lock = Path(os.getenv("LOCK_FILE", str(root / ".cli_agent_gateway.lock"))).expanduser().resolve(); st = inspect_lock(lock); print(f"RUNNING pid={st.owner_pid} started_at={st.owner_started_at} lock={lock}" if st.locked else f"NOT_RUNNING lock={lock}")'
 
-.PHONY: create-macos-launcher
-create-macos-launcher:
-	@./scripts/create_macos_launcher.sh
-
-.PHONY: create-macos-app
-create-macos-app:
-	@./scripts/create_macos_launcher.sh --ui-mode gui --app-name "CLI Agent Gateway App"
-
 .PHONY: build-macos-gui-app
 build-macos-gui-app:
 	@./macos/CLIApp/scripts/build_macos_gui_app.sh
-
-.PHONY: run-dingtalk-stream
-run-dingtalk-stream:
-	@echo "DingTalk stream is built into 'make run' when CHANNEL_TYPE=dingtalk"
 
 clean:
 	rm -f .dingtalk_inbox.jsonl
