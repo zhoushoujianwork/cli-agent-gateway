@@ -30,3 +30,11 @@
 - Add native Telegram/Discord/Slack adapters.
 - Keep message contract stable across channels.
 - Add channel-specific rate limit and threading strategies.
+
+## Phase 6: Desktop app launcher (macOS)
+
+- Add a macOS app launcher for users who do not use CLI workflows.
+- Keep Python gateway as the backend service process (no protocol rewrite).
+- Add GUI controls for setup/start/stop/status and live log viewing.
+- Reuse single-instance lock and existing env/config semantics.
+- Package and document a `.app` distribution flow.
