@@ -112,6 +112,8 @@ final class GatewayController: ObservableObject {
     private let hiddenSessionsDefaultsPrefix = "gateway.hidden_sessions"
     private var hiddenSessionCutoffByKey: [String: String] = [:]
     private var localOverlayMessagesBySession: [String: [ChatMessage]] = [:]
+    private var lastLocalSendFingerprint: String = ""
+    private var lastLocalSendAt: Date = .distantPast
     private var didAutoStartOnLaunch = false
 
     init() throws {
@@ -703,11 +705,20 @@ final class GatewayController: ObservableObject {
     func sendLocalChat() {
         var text = localDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        guard !localSending else { return }
         guard let session = selectedSessionEntry() else {
             detailText = "Select a session first."
             return
         }
         let selectedSessionKey = session.sessionKey
+        let sendFingerprint = "\(selectedSessionKey)|\(text)"
+        let now = Date()
+        if sendFingerprint == lastLocalSendFingerprint, now.timeIntervalSince(lastLocalSendAt) < 1.2 {
+            detailText = "Ignored duplicate local send."
+            return
+        }
+        lastLocalSendFingerprint = sendFingerprint
+        lastLocalSendAt = now
         let baseSessionKey = session.sessionKey.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? session.sessionKey
 
         if let cmd = parseLocalCommand(text) {
