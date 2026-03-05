@@ -12,12 +12,17 @@ logs/
 .agent_gateway_reports/
 .cli_agent_gateway.lock
 .dingtalk_inbox.jsonl
+.agent_gateway.db
+.agent_gateway.log
 
 # Runtime state/logs/reports (legacy name)
 .sms_codex_state.json
 .sms_codex_interactions.jsonl
 .sms_codex_loop.lock
 .sms_codex_reports/
+
+# Build artifacts
+bin/
 
 # Temp files
 tmp/

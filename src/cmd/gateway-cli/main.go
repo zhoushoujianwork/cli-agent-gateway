@@ -113,6 +113,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  start               Start gateway runtime in background (dashboard-friendly)")
 	fmt.Fprintln(out, "  stop                Stop running gateway process by lock owner pid")
 	fmt.Fprintln(out, "  restart             Stop then start")
+	fmt.Fprintln(out, "  start --log-file    Optional server log path for background runtime")
 	fmt.Fprintln(out, "  config [workdir]    Generate/update .env using Go-native defaults")
 	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
@@ -274,7 +275,7 @@ func runStart(repoRoot string, args []string) int {
 		return 0
 	}
 
-	logPath := resolveLogPath(repoRoot)
+	logPath := resolveLogPath(repoRoot, args)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "create log dir failed: %v\n", err)
 		return 1
@@ -698,7 +699,16 @@ func printJSON(v any) {
 	_ = enc.Encode(v)
 }
 
-func resolveLogPath(repoRoot string) string {
+func resolveLogPath(repoRoot string, args []string) string {
+	if fv := strings.TrimSpace(flagValue(args, "--log-file")); fv != "" {
+		if !filepath.IsAbs(fv) {
+			fv = filepath.Join(repoRoot, fv)
+		}
+		if abs, err := filepath.Abs(fv); err == nil {
+			return abs
+		}
+		return fv
+	}
 	_ = envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env"))
 	v := strings.TrimSpace(os.Getenv("GATEWAY_LOG_FILE"))
 	if v == "" {
@@ -711,4 +721,18 @@ func resolveLogPath(repoRoot string) string {
 		return abs
 	}
 	return v
+}
+
+func flagValue(args []string, key string) string {
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == key && i+1 < len(args) {
+			return strings.TrimSpace(args[i+1])
+		}
+		prefix := key + "="
+		if strings.HasPrefix(arg, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(arg, prefix))
+		}
+	}
+	return ""
 }
