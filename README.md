@@ -76,3 +76,4 @@ cd src && go run ./cmd/gateway-cli send --to tester --text "hello" --json
 - `src/internal/channels/imessage/`：iMessage TODO 占位
 - `src/internal/storage/`：`localfile` / `sqlite` 后端
 - `docs/GO_BACKEND_ARCHITECTURE.md`：Go 后端架构方案
+- `docs/CLI_SPEC.md`：CLI 命令与 JSON 合约（冻结）
