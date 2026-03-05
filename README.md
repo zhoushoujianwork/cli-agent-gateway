@@ -5,7 +5,20 @@
 - 执行层统一走 ACP（JSON-RPC over stdio）。
 - 支持会话复用、权限请求桥接、任务报告落盘。
 
-## 当前实现
+## vNext 发布方向（Go-first）
+
+- 新版本后端将由 **Go** 实现并作为唯一主线运行时。
+- 控制面统一收敛到 CLI（配置、启停、状态、诊断、发送）。
+- macOS GUI 通过 CLI 管理网关与发消息。
+- 不以 Python 兼容为发布门槛。
+
+详细设计见：
+- `docs/ARCHITECTURE.md`
+- `docs/ROADMAP.md`
+- `docs/CLI_SPEC.md`
+- `docs/GUI_CLI_FLOW.md`
+
+## 当前仓库状态（过渡期）
 
 - `CommandChannelAdapter`：通过 `SMS_FETCH_CMD` / `SMS_SEND_CMD` 对接任意聊天入口。
 - 内置 iMessage adapter：`src/channels/imessage.py`（单文件，含 fetch/send 子命令）。
@@ -25,23 +38,17 @@
 PYTHONPATH=src python3 -m app.main /path/to/your/workdir
 ```
 
-或使用快捷命令：
-
-```bash
-make run
-```
-
 单实例保护：
 - 启动时会抢占 `LOCK_FILE`（默认 `.cli_agent_gateway.lock`）；
 - 若已有实例运行，新进程会直接退出并打印已运行实例的 PID/启动时间；
-- 可执行 `make status` 查看当前运行状态。
+- 可通过 lock 文件与日志判断当前运行状态。
 
 ## macOS 桌面启动器（Phase 6）
 
-可一键生成可点击启动的 macOS `.app`：
+可生成可点击启动的 macOS `.app`（Launcher）：
 
 ```bash
-make create-macos-launcher
+./scripts/create_macos_launcher.sh
 ```
 
 默认会在 `~/Desktop` 生成 `CLI Agent Gateway.app`，点击后会打开 Terminal 并执行网关启动命令。
@@ -58,7 +65,7 @@ make create-macos-launcher
 如果你要“真正桌面 GUI（非 Terminal）”版本，可构建原生 SwiftUI App：
 
 ```bash
-make build-macos-gui-app
+make app
 ```
 
 默认输出：`~/Desktop/CLI Agent Gateway GUI.app`
