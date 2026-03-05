@@ -96,6 +96,7 @@ Channel-specific checks:
 
 - `imessage`: checks `imsg` in `PATH`
 - `dingtalk`:
+  - ingress is fixed to DingTalk Stream
   - `webhook` mode requires `DINGTALK_BOT_WEBHOOK`
   - `api` mode checks `DINGTALK_APP_KEY/APP_SECRET/AGENT_ID`
 

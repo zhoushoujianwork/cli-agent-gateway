@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -60,6 +64,23 @@ type SendPayload struct {
 	Error     string `json:"error,omitempty"`
 }
 
+type SessionsItem struct {
+	SessionKey  string `json:"session_key"`
+	SessionID   string `json:"session_id"`
+	Channel     string `json:"channel"`
+	Sender      string `json:"sender"`
+	SenderName  string `json:"sender_name"`
+	ThreadID    string `json:"thread_id"`
+	LastMessage string `json:"last_message"`
+	LastTime    string `json:"last_time"`
+}
+
+type SessionsPayload struct {
+	OK     bool           `json:"ok"`
+	Action string         `json:"action"`
+	Items  []SessionsItem `json:"items"`
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage(os.Stderr)
@@ -94,6 +115,8 @@ func main() {
 		os.Exit(runDoctor(repoRoot, args))
 	case "send":
 		os.Exit(runSend(repoRoot, args))
+	case "sessions":
+		os.Exit(runSessions(repoRoot, args))
 	case "actions":
 		printActions(os.Stdout)
 	case "help", "-h", "--help":
@@ -115,6 +138,7 @@ func printActions(out *os.File) {
 	fmt.Fprintln(out, "health")
 	fmt.Fprintln(out, "doctor")
 	fmt.Fprintln(out, "send")
+	fmt.Fprintln(out, "sessions")
 	fmt.Fprintln(out, "actions")
 	fmt.Fprintln(out, "help")
 }
@@ -132,6 +156,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
 	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run)")
+	fmt.Fprintln(out, "  sessions [--json]   List sessions for GUI")
 	fmt.Fprintln(out, "  actions             Print supported action names")
 	fmt.Fprintln(out, "  help                Show this message")
 }
@@ -182,6 +207,7 @@ func runGoMain(repoRoot string, args []string) int {
 		"workdir":    cfg.Workdir,
 		"lock_file":  cfg.LockFile,
 		"channel":    cfg.ChannelType,
+		"log_file":   resolveLogPath(repoRoot, nil),
 		"started_at": time.Now().UTC().Format(time.RFC3339),
 	})
 
@@ -303,7 +329,7 @@ func runStart(repoRoot string, args []string) int {
 		return 0
 	}
 
-	logPath := resolveLogPath(repoRoot, args)
+	logPath := resolveFreshLogPath(repoRoot, args)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		if jsonOut {
 			printJSONActionError("start", "log_prepare_failed", err.Error())
@@ -312,7 +338,7 @@ func runStart(repoRoot string, args []string) int {
 		fmt.Fprintf(os.Stderr, "create log dir failed: %v\n", err)
 		return 1
 	}
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		if jsonOut {
 			printJSONActionError("start", "log_open_failed", err.Error())
@@ -336,6 +362,7 @@ func runStart(repoRoot string, args []string) int {
 	proc.Dir = repoRoot
 	proc.Stdout = logFile
 	proc.Stderr = logFile
+	proc.Env = append(os.Environ(), "GATEWAY_LOG_FILE="+logPath)
 	configureDetachedProcess(proc)
 
 	if err := proc.Start(); err != nil {
@@ -510,12 +537,12 @@ func runRestart(repoRoot string, args []string) int {
 		}
 	}
 
-	logPath := resolveLogPath(repoRoot, args)
+	logPath := resolveFreshLogPath(repoRoot, args)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		printJSONActionError("restart", "log_prepare_failed", err.Error())
 		return 1
 	}
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		printJSONActionError("restart", "log_open_failed", err.Error())
 		return 1
@@ -531,6 +558,7 @@ func runRestart(repoRoot string, args []string) int {
 	p.Dir = repoRoot
 	p.Stdout = logFile
 	p.Stderr = logFile
+	p.Env = append(os.Environ(), "GATEWAY_LOG_FILE="+logPath)
 	configureDetachedProcess(p)
 	if err := p.Start(); err != nil {
 		printJSONActionError("restart", "start_process_failed", err.Error())
@@ -603,6 +631,7 @@ func runSend(repoRoot string, args []string) int {
 	text := fs.String("text", "", "message text")
 	fileInput := fs.String("file", "", "read message body from file")
 	to := fs.String("to", "", "target receiver/user")
+	sessionWebhook := fs.String("session-webhook", "", "dingtalk session webhook URL for in-thread reply")
 	channelOverride := fs.String("channel", "", "channel override: command|dingtalk|imessage")
 	msgType := fs.String("msgtype", "text", "message type: text|markdown")
 	messageID := fs.String("message-id", "", "message id")
@@ -666,6 +695,25 @@ func runSend(repoRoot string, args []string) int {
 		}
 		_ = os.Unsetenv("DINGTALK_SEND_MSGTYPE")
 	}()
+	webhookURL := strings.TrimSpace(*sessionWebhook)
+	if webhookURL != "" {
+		origMode, hasOrigMode := os.LookupEnv("DINGTALK_SEND_MODE")
+		origWebhook, hasOrigWebhook := os.LookupEnv("DINGTALK_BOT_WEBHOOK")
+		_ = os.Setenv("DINGTALK_SEND_MODE", "webhook")
+		_ = os.Setenv("DINGTALK_BOT_WEBHOOK", webhookURL)
+		defer func() {
+			if hasOrigMode {
+				_ = os.Setenv("DINGTALK_SEND_MODE", origMode)
+			} else {
+				_ = os.Unsetenv("DINGTALK_SEND_MODE")
+			}
+			if hasOrigWebhook {
+				_ = os.Setenv("DINGTALK_BOT_WEBHOOK", origWebhook)
+			} else {
+				_ = os.Unsetenv("DINGTALK_BOT_WEBHOOK")
+			}
+		}()
+	}
 
 	cfg, err := config.Load(repoRoot, "")
 	if err != nil {
@@ -678,7 +726,7 @@ func runSend(repoRoot string, args []string) int {
 	if target == "" && strings.EqualFold(cfg.ChannelType, "dingtalk") {
 		target = strings.TrimSpace(cfg.DingTalkDefaultTo)
 	}
-	if target == "" {
+	if target == "" && !(strings.EqualFold(cfg.ChannelType, "dingtalk") && webhookURL != "") {
 		fmt.Fprintln(os.Stderr, "send requires --to (or DINGTALK_DEFAULT_TO_USER for dingtalk)")
 		return 2
 	}
@@ -691,7 +739,7 @@ func runSend(repoRoot string, args []string) int {
 	payload := SendPayload{
 		OK:        true,
 		Channel:   cfg.ChannelType,
-		To:        target,
+		To:        nonEmpty(target, "-"),
 		MessageID: msgID,
 		MsgType:   mt,
 		DryRun:    *dryRun,
@@ -727,12 +775,204 @@ func runSend(repoRoot string, args []string) int {
 	return 0
 }
 
+func runSessions(repoRoot string, args []string) int {
+	fs := flag.NewFlagSet("sessions", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	limit := fs.Int("limit", 200, "max session rows")
+	jsonOut := fs.Bool("json", false, "json output")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	cfg, err := config.Load(repoRoot, "")
+	if err != nil {
+		if *jsonOut {
+			printJSONActionError("sessions", "config_load_failed", err.Error())
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
+		return 1
+	}
+	items, err := collectSessions(cfg)
+	if err != nil {
+		if *jsonOut {
+			printJSONActionError("sessions", "collect_failed", err.Error())
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "sessions failed: %v\n", err)
+		return 1
+	}
+	if *limit > 0 && len(items) > *limit {
+		items = items[:*limit]
+	}
+	if *jsonOut {
+		printJSON(SessionsPayload{OK: true, Action: "sessions", Items: items})
+		return 0
+	}
+	for _, it := range items {
+		fmt.Printf("%s\t%s\t%s\t%s\n", it.LastTime, it.SenderName, it.Channel, it.LastMessage)
+	}
+	return 0
+}
+
+func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
+	type inbound struct {
+		msgID      string
+		sender     string
+		senderName string
+		channel    string
+		threadID   string
+		text       string
+		ts         string
+	}
+	inboundByMsg := map[string]inbound{}
+	sessionKeyByMsg := map[string]string{}
+	sessionIDByKey := map[string]string{}
+	lastByKey := map[string]SessionsItem{}
+
+	sessionMap := map[string]string{}
+	if raw, err := os.ReadFile(cfg.StateFile); err == nil && len(raw) > 0 {
+		var node map[string]any
+		if json.Unmarshal(raw, &node) == nil {
+			if m, ok := node["session_map"].(map[string]any); ok {
+				for k, v := range m {
+					sessionMap[k] = strings.TrimSpace(fmt.Sprint(v))
+				}
+			}
+		}
+	}
+
+	f, err := os.Open(cfg.InteractionLogFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []SessionsItem{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		kind := strings.TrimSpace(fmt.Sprint(rec["kind"]))
+		switch kind {
+		case "inbound_received":
+			msgID := strings.TrimSpace(fmt.Sprint(rec["msg_id"]))
+			if msgID == "" {
+				continue
+			}
+			profile, _ := rec["user_profile"].(map[string]any)
+			channel := strings.TrimSpace(fmt.Sprint(profile["channel"]))
+			threadID := strings.TrimSpace(fmt.Sprint(profile["thread_id"]))
+			senderName := strings.TrimSpace(fmt.Sprint(profile["sender_name"]))
+			sender := strings.TrimSpace(fmt.Sprint(rec["sender"]))
+			text := strings.TrimSpace(fmt.Sprint(rec["text"]))
+			ts := strings.TrimSpace(fmt.Sprint(rec["time"]))
+			in := inbound{
+				msgID:      msgID,
+				sender:     sender,
+				senderName: senderName,
+				channel:    channel,
+				threadID:   threadID,
+				text:       text,
+				ts:         ts,
+			}
+			inboundByMsg[msgID] = in
+			key := buildSessionKey(channel, sender, threadID)
+			sessionKeyByMsg[msgID] = key
+			prev, ok := lastByKey[key]
+			if !ok || ts >= prev.LastTime {
+				lastByKey[key] = SessionsItem{
+					SessionKey:  key,
+					SessionID:   "",
+					Channel:     nonEmpty(channel, "-"),
+					Sender:      nonEmpty(sender, "-"),
+					SenderName:  nonEmpty(senderName, nonEmpty(sender, "-")),
+					ThreadID:    nonEmpty(threadID, "-"),
+					LastMessage: nonEmpty(text, "(empty)"),
+					LastTime:    ts,
+				}
+			}
+		case "trace":
+			stage := strings.TrimSpace(fmt.Sprint(rec["stage"]))
+			if stage != "session_resolved" {
+				continue
+			}
+			msgID := strings.TrimSpace(fmt.Sprint(rec["msg_id"]))
+			key := strings.TrimSpace(fmt.Sprint(rec["session_key"]))
+			if msgID != "" && key != "" {
+				sessionKeyByMsg[msgID] = key
+			}
+			sid := strings.TrimSpace(fmt.Sprint(rec["session_id"]))
+			if key != "" && sid != "" {
+				sessionIDByKey[key] = sid
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+
+	for msgID, in := range inboundByMsg {
+		key := sessionKeyByMsg[msgID]
+		if key == "" {
+			key = buildSessionKey(in.channel, in.sender, in.threadID)
+		}
+		prev, ok := lastByKey[key]
+		if !ok || in.ts >= prev.LastTime {
+			lastByKey[key] = SessionsItem{
+				SessionKey:  key,
+				SessionID:   nonEmpty(sessionIDByKey[key], sessionMap[key]),
+				Channel:     nonEmpty(in.channel, "-"),
+				Sender:      nonEmpty(in.sender, "-"),
+				SenderName:  nonEmpty(in.senderName, nonEmpty(in.sender, "-")),
+				ThreadID:    nonEmpty(in.threadID, "-"),
+				LastMessage: nonEmpty(in.text, "(empty)"),
+				LastTime:    in.ts,
+			}
+		}
+	}
+	items := make([]SessionsItem, 0, len(lastByKey))
+	for _, it := range lastByKey {
+		if strings.TrimSpace(it.SessionID) == "" {
+			if sid, ok := sessionMap[it.SessionKey]; ok {
+				it.SessionID = sid
+			}
+		}
+		if strings.TrimSpace(it.SessionID) == "" {
+			it.SessionID = "-"
+		}
+		items = append(items, it)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].LastTime > items[j].LastTime
+	})
+	return items, nil
+}
+
+func buildSessionKey(channel, sender, threadID string) string {
+	raw := channel + "|" + sender + "|" + nonEmpty(threadID, "-")
+	sum := sha256.Sum256([]byte(raw))
+	return "sess_" + hex.EncodeToString(sum[:])[:24]
+}
+
+func nonEmpty(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
+}
+
 func buildChannelAdapter(cfg config.AppConfig) core.ChannelAdapter {
 	switch strings.ToLower(strings.TrimSpace(cfg.ChannelType)) {
 	case "dingtalk":
 		return dingtalk.NewAdapter(dingtalk.Options{
 			RepoRoot:              cfg.RepoRoot,
-			QueueFile:             cfg.DingTalkQueueFile,
 			FetchMaxEvents:        cfg.DingTalkFetchMax,
 			DMPolicy:              cfg.DingTalkDMPolicy,
 			GroupPolicy:           cfg.DingTalkGroupPolicy,
@@ -832,6 +1072,8 @@ func statusJSON(action string, p StatusPayload, cfg config.AppConfig, logPath st
 	}
 	if strings.TrimSpace(logPath) != "" {
 		out["log_file"] = logPath
+	} else if v, ok := p.Metadata["log_file"].(string); ok && strings.TrimSpace(v) != "" {
+		out["log_file"] = strings.TrimSpace(v)
 	}
 	if len(p.Metadata) > 0 {
 		out["metadata"] = p.Metadata
@@ -916,8 +1158,8 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 			add("imessage.send_cmd", true, "IMESSAGE_SEND_CMD configured", "")
 		}
 	case "dingtalk":
-		mode := strings.ToLower(strings.TrimSpace(cfg.DingTalkSendMode))
-		if mode == "webhook" {
+		sendMode := strings.ToLower(strings.TrimSpace(cfg.DingTalkSendMode))
+		if sendMode == "webhook" {
 			ok := strings.TrimSpace(cfg.DingTalkBotWebhook) != ""
 			add("dingtalk.webhook", ok, "requires DINGTALK_BOT_WEBHOOK", "set DINGTALK_BOT_WEBHOOK for webhook mode")
 		} else {
@@ -1074,7 +1316,7 @@ func resolveLogPath(repoRoot string, args []string) string {
 	_ = envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env"))
 	v := strings.TrimSpace(os.Getenv("GATEWAY_LOG_FILE"))
 	if v == "" {
-		v = filepath.Join(repoRoot, ".agent_gateway.log")
+		v = filepath.Join(repoRoot, "logs", ".agent_gateway.log")
 	}
 	if !filepath.IsAbs(v) {
 		v = filepath.Join(repoRoot, v)
@@ -1083,6 +1325,28 @@ func resolveLogPath(repoRoot string, args []string) string {
 		return abs
 	}
 	return v
+}
+
+func resolveFreshLogPath(repoRoot string, args []string) string {
+	base := resolveLogPath(repoRoot, args)
+	if strings.TrimSpace(flagValue(args, "--log-file")) != "" {
+		return base
+	}
+	return rotatedLogPath(base)
+}
+
+func rotatedLogPath(path string) string {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return p
+	}
+	ext := filepath.Ext(p)
+	base := strings.TrimSuffix(p, ext)
+	ts := time.Now().UTC().Format("20060102_150405")
+	if ext == "" {
+		return base + "_" + ts
+	}
+	return base + "_" + ts + ext
 }
 
 func flagValue(args []string, key string) string {

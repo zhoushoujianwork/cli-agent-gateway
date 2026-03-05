@@ -38,6 +38,16 @@
 - 提供迁移说明（安装、命令、配置变化）。
 - 建立回归测试与 smoke 检查清单。
 
+## R6: gRPC Control Plane (GoDo)
+
+- 新增 `gatewayd` gRPC 服务，承载控制面与可观测接口：
+  - lifecycle: start/stop/restart/status
+  - health/doctor
+  - sessions/log tail
+- `cag` 作为 gRPC 客户端（保留本地直连 fallback，渐进迁移）。
+- GUI 改为优先调用 gRPC，避免文件锁元数据轮询。
+- 数据面仍保留 ACP stdio，后续评估统一传输层。
+
 ## Branch Goal (codex/feat/init-go-cli-actions)
 
 - Step 1 complete: `gateway-cli run` now uses the Go-native gateway loop (legacy bridge removed).

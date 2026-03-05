@@ -40,7 +40,6 @@ type AppConfig struct {
 	IMessageSendCmd         string
 	IMessageFetchTimeoutSec int
 	IMessageSendTimeoutSec  int
-	DingTalkQueueFile       string
 	DingTalkFetchMax        int
 	DingTalkDMPolicy        string
 	DingTalkGroupPolicy     string
@@ -130,7 +129,6 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 		IMessageSendCmd:         strings.TrimSpace(getEnv("IMESSAGE_SEND_CMD", defaultSendCmd)),
 		IMessageFetchTimeoutSec: getEnvInt("IMESSAGE_FETCH_TIMEOUT_SEC", 30),
 		IMessageSendTimeoutSec:  getEnvInt("IMESSAGE_SEND_TIMEOUT_SEC", 30),
-		DingTalkQueueFile:       resolvePath(repoRoot, getEnv("DINGTALK_QUEUE_FILE", ".dingtalk_inbox.jsonl")),
 		DingTalkFetchMax:        getEnvInt("DINGTALK_FETCH_MAX_EVENTS", 30),
 		DingTalkDMPolicy:        strings.TrimSpace(getEnv("DINGTALK_DM_POLICY", "allowlist")),
 		DingTalkGroupPolicy:     strings.TrimSpace(getEnv("DINGTALK_GROUP_POLICY", "allowlist")),

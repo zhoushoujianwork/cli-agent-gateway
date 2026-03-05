@@ -2,11 +2,15 @@ module cli-agent-gateway
 
 go 1.24.0
 
-require modernc.org/sqlite v1.46.1
+require (
+	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1
+	modernc.org/sqlite v1.46.1
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

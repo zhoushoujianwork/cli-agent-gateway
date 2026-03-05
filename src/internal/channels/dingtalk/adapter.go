@@ -1,8 +1,8 @@
 package dingtalk
 
 import (
-	"bufio"
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -13,18 +13,19 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"cli-agent-gateway/internal/core"
+
+	dtchatbot "github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
+	dtclient "github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
 )
 
 type Options struct {
 	RepoRoot              string
-	QueueFile             string
 	FetchMaxEvents        int
 	DMPolicy              string
 	GroupPolicy           string
@@ -47,10 +48,12 @@ type Options struct {
 }
 
 type Adapter struct {
-	opts       Options
-	mu         sync.Mutex
-	offset     int64
-	httpClient *http.Client
+	opts         Options
+	httpClient   *http.Client
+	inbox        chan map[string]any
+	streamClient *dtclient.StreamClient
+	startErr     error
+	mu           sync.Mutex
 }
 
 func NewAdapter(opts Options) *Adapter {
@@ -69,66 +72,135 @@ func NewAdapter(opts Options) *Adapter {
 	if strings.TrimSpace(opts.MarkdownTitle) == "" {
 		opts.MarkdownTitle = "CLI Agent Gateway"
 	}
-	if strings.TrimSpace(opts.QueueFile) == "" {
-		opts.QueueFile = ".dingtalk_inbox.jsonl"
-	}
-	return &Adapter{
+	a := &Adapter{
 		opts:       opts,
 		httpClient: &http.Client{Timeout: time.Duration(opts.SendTimeoutSec) * time.Second},
+		inbox:      make(chan map[string]any, max(128, opts.FetchMaxEvents*8)),
+	}
+	a.startStream()
+	return a
+}
+
+func (a *Adapter) startStream() {
+	appKey := strings.TrimSpace(a.opts.AppKey)
+	appSecret := strings.TrimSpace(a.opts.AppSecret)
+	a.logStartupSummary()
+	if appKey == "" || appSecret == "" {
+		a.startErr = fmt.Errorf("dingtalk stream requires DINGTALK_APP_KEY and DINGTALK_APP_SECRET")
+		a.logf("stream init failed: %v", a.startErr)
+		return
+	}
+
+	a.logf("stream connecting app_key=%s****", shortMask(appKey))
+	cli := dtclient.NewStreamClient(
+		dtclient.WithAppCredential(dtclient.NewAppCredentialConfig(appKey, appSecret)),
+	)
+	a.logf("stream register chatbot callback router")
+	cli.RegisterChatBotCallbackRouter(func(ctx context.Context, data *dtchatbot.BotCallbackDataModel) ([]byte, error) {
+		a.onStreamMessage(data)
+		return []byte(""), nil
+	})
+	if err := cli.Start(context.Background()); err != nil {
+		a.startErr = fmt.Errorf("dingtalk stream start failed: %w", err)
+		a.logf("stream connect failed: %v", err)
+		return
+	}
+	a.streamClient = cli
+	a.logf("stream connected")
+}
+
+func (a *Adapter) logStartupSummary() {
+	a.logf(
+		"startup config channel=dingtalk fetch_max=%d dm_policy=%s group_policy=%s require_at=%v allowed_from=%d group_allowlist=%d send_mode=%s send_msgtype=%s send_timeout=%ds pretty_status=%v app_key=%s**** app_secret_set=%v agent_id_set=%v default_to_set=%v token_url=%s send_url=%s",
+		a.opts.FetchMaxEvents,
+		strings.TrimSpace(a.opts.DMPolicy),
+		strings.TrimSpace(a.opts.GroupPolicy),
+		a.opts.RequireMentionInGroup,
+		len(a.opts.AllowedFrom),
+		len(a.opts.GroupAllowlist),
+		strings.TrimSpace(a.opts.SendMode),
+		strings.TrimSpace(a.opts.SendMsgType),
+		a.opts.SendTimeoutSec,
+		a.opts.PrettyStatus,
+		shortMask(strings.TrimSpace(a.opts.AppKey)),
+		strings.TrimSpace(a.opts.AppSecret) != "",
+		strings.TrimSpace(a.opts.AgentID) != "",
+		strings.TrimSpace(a.opts.DefaultToUser) != "",
+		shortText(strings.TrimSpace(a.opts.TokenURL), 80),
+		shortText(strings.TrimSpace(a.opts.SendURL), 80),
+	)
+}
+
+func (a *Adapter) onStreamMessage(data *dtchatbot.BotCallbackDataModel) {
+	if data == nil {
+		return
+	}
+	node := map[string]any{
+		"messageId":      sanitize(data.MsgId),
+		"conversationId": sanitize(data.ConversationId),
+		"threadId":       sanitize(data.ConversationId),
+		"senderStaffId":  sanitize(data.SenderStaffId),
+		"senderId":       sanitize(data.SenderId),
+		"senderName":     sanitize(data.SenderNick),
+		"chatType":       sanitize(data.ConversationType),
+		"isAtBot":        data.IsInAtList,
+		"isGroup":        sanitize(data.ConversationType) == "2",
+		"text":           sanitize(data.Text.Content),
+		"ts":             strconv.FormatInt(data.CreateAt, 10),
+		"sessionWebhook": sanitize(data.SessionWebhook),
+	}
+	if strings.TrimSpace(anyString(node["text"])) == "" {
+		a.logf("stream drop msg_id=%s reason=empty_text sender=%s chat_type=%s", sanitize(data.MsgId), sanitize(data.SenderStaffId), sanitize(data.ConversationType))
+		return
+	}
+	a.logf("stream recv msg_id=%s sender=%s chat_type=%s text=%s", sanitize(data.MsgId), sanitize(data.SenderStaffId), sanitize(data.ConversationType), shortText(sanitize(data.Text.Content), 80))
+	if reason := a.dropReason(node); reason != "" {
+		a.logf("stream drop msg_id=%s reason=%s sender=%s chat_type=%s text=%s", sanitize(data.MsgId), reason, sanitize(data.SenderStaffId), sanitize(data.ConversationType), shortText(sanitize(data.Text.Content), 80))
+		return
+	}
+	select {
+	case a.inbox <- node:
+		a.logf("stream enqueue msg_id=%s queue_len=%d", sanitize(data.MsgId), len(a.inbox))
+	default:
+		a.logf("stream queue full, dropping oldest and retry enqueue msg_id=%s", sanitize(data.MsgId))
+		select {
+		case <-a.inbox:
+		default:
+		}
+		select {
+		case a.inbox <- node:
+			a.logf("stream enqueue msg_id=%s queue_len=%d", sanitize(data.MsgId), len(a.inbox))
+		default:
+			a.logf("stream enqueue failed msg_id=%s", sanitize(data.MsgId))
+		}
 	}
 }
 
 func (a *Adapter) Fetch() ([]core.InboundMessage, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	queuePath := resolvePath(a.opts.RepoRoot, a.opts.QueueFile)
-	f, err := os.Open(queuePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []core.InboundMessage{}, nil
-		}
-		return nil, err
+	startErr := a.startErr
+	a.mu.Unlock()
+	if startErr != nil {
+		return nil, startErr
 	}
-	defer f.Close()
-
-	st, err := f.Stat()
-	if err == nil && st.Size() < a.offset {
-		a.offset = 0
-	}
-	if _, err := f.Seek(a.offset, io.SeekStart); err != nil {
-		return nil, err
-	}
-
-	sc := bufio.NewScanner(f)
-	out := make([]core.InboundMessage, 0)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		var node map[string]any
-		if err := json.Unmarshal([]byte(line), &node); err != nil {
-			continue
-		}
-		if !a.shouldKeep(node) {
-			continue
-		}
-		msg := a.normalize(node)
-		if msg != nil {
-			out = append(out, *msg)
+	out := make([]core.InboundMessage, 0, a.opts.FetchMaxEvents)
+	for {
+		select {
+		case node := <-a.inbox:
+			msg := a.normalize(node)
+			if msg != nil {
+				out = append(out, *msg)
+			}
+		default:
+			if len(out) > a.opts.FetchMaxEvents {
+				out = out[len(out)-a.opts.FetchMaxEvents:]
+			}
+			if len(out) > 0 {
+				a.logf("fetch batch size=%d", len(out))
+			}
+			return out, nil
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return nil, err
-	}
-	pos, _ := f.Seek(0, io.SeekCurrent)
-	a.offset = pos
-
-	if len(out) > a.opts.FetchMaxEvents {
-		out = out[len(out)-a.opts.FetchMaxEvents:]
-	}
-	return out, nil
 }
 
 func (a *Adapter) Send(text, to, messageID, reportFile string) error {
@@ -141,6 +213,10 @@ func (a *Adapter) Send(text, to, messageID, reportFile string) error {
 }
 
 func (a *Adapter) shouldKeep(node map[string]any) bool {
+	return a.dropReason(node) == ""
+}
+
+func (a *Adapter) dropReason(node map[string]any) string {
 	dmPolicy := strings.ToLower(strings.TrimSpace(a.opts.DMPolicy))
 	groupPolicy := strings.ToLower(strings.TrimSpace(a.opts.GroupPolicy))
 	if dmPolicy == "" {
@@ -169,30 +245,32 @@ func (a *Adapter) shouldKeep(node map[string]any) bool {
 
 	if isGroup {
 		if groupPolicy == "disabled" {
-			return false
+			return "group_policy_disabled"
 		}
 		if groupPolicy == "allowlist" && len(a.opts.GroupAllowlist) > 0 {
 			if _, ok := a.opts.GroupAllowlist[conversationID]; !ok {
-				return false
+				return "group_not_in_allowlist"
 			}
 		}
 		if a.opts.RequireMentionInGroup {
 			isAtBot := anyBool(node["isAtBot"]) || anyBool(node["atBot"])
 			if !isAtBot {
-				return false
+				return "group_requires_mention"
 			}
 		}
-		return true
+		return ""
 	}
 
 	if dmPolicy == "disabled" {
-		return false
+		return "dm_policy_disabled"
 	}
 	if dmPolicy == "allowlist" && len(a.opts.AllowedFrom) > 0 {
 		_, ok := a.opts.AllowedFrom[sender]
-		return ok
+		if !ok {
+			return "sender_not_in_allowlist"
+		}
 	}
-	return true
+	return ""
 }
 
 func (a *Adapter) normalize(node map[string]any) *core.InboundMessage {
@@ -226,6 +304,9 @@ func (a *Adapter) normalize(node map[string]any) *core.InboundMessage {
 	}
 	msgID := sanitize(anyString(node["messageId"]))
 	if msgID == "" {
+		msgID = sanitize(anyString(node["msgId"]))
+	}
+	if msgID == "" {
 		msgID = sanitize(anyString(node["id"]))
 	}
 	if msgID == "" {
@@ -239,6 +320,9 @@ func (a *Adapter) normalize(node map[string]any) *core.InboundMessage {
 		"is_group":        anyBool(node["isGroup"]),
 		"is_at_bot":       anyBool(node["isAtBot"]),
 		"sender_name":     sanitize(anyString(node["senderName"])),
+	}
+	if webhook := sanitize(anyString(node["sessionWebhook"])); webhook != "" {
+		meta["session_webhook"] = webhook
 	}
 
 	return &core.InboundMessage{
@@ -308,6 +392,11 @@ func (a *Adapter) sendAPI(text, to, messageID string) error {
 	}
 	if toInt(resp["errcode"]) != 0 {
 		return fmt.Errorf("api send failed: errcode=%v errmsg=%v", resp["errcode"], resp["errmsg"])
+	}
+	for _, key := range []string{"invaliduser", "invalid_user_id", "forbidden_user_id", "forbidden_userid", "invalidparty", "invalid_party_id"} {
+		if v := strings.TrimSpace(anyString(resp[key])); v != "" {
+			return fmt.Errorf("api send not delivered: %s=%s", key, v)
+		}
 	}
 	return nil
 }
@@ -425,24 +514,6 @@ func signedWebhookURL(baseURL, secret string) string {
 	return baseURL + sep + "timestamp=" + ts + "&sign=" + sign
 }
 
-func resolvePath(repoRoot, p string) string {
-	if strings.TrimSpace(p) == "" {
-		return filepath.Join(repoRoot, ".dingtalk_inbox.jsonl")
-	}
-	if strings.HasPrefix(p, "~/") {
-		if h, err := os.UserHomeDir(); err == nil {
-			p = filepath.Join(h, p[2:])
-		}
-	}
-	if !filepath.IsAbs(p) {
-		p = filepath.Join(repoRoot, p)
-	}
-	if abs, err := filepath.Abs(p); err == nil {
-		return abs
-	}
-	return p
-}
-
 func messagePhase(messageID string) string {
 	mid := strings.ToLower(strings.TrimSpace(messageID))
 	if strings.HasPrefix(mid, "ack-") {
@@ -514,4 +585,44 @@ func toInt(v any) int {
 	default:
 		return 0
 	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func (a *Adapter) logf(format string, args ...any) {
+	if !streamDebugEnabled() {
+		return
+	}
+	msg := fmt.Sprintf(format, args...)
+	_, _ = fmt.Fprintf(os.Stderr, "[%s] dingtalk-stream %s\n", time.Now().UTC().Format(time.RFC3339), msg)
+}
+
+func streamDebugEnabled() bool {
+	v := strings.TrimSpace(os.Getenv("DINGTALK_STREAM_DEBUG"))
+	if v == "" {
+		return true
+	}
+	v = strings.ToLower(v)
+	return v != "0" && v != "false" && v != "off"
+}
+
+func shortText(s string, n int) string {
+	t := strings.TrimSpace(s)
+	if n <= 0 || len(t) <= n {
+		return t
+	}
+	return t[:n-3] + "..."
+}
+
+func shortMask(s string) string {
+	v := strings.TrimSpace(s)
+	if len(v) <= 4 {
+		return v
+	}
+	return v[:4]
 }

@@ -63,16 +63,10 @@ cd src && go run ./cmd/gateway-cli send --to tester --file ./message.md --msgtyp
 ## DingTalk（已实现）
 
 `CHANNEL_TYPE=dingtalk` 时：
-- 入站：读取 `DINGTALK_QUEUE_FILE`（JSONL）
+- 入站：Go 内置 DingTalk Stream（仅此模式）
 - 出站：
   - `DINGTALK_SEND_MODE=api`：走企业应用 API（`DINGTALK_APP_KEY/SECRET/AGENT_ID`）
   - `DINGTALK_SEND_MODE=webhook`：走机器人 webhook（`DINGTALK_BOT_WEBHOOK`）
-
-入站 JSONL 每行示例：
-
-```json
-{"messageId":"m1","senderStaffId":"u123","text":"hello","createAt":"2026-03-05T00:00:00Z","conversationId":"cid123","chatType":"group","isAtBot":true}
-```
 
 ## 存储
 
