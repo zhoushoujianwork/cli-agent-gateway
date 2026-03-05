@@ -4,15 +4,15 @@
 
 macOS GUI 不直接读写网关内部文件，只通过 `gateway` CLI 获取数据与执行动作。
 
-> 注：自 R6 Phase 1 起，CLI 对 `status/sessions` 默认优先经 `gatewayd` gRPC 读取；不可达时回退本地实现。
+> 注：自 R6 Phase 2 起，GUI 相关会话命令（`sessions/messages/send --session-key/session-*`）仅经 `gatewayd` gRPC；CLI 不走本地回退，并在连接失败时自动尝试拉起 `gatewayd`。
 
 ## 读模型（Read）
 
 GUI 周期轮询：
 
 1. `gateway status --json`
-2. `gateway view sessions --json`
-3. `gateway view messages --session-key <key> --json`（选中会话时）
+2. `gateway sessions --json`
+3. `gateway messages --session-key <key> --json`（选中会话时）
 4. `gateway view tasks --json`（可选）
 
 ## 动作模型（Write）
@@ -22,13 +22,14 @@ GUI 用户操作映射：
 - 点击 Send：
   - `gateway send --session-key <key> --text "<text>" --json`
 - 输入 `/clear`：
-  - `gateway session clear --session-key <key> --json`
+  - `gateway session-clear --session-key <key> --json`
 - 输入 `/new`：
-  - `gateway session new --session-key <key> --json`
+  - `gateway session-clear --session-key <key> --json`
 - 输入 `/new hello`：
-  - `gateway session new --session-key <key> --text "hello" --json`
+  - `gateway session-clear --session-key <key> --json`
+  - `gateway send --session-key <key> --text "hello" --json`
 - 删除会话：
-  - `gateway session delete --session-key <key> --json`
+  - `gateway session-delete --session-key <key> --json`
 
 ## 消息状态映射
 

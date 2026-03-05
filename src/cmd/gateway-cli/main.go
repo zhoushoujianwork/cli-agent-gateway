@@ -125,6 +125,14 @@ func main() {
 		os.Exit(runSend(repoRoot, args))
 	case "sessions":
 		os.Exit(runSessions(repoRoot, args))
+	case "messages":
+		os.Exit(runMessages(repoRoot, args))
+	case "session-clear":
+		os.Exit(runSessionClear(repoRoot, args))
+	case "session-delete":
+		os.Exit(runSessionDelete(repoRoot, args))
+	case "sessions-delete-all":
+		os.Exit(runSessionsDeleteAll(repoRoot, args))
 	case "gatewayd":
 		os.Exit(runGatewayd(repoRoot, args))
 	case "actions":
@@ -149,6 +157,10 @@ func printActions(out *os.File) {
 	fmt.Fprintln(out, "doctor")
 	fmt.Fprintln(out, "send")
 	fmt.Fprintln(out, "sessions")
+	fmt.Fprintln(out, "messages")
+	fmt.Fprintln(out, "session-clear")
+	fmt.Fprintln(out, "session-delete")
+	fmt.Fprintln(out, "sessions-delete-all")
 	fmt.Fprintln(out, "gatewayd")
 	fmt.Fprintln(out, "actions")
 	fmt.Fprintln(out, "help")
@@ -168,6 +180,10 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
 	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run)")
 	fmt.Fprintln(out, "  sessions [--json]   List sessions for GUI")
+	fmt.Fprintln(out, "  messages [--json]   List messages for a session (--session-key)")
+	fmt.Fprintln(out, "  session-clear       Clear session map entry (--session-key)")
+	fmt.Fprintln(out, "  session-delete      Delete session map entry (--session-key)")
+	fmt.Fprintln(out, "  sessions-delete-all Delete all session map entries")
 	fmt.Fprintln(out, "  gatewayd [opts]     Run gRPC control plane server")
 	fmt.Fprintln(out, "  actions             Print supported action names")
 	fmt.Fprintln(out, "  help                Show this message")
@@ -778,31 +794,53 @@ func runSend(repoRoot string, args []string) int {
 		}()
 	}
 
-	cfg, err := config.Load(repoRoot, "")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
-		return 1
-	}
 	key := strings.TrimSpace(*sessionKey)
 	if key != "" {
+		key = normalizeSessionKey(key)
 		msgID := strings.TrimSpace(*messageID)
 		if msgID == "" {
 			msgID = fmt.Sprintf("manual-%d", time.Now().UnixMilli())
 		}
-		payload, serr := sendViaSessionKey(cfg, key, body, mt, source, msgID, *dryRun)
-		if *jsonOut {
-			printJSON(payload)
-			if serr != nil {
+		grpcRes, gerr := trySendToSessionViaGRPC(repoRoot, key, body, msgID, mt, *dryRun, source)
+		if gerr != nil {
+			if *jsonOut {
+				printJSONActionError("send", "gateway_unreachable", formatGatewayUnavailable(gerr))
 				return 1
 			}
-			return 0
-		}
-		if serr != nil {
-			fmt.Fprintf(os.Stderr, "send failed: %v\n", serr)
+			fmt.Fprintf(os.Stderr, "send failed: %s\n", formatGatewayUnavailable(gerr))
 			return 1
 		}
-		fmt.Printf("session-sent key=%s message_id=%s status=%s elapsed=%ds\n", payload.SessionKey, payload.MessageID, nonEmpty(payload.Result, "ok"), payload.ElapsedSec)
-		return 0
+		payload := SendPayload{
+			OK:         grpcRes.GetOk(),
+			Channel:    grpcRes.GetChannel(),
+			To:         grpcRes.GetTo(),
+			MessageID:  grpcRes.GetMessageId(),
+			MsgType:    grpcRes.GetMsgType(),
+			DryRun:     grpcRes.GetDryRun(),
+			Source:     grpcRes.GetSource(),
+			SessionKey: grpcRes.GetSessionKey(),
+			SessionID:  grpcRes.GetSessionId(),
+			Result:     grpcRes.GetResult(),
+			ElapsedSec: int(grpcRes.GetElapsedSec()),
+			Error:      grpcRes.GetError(),
+		}
+		if *jsonOut {
+			printJSON(payload)
+		} else if payload.OK {
+			fmt.Printf("session-sent key=%s message_id=%s status=%s elapsed=%ds\n", payload.SessionKey, payload.MessageID, nonEmpty(payload.Result, "ok"), payload.ElapsedSec)
+		} else {
+			fmt.Fprintf(os.Stderr, "send failed: %s\n", payload.Error)
+		}
+		if payload.OK {
+			return 0
+		}
+		return 1
+	}
+
+	cfg, err := config.Load(repoRoot, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
+		return 1
 	}
 
 	channel := buildChannelAdapter(cfg)
@@ -1135,59 +1173,36 @@ func runSessions(repoRoot string, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if grpc, err := trySessionsViaGRPC(repoRoot, *limit); err == nil {
-		if !grpc.GetOk() {
-			if *jsonOut {
-				printJSONActionError("sessions", "grpc_sessions_failed", grpc.GetError())
-				return 1
-			}
-			fmt.Fprintf(os.Stderr, "sessions failed: %s\n", grpc.GetError())
-			return 1
-		}
-		items := make([]SessionsItem, 0, len(grpc.GetItems()))
-		for _, it := range grpc.GetItems() {
-			items = append(items, SessionsItem{
-				SessionKey:  it.GetSessionKey(),
-				SessionID:   it.GetSessionId(),
-				Channel:     it.GetChannel(),
-				Sender:      it.GetSender(),
-				SenderName:  it.GetSenderName(),
-				ThreadID:    it.GetThreadId(),
-				LastMessage: it.GetLastMessage(),
-				LastTime:    it.GetLastTime(),
-				Latest:      it.GetLatest(),
-			})
-		}
-		if *jsonOut {
-			printJSON(SessionsPayload{OK: true, Action: "sessions", Items: items})
-			return 0
-		}
-		for _, it := range items {
-			fmt.Printf("%s\t%s\t%s\t%s\n", it.LastTime, it.SenderName, it.Channel, it.LastMessage)
-		}
-		return 0
-	}
-
-	cfg, err := config.Load(repoRoot, "")
+	grpc, err := trySessionsViaGRPC(repoRoot, *limit)
 	if err != nil {
 		if *jsonOut {
-			printJSONActionError("sessions", "config_load_failed", err.Error())
+			printJSONActionError("sessions", "gateway_unreachable", formatGatewayUnavailable(err))
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sessions failed: %s\n", formatGatewayUnavailable(err))
 		return 1
 	}
-	items, err := collectSessions(cfg)
-	if err != nil {
+	if !grpc.GetOk() {
 		if *jsonOut {
-			printJSONActionError("sessions", "collect_failed", err.Error())
+			printJSONActionError("sessions", "grpc_sessions_failed", grpc.GetError())
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "sessions failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sessions failed: %s\n", grpc.GetError())
 		return 1
 	}
-	if *limit > 0 && len(items) > *limit {
-		items = items[:*limit]
+	items := make([]SessionsItem, 0, len(grpc.GetItems()))
+	for _, it := range grpc.GetItems() {
+		items = append(items, SessionsItem{
+			SessionKey:  it.GetSessionKey(),
+			SessionID:   it.GetSessionId(),
+			Channel:     it.GetChannel(),
+			Sender:      it.GetSender(),
+			SenderName:  it.GetSenderName(),
+			ThreadID:    it.GetThreadId(),
+			LastMessage: it.GetLastMessage(),
+			LastTime:    it.GetLastTime(),
+			Latest:      it.GetLatest(),
+		})
 	}
 	if *jsonOut {
 		printJSON(SessionsPayload{OK: true, Action: "sessions", Items: items})

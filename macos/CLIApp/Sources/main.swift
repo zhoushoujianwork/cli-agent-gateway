@@ -644,73 +644,6 @@ final class GatewayController: ObservableObject {
         return nil
     }
 
-    private func channelFromProfile(_ profileAny: Any?) -> String {
-        guard let profile = profileAny as? [String: Any], let channel = profile["channel"] as? String else {
-            return ""
-        }
-        return channel
-    }
-
-    private func threadFromProfile(_ profileAny: Any?) -> String {
-        guard let profile = profileAny as? [String: Any], let thread = profile["thread_id"] as? String else {
-            return ""
-        }
-        return thread
-    }
-
-    private func buildSessionKey(channel: String, sender: String, threadId: String) -> String {
-        let raw = "\(channel)|\(sender)|\(threadId.isEmpty ? "-" : threadId)"
-        let digest = Insecure.SHA1.hash(data: Data(raw.utf8))
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
-        return "sess_" + String(hex.prefix(24))
-    }
-
-    private func interactionRecords() -> [[String: Any]] {
-        let backend = (envValue("STORAGE_BACKEND") ?? "sqlite")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        if backend == "sqlite" {
-            let rawPath = (envValue("STORAGE_SQLITE_PATH") ?? ".agent_gateway.db")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let dbPath = rawPath.hasPrefix("/")
-                ? rawPath
-                : URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent(rawPath).path
-            guard commandExists("sqlite3") else { return [] }
-            let sql = "SELECT payload_json FROM (SELECT id, payload_json FROM interactions ORDER BY id DESC LIMIT 2500) t ORDER BY id ASC;"
-            let cmd = "sqlite3 \(shellEscape(dbPath)) \(shellEscape(sql))"
-            let out = shellOutput(cmd, timeoutSec: 8)
-            guard out.code == 0 else { return [] }
-            var rows: [[String: Any]] = []
-            for line in out.stdout.split(separator: "\n", omittingEmptySubsequences: true) {
-                let raw = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !raw.isEmpty,
-                      let data = raw.data(using: .utf8),
-                      let rec = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else {
-                    continue
-                }
-                rows.append(rec)
-            }
-            return rows
-        }
-
-        guard let content = try? String(contentsOfFile: cfg.interactionLogFile, encoding: .utf8) else {
-            return []
-        }
-        var rows: [[String: Any]] = []
-        for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
-            let raw = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !raw.isEmpty,
-                  let data = raw.data(using: .utf8),
-                  let rec = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else {
-                continue
-            }
-            rows.append(rec)
-        }
-        return rows
-    }
-
     private func refreshSelectedSessionChat() {
         guard let sessionKey = selectedSessionKey, !sessionKey.isEmpty else {
             chatMessages = []
@@ -718,135 +651,61 @@ final class GatewayController: ObservableObject {
             log("chat refresh skipped reason=no_selected_session")
             return
         }
+        let baseSessionKey = sessionKey.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? sessionKey
         let t0 = Date()
         log("chat refresh start session_key=\(sessionKey)")
         let overlay = localOverlayMessagesBySession[sessionKey, default: []]
         runInBackground { [weak self] in
             guard let self else { return }
-            let loaded = self.loadPersistedMessages(sessionKey: sessionKey)
-            let merged = self.mergedMessages(persisted: loaded.messages, overlay: overlay)
+            let res = self.cagJSON("messages", args: ["--session-key", baseSessionKey], timeoutSec: 8)
+            var persisted: [ChatMessage] = []
+            var timeline: [String: [ProcessEvent]] = [:]
+            if let node = res.json,
+               let ok = node["ok"] as? Bool, ok {
+                if let items = node["messages"] as? [[String: Any]] {
+                    persisted = items.compactMap { item in
+                        let id = ((item["id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        if id.isEmpty { return nil }
+                        return ChatMessage(
+                            id: id,
+                            sourceMsgId: (item["source_msg_id"] as? String) ?? id,
+                            role: (item["role"] as? String) ?? "assistant",
+                            text: (item["text"] as? String) ?? "",
+                            time: (item["time"] as? String) ?? ISO8601DateFormatter().string(from: Date()),
+                            deliveryStatus: nil,
+                            statusDetail: (item["status_detail"] as? String) ?? ""
+                        )
+                    }
+                }
+                if let entries = node["timeline"] as? [[String: Any]] {
+                    for entry in entries {
+                        let msgID = ((entry["msg_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        if msgID.isEmpty { continue }
+                        let events = (entry["events"] as? [[String: Any]] ?? []).compactMap { ev -> ProcessEvent? in
+                            let id = ((ev["id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                            if id.isEmpty { return nil }
+                            return ProcessEvent(
+                                id: id,
+                                time: (ev["time"] as? String) ?? ISO8601DateFormatter().string(from: Date()),
+                                title: (ev["title"] as? String) ?? "",
+                                detail: (ev["detail"] as? String) ?? ""
+                            )
+                        }
+                        if !events.isEmpty {
+                            timeline[msgID] = events
+                        }
+                    }
+                }
+            }
+            let merged = self.mergedMessages(persisted: persisted, overlay: overlay)
             self.onMain {
                 guard self.selectedSessionKey == sessionKey else { return }
-                self.timelineByMsgId = loaded.timeline
+                self.timelineByMsgId = timeline
                 self.chatMessages = merged
             }
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
-            self.log("chat refresh done session_key=\(sessionKey) persisted=\(loaded.messages.count) overlay=\(overlay.count) merged=\(merged.count) elapsed_ms=\(ms)")
+            self.log("chat refresh done session_key=\(sessionKey) persisted=\(persisted.count) overlay=\(overlay.count) merged=\(merged.count) elapsed_ms=\(ms)")
         }
-    }
-
-    private func loadPersistedMessages(sessionKey: String) -> (messages: [ChatMessage], timeline: [String: [ProcessEvent]]) {
-        let records = interactionRecords()
-        guard !records.isEmpty else {
-            return ([], [:])
-        }
-
-        var msgIDs = Set<String>()
-        for rec in records {
-            let kind = ((rec["kind"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if kind == "trace" {
-                let stage = ((rec["stage"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                if stage == "session_resolved",
-                   let sk = rec["session_key"] as? String,
-                   sk == sessionKey,
-                   let msgID = rec["msg_id"] as? String,
-                   !msgID.isEmpty {
-                    msgIDs.insert(msgID)
-                }
-            }
-            if kind == "inbound_received" {
-                let sender = ((rec["sender"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                let profile = rec["user_profile"] as? [String: Any]
-                let key = buildSessionKey(
-                    channel: channelFromProfile(profile).trimmingCharacters(in: .whitespacesAndNewlines),
-                    sender: sender,
-                    threadId: threadFromProfile(profile).trimmingCharacters(in: .whitespacesAndNewlines)
-                )
-                if key == sessionKey,
-                   let msgID = rec["msg_id"] as? String,
-                   !msgID.isEmpty {
-                    msgIDs.insert(msgID)
-                }
-            }
-        }
-
-        guard !msgIDs.isEmpty else {
-            return ([], [:])
-        }
-
-        var messages: [ChatMessage] = []
-        var timeline: [String: [ProcessEvent]] = [:]
-        var hasInbound = Set<String>()
-        var hasFinal = Set<String>()
-
-        for (idx, rec) in records.enumerated() {
-            guard let msgID = rec["msg_id"] as? String, msgIDs.contains(msgID) else { continue }
-            let kind = ((rec["kind"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let ts = ((rec["ts"] as? String) ?? (rec["time"] as? String) ?? ISO8601DateFormatter().string(from: Date()))
-
-            if kind == "inbound_received" {
-                if hasInbound.contains(msgID) { continue }
-                hasInbound.insert(msgID)
-                let text = ((rec["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                if text.isEmpty { continue }
-                messages.append(
-                    ChatMessage(
-                        id: "persist-u-\(msgID)",
-                        sourceMsgId: msgID,
-                        role: "user",
-                        text: text,
-                        time: ts,
-                        deliveryStatus: nil,
-                        statusDetail: ""
-                    )
-                )
-                continue
-            }
-
-            if kind == "trace" {
-                let stage = ((rec["stage"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                if !stage.isEmpty {
-                    let detail = ((rec["text"] as? String) ?? (rec["error"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    timeline[msgID, default: []].append(
-                        ProcessEvent(
-                            id: "evt-\(msgID)-\(idx)",
-                            time: ts,
-                            title: stage,
-                            detail: detail
-                        )
-                    )
-                }
-                continue
-            }
-
-            let errText = ((rec["error"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let resultText = ((rec["result"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let statusText = ((rec["status"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            var finalText = resultText
-            var role = "assistant"
-            if finalText.isEmpty, !errText.isEmpty {
-                finalText = errText
-                role = "system"
-            }
-            if finalText.isEmpty || hasFinal.contains(msgID) {
-                continue
-            }
-            hasFinal.insert(msgID)
-            messages.append(
-                ChatMessage(
-                    id: "persist-a-\(msgID)",
-                    sourceMsgId: msgID,
-                    role: role,
-                    text: finalText,
-                    time: ts,
-                    deliveryStatus: nil,
-                    statusDetail: statusText
-                )
-            )
-        }
-
-        messages.sort { $0.time < $1.time }
-        return (messages, timeline)
     }
 
     private func summarizeToolCalls(_ raw: Any?) -> String {
@@ -1007,6 +866,13 @@ final class GatewayController: ObservableObject {
         }
     }
 
+    private func removeOverlayMessage(sessionKey: String, messageId: String) {
+        var overlay = localOverlayMessagesBySession[sessionKey, default: []]
+        overlay.removeAll { $0.id == messageId }
+        localOverlayMessagesBySession[sessionKey] = overlay
+        chatMessages.removeAll { $0.id == messageId }
+    }
+
     private func updateOverlayMessage(
         sessionKey: String,
         messageId: String,
@@ -1105,11 +971,9 @@ final class GatewayController: ObservableObject {
     }
 
     private func clearSessionMapping(baseSessionKey: String) -> Bool {
-        guard var node = loadStateJSON() else { return false }
-        var map = (node["session_map"] as? [String: Any]) ?? [:]
-        map.removeValue(forKey: baseSessionKey)
-        node["session_map"] = map
-        return saveStateJSON(node)
+        let res = cagJSON("session-clear", args: ["--session-key", baseSessionKey])
+        guard let node = res.json else { return false }
+        return (node["ok"] as? Bool) ?? false
     }
 
     private func appendLocalActionMessage(_ text: String, sessionKey: String) {
@@ -1124,31 +988,6 @@ final class GatewayController: ObservableObject {
             statusDetail: ""
         )
         appendOverlayMessage(msg, sessionKey: sessionKey)
-    }
-
-    private func latestDingTalkSessionWebhook(for session: SessionEntry) -> String {
-        guard session.channel == "dingtalk" else { return "" }
-        let rows = interactionRecords()
-        guard !rows.isEmpty else { return "" }
-        for record in rows.reversed().prefix(1800) {
-            guard (record["kind"] as? String) == "inbound_received" else {
-                continue
-            }
-            let sender = (record["sender"] as? String) ?? ""
-            if sender != session.senderId { continue }
-            let profile = (record["user_profile"] as? [String: Any]) ?? [:]
-            let thread = (profile["thread_id"] as? String) ?? ""
-            if !session.threadId.isEmpty, session.threadId != "-", thread != session.threadId {
-                continue
-            }
-            let messageMeta = (record["message_metadata"] as? [String: Any]) ?? [:]
-            let rawCallback = (messageMeta["raw_callback"] as? [String: Any]) ?? [:]
-            let webhook = ((rawCallback["sessionWebhook"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !webhook.isEmpty {
-                return webhook
-            }
-        }
-        return ""
     }
 
     func sendLocalChat() {
@@ -1221,16 +1060,10 @@ final class GatewayController: ObservableObject {
             )
             return
         }
-        let rawChannel = session.channel.trimmingCharacters(in: .whitespacesAndNewlines)
-        let channel = rawChannel == "-" || rawChannel.isEmpty ? selectedChannel.rawValue : rawChannel
         let timeout = localChatTimeoutSec()
-        let sessionWebhook = latestDingTalkSessionWebhook(for: session)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            var sendArgs = ["--session-key", baseSessionKey, "--text", text, "--channel", channel]
-            if channel == "dingtalk", !sessionWebhook.isEmpty {
-                sendArgs.append(contentsOf: ["--session-webhook", sessionWebhook])
-            }
+            let sendArgs = ["--session-key", baseSessionKey, "--text", text]
             let result = self.cagJSON("send", args: sendArgs, timeoutSec: timeout)
             DispatchQueue.main.async {
                 self.localSending = false
@@ -1252,25 +1085,11 @@ final class GatewayController: ObservableObject {
                         deliveryStatus: .sent,
                         statusDetail: ""
                     )
+                    self.removeOverlayMessage(sessionKey: selectedSessionKey, messageId: userMsgId)
                     let elapsed = (node["elapsed_sec"] as? Int) ?? 0
-                    let replyText = ((node["result"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !replyText.isEmpty {
-                        let replyMsgId = "local-a-\(Int(Date().timeIntervalSince1970 * 1000))"
-                        self.appendOverlayMessage(
-                            ChatMessage(
-                                id: replyMsgId,
-                                sourceMsgId: replyMsgId,
-                                role: "assistant",
-                                text: replyText,
-                                time: ISO8601DateFormatter().string(from: Date()),
-                                deliveryStatus: nil,
-                                statusDetail: ""
-                            ),
-                            sessionKey: selectedSessionKey
-                        )
-                    }
                     self.detailText = elapsed > 0 ? "Session processed (\(elapsed)s)." : "Session processed."
                     self.refreshSessionsAsync()
+                    self.refreshSelectedSessionChat()
                     return
                 }
                 let nestedErr = ((node["error"] as? [String: Any])?["message"] as? String) ?? ""
@@ -1293,12 +1112,8 @@ final class GatewayController: ObservableObject {
     }
 
     func deleteAllSessions() {
-        guard var node = loadStateJSON() else {
-            detailText = "Delete failed: cannot read state file."
-            return
-        }
-        node["session_map"] = [String: String]()
-        if saveStateJSON(node) {
+        let res = cagJSON("sessions-delete-all")
+        if ((res.json?["ok"] as? Bool) ?? false) {
             for s in sessions {
                 hideSessionKey(s.sessionKey)
             }
@@ -1307,7 +1122,7 @@ final class GatewayController: ObservableObject {
             refreshSessionsAsync()
             detailText = "Deleted all sessions."
         } else {
-            detailText = "Delete failed: cannot write state file."
+            detailText = "Delete failed: command failed."
         }
     }
 
@@ -1322,14 +1137,8 @@ final class GatewayController: ObservableObject {
             detailText = "Deleted archived session segment from app list."
             return
         }
-        guard var node = loadStateJSON() else {
-            detailText = "Delete failed: cannot read state file."
-            return
-        }
-        var map = (node["session_map"] as? [String: Any]) ?? [:]
-        map.removeValue(forKey: key)
-        node["session_map"] = map
-        if saveStateJSON(node) {
+        let res = cagJSON("session-delete", args: ["--session-key", key])
+        if ((res.json?["ok"] as? Bool) ?? false) {
             for session in sessions {
                 if session.sessionKey == key || session.sessionKey.hasPrefix("\(key)#") {
                     hideSessionKey(session.sessionKey)
@@ -1342,26 +1151,7 @@ final class GatewayController: ObservableObject {
             refreshSessionsAsync()
             detailText = "Deleted session: \(key)"
         } else {
-            detailText = "Delete failed: cannot write state file."
-        }
-    }
-
-    private func loadStateJSON() -> [String: Any]? {
-        let url = URL(fileURLWithPath: cfg.stateFile)
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
-    }
-
-    private func saveStateJSON(_ node: [String: Any]) -> Bool {
-        let url = URL(fileURLWithPath: cfg.stateFile)
-        do {
-            let dir = url.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: node, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: url)
-            return true
-        } catch {
-            return false
+            detailText = "Delete failed: command failed."
         }
     }
 

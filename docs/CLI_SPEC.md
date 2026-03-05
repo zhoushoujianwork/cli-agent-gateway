@@ -20,6 +20,10 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
 - `health [--json]`
 - `send (--to <id> | --session-key <key>) (--text <msg> | --file <path>) [--msgtype text|markdown] [--channel <name>] [--message-id <id>] [--report-file <path>] [--dry-run] [--json]`
 - `sessions [--limit <n>] [--json]`
+- `messages --session-key <key> [--json]`
+- `session-clear --session-key <key> [--json]`
+- `session-delete --session-key <key> [--json]`
+- `sessions-delete-all [--json]`
 - `actions`
 - `help`
 
@@ -31,7 +35,8 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
   - Else fallback to parent when parent has `.env`.
 - Missing `.env` for runtime commands (`run`, `start`, `send`) is fatal.
 - `run` does not accept positional workdir arg.
-- 当 `gatewayd` 可达且 `CAG_GRPC_DISABLE!=1` 时，`status/sessions` 优先走 gRPC 控制面；不可达时回退本地实现。
+- `sessions/send(--session-key)/messages/session-*` 仅通过 gRPC 控制面访问 `gatewayd`，连接失败时会自动尝试拉起 `gatewayd` 后重试一次。
+- `status` 保持 gRPC 优先，不可达时回退本地实现。
 
 ## Exit codes
 
@@ -184,6 +189,56 @@ Defaulting:
 - 当前开放 RPC：
   - `Status`
   - `Sessions`
+  - `SendToSession`
+  - `SessionMessages`
+  - `ClearSession`
+  - `DeleteSession`
+  - `DeleteAllSessions`
+
+### 会话一致性约束
+
+- GUI 依赖的会话读写命令（`sessions/messages/send --session-key/session-*`）必须在 `gatewayd` 运行时执行。
+- 若 `gatewayd` 未运行，CLI 会先尝试自动拉起；仍不可达时返回非 0，并在 JSON 中输出 `error.code=gateway_unreachable`。
+
+### `messages --json`
+
+Output object:
+
+```json
+{
+  "ok": true,
+  "action": "messages",
+  "session_key": "sess_xxx",
+  "messages": [],
+  "timeline": []
+}
+```
+
+Field rules:
+
+- `ok` (`bool`, required)
+- `action` (`string`, required, fixed `messages`)
+- `session_key` (`string`, required)
+- `messages` (`array`, required)
+- `timeline` (`array`, required)
+
+### `session-clear` / `session-delete` / `sessions-delete-all --json`
+
+Output object:
+
+```json
+{
+  "ok": true,
+  "action": "session-clear",
+  "session_key": "sess_xxx"
+}
+```
+
+Field rules:
+
+- `ok` (`bool`, required)
+- `action` (`string`, required)
+- `session_key` (`string`, optional for `sessions-delete-all`)
 
 ## Compatibility policy
 

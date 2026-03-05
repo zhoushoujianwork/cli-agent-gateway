@@ -24,6 +24,11 @@ const _ = grpc.SupportPackageIsVersion7
 type GatewayControlClient interface {
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	Sessions(ctx context.Context, in *SessionsRequest, opts ...grpc.CallOption) (*SessionsResponse, error)
+	SendToSession(ctx context.Context, in *SendToSessionRequest, opts ...grpc.CallOption) (*SendToSessionResponse, error)
+	SessionMessages(ctx context.Context, in *SessionMessagesRequest, opts ...grpc.CallOption) (*SessionMessagesResponse, error)
+	ClearSession(ctx context.Context, in *SessionKeyRequest, opts ...grpc.CallOption) (*SessionMutationResponse, error)
+	DeleteSession(ctx context.Context, in *SessionKeyRequest, opts ...grpc.CallOption) (*SessionMutationResponse, error)
+	DeleteAllSessions(ctx context.Context, in *EmptyRepoRequest, opts ...grpc.CallOption) (*SessionMutationResponse, error)
 }
 
 type gatewayControlClient struct {
@@ -52,12 +57,62 @@ func (c *gatewayControlClient) Sessions(ctx context.Context, in *SessionsRequest
 	return out, nil
 }
 
+func (c *gatewayControlClient) SendToSession(ctx context.Context, in *SendToSessionRequest, opts ...grpc.CallOption) (*SendToSessionResponse, error) {
+	out := new(SendToSessionResponse)
+	err := c.cc.Invoke(ctx, "/gateway.v1.GatewayControl/SendToSession", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayControlClient) SessionMessages(ctx context.Context, in *SessionMessagesRequest, opts ...grpc.CallOption) (*SessionMessagesResponse, error) {
+	out := new(SessionMessagesResponse)
+	err := c.cc.Invoke(ctx, "/gateway.v1.GatewayControl/SessionMessages", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayControlClient) ClearSession(ctx context.Context, in *SessionKeyRequest, opts ...grpc.CallOption) (*SessionMutationResponse, error) {
+	out := new(SessionMutationResponse)
+	err := c.cc.Invoke(ctx, "/gateway.v1.GatewayControl/ClearSession", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayControlClient) DeleteSession(ctx context.Context, in *SessionKeyRequest, opts ...grpc.CallOption) (*SessionMutationResponse, error) {
+	out := new(SessionMutationResponse)
+	err := c.cc.Invoke(ctx, "/gateway.v1.GatewayControl/DeleteSession", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayControlClient) DeleteAllSessions(ctx context.Context, in *EmptyRepoRequest, opts ...grpc.CallOption) (*SessionMutationResponse, error) {
+	out := new(SessionMutationResponse)
+	err := c.cc.Invoke(ctx, "/gateway.v1.GatewayControl/DeleteAllSessions", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GatewayControlServer is the server API for GatewayControl service.
 // All implementations must embed UnimplementedGatewayControlServer
 // for forward compatibility
 type GatewayControlServer interface {
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
 	Sessions(context.Context, *SessionsRequest) (*SessionsResponse, error)
+	SendToSession(context.Context, *SendToSessionRequest) (*SendToSessionResponse, error)
+	SessionMessages(context.Context, *SessionMessagesRequest) (*SessionMessagesResponse, error)
+	ClearSession(context.Context, *SessionKeyRequest) (*SessionMutationResponse, error)
+	DeleteSession(context.Context, *SessionKeyRequest) (*SessionMutationResponse, error)
+	DeleteAllSessions(context.Context, *EmptyRepoRequest) (*SessionMutationResponse, error)
 	mustEmbedUnimplementedGatewayControlServer()
 }
 
@@ -70,6 +125,21 @@ func (UnimplementedGatewayControlServer) Status(context.Context, *StatusRequest)
 }
 func (UnimplementedGatewayControlServer) Sessions(context.Context, *SessionsRequest) (*SessionsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Sessions not implemented")
+}
+func (UnimplementedGatewayControlServer) SendToSession(context.Context, *SendToSessionRequest) (*SendToSessionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SendToSession not implemented")
+}
+func (UnimplementedGatewayControlServer) SessionMessages(context.Context, *SessionMessagesRequest) (*SessionMessagesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SessionMessages not implemented")
+}
+func (UnimplementedGatewayControlServer) ClearSession(context.Context, *SessionKeyRequest) (*SessionMutationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClearSession not implemented")
+}
+func (UnimplementedGatewayControlServer) DeleteSession(context.Context, *SessionKeyRequest) (*SessionMutationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteSession not implemented")
+}
+func (UnimplementedGatewayControlServer) DeleteAllSessions(context.Context, *EmptyRepoRequest) (*SessionMutationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteAllSessions not implemented")
 }
 func (UnimplementedGatewayControlServer) mustEmbedUnimplementedGatewayControlServer() {}
 
@@ -120,6 +190,96 @@ func _GatewayControl_Sessions_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GatewayControl_SendToSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendToSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayControlServer).SendToSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/gateway.v1.GatewayControl/SendToSession",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayControlServer).SendToSession(ctx, req.(*SendToSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayControl_SessionMessages_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SessionMessagesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayControlServer).SessionMessages(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/gateway.v1.GatewayControl/SessionMessages",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayControlServer).SessionMessages(ctx, req.(*SessionMessagesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayControl_ClearSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SessionKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayControlServer).ClearSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/gateway.v1.GatewayControl/ClearSession",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayControlServer).ClearSession(ctx, req.(*SessionKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayControl_DeleteSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SessionKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayControlServer).DeleteSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/gateway.v1.GatewayControl/DeleteSession",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayControlServer).DeleteSession(ctx, req.(*SessionKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayControl_DeleteAllSessions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EmptyRepoRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayControlServer).DeleteAllSessions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/gateway.v1.GatewayControl/DeleteAllSessions",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayControlServer).DeleteAllSessions(ctx, req.(*EmptyRepoRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GatewayControl_ServiceDesc is the grpc.ServiceDesc for GatewayControl service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -134,6 +294,26 @@ var GatewayControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Sessions",
 			Handler:    _GatewayControl_Sessions_Handler,
+		},
+		{
+			MethodName: "SendToSession",
+			Handler:    _GatewayControl_SendToSession_Handler,
+		},
+		{
+			MethodName: "SessionMessages",
+			Handler:    _GatewayControl_SessionMessages_Handler,
+		},
+		{
+			MethodName: "ClearSession",
+			Handler:    _GatewayControl_ClearSession_Handler,
+		},
+		{
+			MethodName: "DeleteSession",
+			Handler:    _GatewayControl_DeleteSession_Handler,
+		},
+		{
+			MethodName: "DeleteAllSessions",
+			Handler:    _GatewayControl_DeleteAllSessions_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

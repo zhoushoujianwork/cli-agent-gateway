@@ -47,7 +47,86 @@ message SessionsResponse {
   repeated SessionItem items = 3;
 }
 
+message SendToSessionRequest {
+  string repo_root = 1;
+  string session_key = 2;
+  string text = 3;
+  string message_id = 4;
+  string msg_type = 5;
+  bool dry_run = 6;
+  string source = 7;
+}
+
+message SendToSessionResponse {
+  bool ok = 1;
+  string error = 2;
+  string channel = 3;
+  string to = 4;
+  string message_id = 5;
+  string msg_type = 6;
+  bool dry_run = 7;
+  string source = 8;
+  string session_key = 9;
+  string session_id = 10;
+  string result = 11;
+  int32 elapsed_sec = 12;
+}
+
+message SessionMessagesRequest {
+  string repo_root = 1;
+  string session_key = 2;
+}
+
+message ChatMessage {
+  string id = 1;
+  string source_msg_id = 2;
+  string role = 3;
+  string text = 4;
+  string time = 5;
+  string status = 6;
+  string status_detail = 7;
+}
+
+message ProcessEvent {
+  string id = 1;
+  string time = 2;
+  string title = 3;
+  string detail = 4;
+}
+
+message TimelineEntry {
+  string msg_id = 1;
+  repeated ProcessEvent events = 2;
+}
+
+message SessionMessagesResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated ChatMessage messages = 3;
+  repeated TimelineEntry timeline = 4;
+}
+
+message SessionKeyRequest {
+  string repo_root = 1;
+  string session_key = 2;
+}
+
+message SessionMutationResponse {
+  bool ok = 1;
+  string error = 2;
+  string session_key = 3;
+}
+
+message EmptyRepoRequest {
+  string repo_root = 1;
+}
+
 service GatewayControl {
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc Sessions(SessionsRequest) returns (SessionsResponse);
+  rpc SendToSession(SendToSessionRequest) returns (SendToSessionResponse);
+  rpc SessionMessages(SessionMessagesRequest) returns (SessionMessagesResponse);
+  rpc ClearSession(SessionKeyRequest) returns (SessionMutationResponse);
+  rpc DeleteSession(SessionKeyRequest) returns (SessionMutationResponse);
+  rpc DeleteAllSessions(EmptyRepoRequest) returns (SessionMutationResponse);
 }

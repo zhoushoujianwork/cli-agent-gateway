@@ -59,13 +59,18 @@ cd src && go run ./cmd/gateway-cli doctor --json
 cd src && go run ./cmd/gateway-cli gatewayd --listen 127.0.0.1:58473
 cd src && go run ./cmd/gateway-cli send --to tester --text "hello" --json
 cd src && go run ./cmd/gateway-cli send --session-key sess_xxx --text "hello from gui" --json
+cd src && go run ./cmd/gateway-cli messages --session-key sess_xxx --json
+cd src && go run ./cmd/gateway-cli session-clear --session-key sess_xxx --json
+cd src && go run ./cmd/gateway-cli session-delete --session-key sess_xxx --json
+cd src && go run ./cmd/gateway-cli sessions-delete-all --json
 cd src && go run ./cmd/gateway-cli send --to tester --file ./message.md --msgtype markdown --dry-run --json
 ```
 
-### gRPC 控制面（阶段一）
+### gRPC 控制面（阶段二进行中）
 
-- `gatewayd` 提供控制面 gRPC 服务（当前已开放 `Status`、`Sessions`）。
-- `cag status` / `cag sessions` 默认优先通过 gRPC 获取数据；连接失败时自动回退本地逻辑。
+- `gatewayd` 提供控制面 gRPC 服务（当前已开放 `Status`、`Sessions`、`SendToSession`、`SessionMessages`、`Clear/Delete`）。
+- 会话一致性相关命令：`cag sessions` / `cag send --session-key` / `cag messages` / `cag session-*` 仅通过 gRPC 访问 `gatewayd`；若未启动会自动尝试拉起 `gatewayd` 后重试一次。
+- `cag status` 仍保留 gRPC 优先 + 本地回退。
 - 地址通过 `GATEWAYD_ADDR` 控制（默认 `127.0.0.1:58473`）。
 - 可通过 `CAG_GRPC_DISABLE=1` 强制禁用 gRPC 路径。
 
