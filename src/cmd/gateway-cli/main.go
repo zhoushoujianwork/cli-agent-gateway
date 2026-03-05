@@ -125,6 +125,8 @@ func main() {
 		os.Exit(runSend(repoRoot, args))
 	case "sessions":
 		os.Exit(runSessions(repoRoot, args))
+	case "gatewayd":
+		os.Exit(runGatewayd(repoRoot, args))
 	case "actions":
 		printActions(os.Stdout)
 	case "help", "-h", "--help":
@@ -147,6 +149,7 @@ func printActions(out *os.File) {
 	fmt.Fprintln(out, "doctor")
 	fmt.Fprintln(out, "send")
 	fmt.Fprintln(out, "sessions")
+	fmt.Fprintln(out, "gatewayd")
 	fmt.Fprintln(out, "actions")
 	fmt.Fprintln(out, "help")
 }
@@ -165,6 +168,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
 	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run)")
 	fmt.Fprintln(out, "  sessions [--json]   List sessions for GUI")
+	fmt.Fprintln(out, "  gatewayd [opts]     Run gRPC control plane server")
 	fmt.Fprintln(out, "  actions             Print supported action names")
 	fmt.Fprintln(out, "  help                Show this message")
 }
@@ -277,6 +281,56 @@ func runGoConfig(repoRoot string, args []string) int {
 
 func runStatus(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
+	if grpc, err := tryStatusViaGRPC(repoRoot); err == nil {
+		if !grpc.GetOk() {
+			if jsonOut {
+				printJSONActionError("status", "grpc_status_failed", grpc.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "status failed: %s\n", grpc.GetError())
+			return 1
+		}
+		payload := StatusPayload{
+			Running:   grpc.GetRunning(),
+			StartedAt: grpc.GetStartedAt(),
+			LockFile:  grpc.GetLockFile(),
+			Metadata:  map[string]any{},
+		}
+		if grpc.GetHasPid() {
+			pid := int(grpc.GetPid())
+			payload.PID = &pid
+		}
+		payload.Metadata["channel"] = grpc.GetChannel()
+		payload.Metadata["workdir"] = grpc.GetWorkdir()
+		payload.Metadata["log_file"] = grpc.GetLogFile()
+		payload.Metadata["lock_file"] = grpc.GetLockFile()
+		if grpc.GetHasPid() {
+			payload.Metadata["pid"] = grpc.GetPid()
+		}
+		if strings.TrimSpace(grpc.GetStartedAt()) != "" {
+			payload.Metadata["started_at"] = grpc.GetStartedAt()
+		}
+		cfg, _ := config.Load(repoRoot, "")
+		if jsonOut {
+			printJSON(statusJSON("status", payload, cfg, grpc.GetLogFile()))
+			return 0
+		}
+		if payload.Running {
+			pid := "unknown"
+			if payload.PID != nil {
+				pid = fmt.Sprintf("%d", *payload.PID)
+			}
+			started := payload.StartedAt
+			if strings.TrimSpace(started) == "" {
+				started = "unknown"
+			}
+			fmt.Printf("RUNNING pid=%s started_at=%s lock=%s\n", pid, started, payload.LockFile)
+			return 0
+		}
+		fmt.Printf("NOT_RUNNING lock=%s\n", payload.LockFile)
+		return 0
+	}
+
 	payload, err := getStatusPayload(repoRoot)
 	if err != nil {
 		if jsonOut {
@@ -1081,6 +1135,39 @@ func runSessions(repoRoot string, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if grpc, err := trySessionsViaGRPC(repoRoot, *limit); err == nil {
+		if !grpc.GetOk() {
+			if *jsonOut {
+				printJSONActionError("sessions", "grpc_sessions_failed", grpc.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "sessions failed: %s\n", grpc.GetError())
+			return 1
+		}
+		items := make([]SessionsItem, 0, len(grpc.GetItems()))
+		for _, it := range grpc.GetItems() {
+			items = append(items, SessionsItem{
+				SessionKey:  it.GetSessionKey(),
+				SessionID:   it.GetSessionId(),
+				Channel:     it.GetChannel(),
+				Sender:      it.GetSender(),
+				SenderName:  it.GetSenderName(),
+				ThreadID:    it.GetThreadId(),
+				LastMessage: it.GetLastMessage(),
+				LastTime:    it.GetLastTime(),
+				Latest:      it.GetLatest(),
+			})
+		}
+		if *jsonOut {
+			printJSON(SessionsPayload{OK: true, Action: "sessions", Items: items})
+			return 0
+		}
+		for _, it := range items {
+			fmt.Printf("%s\t%s\t%s\t%s\n", it.LastTime, it.SenderName, it.Channel, it.LastMessage)
+		}
+		return 0
+	}
+
 	cfg, err := config.Load(repoRoot, "")
 	if err != nil {
 		if *jsonOut {

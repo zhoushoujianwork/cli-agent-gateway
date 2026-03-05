@@ -16,8 +16,10 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
 - `restart`
 - `config [workdir]`
 - `status [--json]`
+- `gatewayd [--listen <addr>]`
 - `health [--json]`
-- `send --to <id> (--text <msg> | --file <path>) [--msgtype text|markdown] [--channel <name>] [--message-id <id>] [--report-file <path>] [--dry-run] [--json]`
+- `send (--to <id> | --session-key <key>) (--text <msg> | --file <path>) [--msgtype text|markdown] [--channel <name>] [--message-id <id>] [--report-file <path>] [--dry-run] [--json]`
+- `sessions [--limit <n>] [--json]`
 - `actions`
 - `help`
 
@@ -29,6 +31,7 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
   - Else fallback to parent when parent has `.env`.
 - Missing `.env` for runtime commands (`run`, `start`, `send`) is fatal.
 - `run` does not accept positional workdir arg.
+- 当 `gatewayd` 可达且 `CAG_GRPC_DISABLE!=1` 时，`status/sessions` 优先走 gRPC 控制面；不可达时回退本地实现。
 
 ## Exit codes
 
@@ -127,6 +130,10 @@ Field rules:
 - `dry_run` (`bool`, required)
 - `source` (`string`, required; `text` or `file`)
 - `error` (`string`, optional; present on failure)
+- `session_key` (`string`, optional; present when using `--session-key`)
+- `session_id` (`string`, optional)
+- `result` (`string`, optional; agent summary for session-path send)
+- `elapsed_sec` (`number`, optional; session-path execution elapsed)
 
 Semantics:
 
@@ -155,7 +162,7 @@ Semantics:
 
 Required:
 
-- `--to`
+- `--to` 或 `--session-key`（二选一，`--session-key` 用于 GUI/会话内执行）
 - exactly one source: `--text` or `--file`
 
 Optional:
@@ -170,6 +177,13 @@ Optional:
 Defaulting:
 
 - For `dingtalk`, `--to` can fallback to `DINGTALK_DEFAULT_TO_USER`.
+
+### `gatewayd`
+
+- `--listen`: gRPC 监听地址（默认读取 `GATEWAYD_ADDR`，再回退 `127.0.0.1:58473`）。
+- 当前开放 RPC：
+  - `Status`
+  - `Sessions`
 
 ## Compatibility policy
 

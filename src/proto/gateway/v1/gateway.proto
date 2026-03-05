@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package gateway.v1;
+
+option go_package = "cli-agent-gateway/internal/gen/gatewayv1;gatewayv1";
+
+message StatusRequest {
+  string repo_root = 1;
+}
+
+message StatusResponse {
+  bool ok = 1;
+  string error = 2;
+  bool running = 3;
+  int64 pid = 4;
+  bool has_pid = 5;
+  string started_at = 6;
+  string lock_file = 7;
+  string channel = 8;
+  string interaction_log_file = 9;
+  string state_file = 10;
+  string log_file = 11;
+  string workdir = 12;
+  string status = 13;
+}
+
+message SessionsRequest {
+  string repo_root = 1;
+  int32 limit = 2;
+}
+
+message SessionItem {
+  string session_key = 1;
+  string session_id = 2;
+  string channel = 3;
+  string sender = 4;
+  string sender_name = 5;
+  string thread_id = 6;
+  string last_message = 7;
+  string last_time = 8;
+  bool latest = 9;
+}
+
+message SessionsResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated SessionItem items = 3;
+}
+
+service GatewayControl {
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Sessions(SessionsRequest) returns (SessionsResponse);
+}

@@ -48,6 +48,16 @@
 - GUI 改为优先调用 gRPC，避免文件锁元数据轮询。
 - 数据面仍保留 ACP stdio，后续评估统一传输层。
 
+### R6 当前进度（Phase 1）
+
+- 已落地：
+  - `gatewayd` 命令与 gRPC 服务骨架
+  - RPC: `Status`, `Sessions`
+  - `cag status` / `cag sessions` 优先走 gRPC（不可达回退本地）
+- 下一步：
+  - `send --session-key`、session 管理操作（clear/new/delete）迁移到 gRPC
+  - GUI 读写统一切到 gRPC 路径并移除文件直读
+
 ## Branch Goal (codex/feat/init-go-cli-actions)
 
 - Step 1 complete: `gateway-cli run` now uses the Go-native gateway loop (legacy bridge removed).

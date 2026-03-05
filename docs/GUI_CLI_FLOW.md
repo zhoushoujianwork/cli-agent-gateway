@@ -4,6 +4,8 @@
 
 macOS GUI 不直接读写网关内部文件，只通过 `gateway` CLI 获取数据与执行动作。
 
+> 注：自 R6 Phase 1 起，CLI 对 `status/sessions` 默认优先经 `gatewayd` gRPC 读取；不可达时回退本地实现。
+
 ## 读模型（Read）
 
 GUI 周期轮询：
