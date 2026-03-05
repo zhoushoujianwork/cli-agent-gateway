@@ -1229,32 +1229,15 @@ final class GatewayController: ObservableObject {
         detailText = "\(pidText)Gateway restarted.\nLog: \(shownLog)"
     }
 
-    func openLogs() {
-        let target = currentLogFile.isEmpty ? cfg.logFile : currentLogFile
-        let url = URL(fileURLWithPath: target)
-        if FileManager.default.fileExists(atPath: target) {
-            NSWorkspace.shared.open(url)
-            return
-        }
-        openLogsFolder()
-    }
-
-    func openLogsFolder() {
-        let target = currentLogFile.isEmpty ? cfg.logFile : currentLogFile
-        let folder = URL(fileURLWithPath: target).deletingLastPathComponent()
-        NSWorkspace.shared.open(folder)
-    }
-
-    func previewLatestLog(lines: Int = 60) {
+    func latestLogTail(lines: Int = 120) -> String {
         let target = currentLogFile.isEmpty ? cfg.logFile : currentLogFile
         guard FileManager.default.fileExists(atPath: target),
               let content = try? String(contentsOfFile: target, encoding: .utf8) else {
-            detailText = "Log preview failed: file not found.\n\(target)"
-            return
+            return "Log tail failed: file not found.\n\(target)"
         }
         let recent = content.split(separator: "\n", omittingEmptySubsequences: false).suffix(max(1, lines))
         let preview = recent.joined(separator: "\n")
-        detailText = "Log: \(target)\n--- tail \(lines) ---\n\(preview)"
+        return "Log: \(target)\n--- tail \(lines) ---\n\(preview)"
     }
 
     private func shellEscape(_ raw: String) -> String {
@@ -1476,6 +1459,27 @@ struct ProcessTimelineView: View {
     }
 }
 
+struct LogTailView: View {
+    let content: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Gateway Log Tail")
+                .font(.headline)
+            ScrollView {
+                Text(content)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(10)
+            .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(16)
+        .frame(width: 760, height: 520)
+    }
+}
+
 struct ConfigView: View {
     @ObservedObject var controller: GatewayController
 
@@ -1520,6 +1524,8 @@ struct ContentView: View {
     private let refreshTimer = Timer.publish(every: 2.0, on: .main, in: .common).autoconnect()
     @State private var showConfig = false
     @State private var timelineMessage: ChatMessage?
+    @State private var showLogTail = false
+    @State private var logTailText = ""
     @State private var refreshTick: Int = 0
 
     init(controller: GatewayController) {
@@ -1556,9 +1562,10 @@ struct ContentView: View {
                     .disabled(controller.statusText != "Running")
                 Button("Restart") { controller.restart() }
                     .disabled(controller.statusText == "Blocked")
-                Button("Open Logs") { controller.openLogs() }
-                Button("Log Tail") { controller.previewLatestLog() }
-                Button("Open Log Dir") { controller.openLogsFolder() }
+                Button("Tail Logs") {
+                    logTailText = controller.latestLogTail()
+                    showLogTail = true
+                }
                 Button("Config") { showConfig = true }
             }
             .padding(.horizontal, 18)
@@ -1686,6 +1693,9 @@ struct ContentView: View {
         }
         .sheet(item: $timelineMessage) { msg in
             ProcessTimelineView(message: msg, events: controller.timeline(for: msg))
+        }
+        .sheet(isPresented: $showLogTail) {
+            LogTailView(content: logTailText)
         }
     }
 }
