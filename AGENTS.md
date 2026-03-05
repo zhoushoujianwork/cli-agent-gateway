@@ -16,41 +16,36 @@ This file provides practical instructions for human and AI agents working in thi
 
 ## Repository Map
 
-- `src/app/main.py`: app entrypoint
-- `src/core/loop.py`: gateway main loop
-- `src/core/router.py`: routing logic
-- `src/agents/acp_stdio_agent.py`: ACP adapter
-- `src/infra/jsonrpc_stdio.py`: stdio JSON-RPC transport
-- `src/channels/`: channel adapters (iMessage, DingTalk, command)
+- `src/cmd/gateway-cli/main.go`: app entrypoint
+- `src/internal/core/loop.go`: gateway main loop
+- `src/internal/agents/acp/`: ACP adapter
+- `src/internal/channels/`: channel adapters (DingTalk, command, iMessage TODO)
+- `src/internal/storage/`: storage backends (sqlite/localfile)
 - `docs/ARCHITECTURE.md`: architecture details
 
 ## Local Setup
 
-1. Use Python 3.9+.
-2. Copy `.env.example` to `.env` and fill required values, or run interactive setup.
+1. Use Go 1.24+.
+2. Copy `.env.example` to `.env` and fill required values, or run `cag config`.
 3. Ensure `ACP_AGENT_CMD` is executable and available.
 
 ## Common Commands
 
 - Run gateway:
-  - `PYTHONPATH=src python3 -m app.main <agent_workdir>`
-- Re-run setup wizard (even if `.env` exists):
-  - `make config`
+  - `make run`
+- Build CLI:
+  - `make build`
 - Check single-instance lock status:
-  - `make status`
-- Build macOS GUI app:
-  - `make build-macos-gui-app`
-- Clean runtime state/log artifacts:
-  - `make clean`
+  - `cd src && go run ./cmd/gateway-cli status`
 
 ## Coding Guidelines
 
 - Keep changes small and localized.
-- Preserve existing architecture boundaries:
-  - channel-specific behavior in `channels/`
-  - orchestration/routing in `core/`
-  - ACP integration in `agents/` and `infra/`
-- Prefer explicit types and dataclass/protocol patterns already used in the codebase.
+- Preserve architecture boundaries:
+  - channel-specific behavior in `src/internal/channels/`
+  - orchestration/routing in `src/internal/core/`
+  - ACP integration in `src/internal/agents/`
+  - storage/config/lock in `src/internal/infra/` and `src/internal/storage/`
 - Avoid introducing heavy dependencies unless clearly justified.
 - Do not hardcode secrets or credentials; use environment variables.
 
@@ -75,25 +70,12 @@ Run these checks before every commit:
    - `git status --short`
    - Confirm `.env` and other local secret files are ignored and unstaged.
 
-If any sensitive value is found, remove it from code/history before commit.
-
-## Multi-Agent Collaboration Rules
-
-- One task, one owner agent.
-- Split parallel work by module boundaries (`channels/`, `core/`, `agents/`, `infra/`, `docs/`) to reduce conflicts.
-- Do not edit the same file from multiple agents at the same time unless explicitly coordinated.
-- Each agent should publish a short plan before coding: scope, touched files, risks.
-- Commit in small, reviewable units; avoid mixed-purpose commits.
-- Synchronize with base branch frequently for long-running worktrees.
-- If conflicts occur, prefer keeping behavior-compatible code and document tradeoffs in PR notes.
-- Before merge, run validation checklist and secret hygiene checks again.
-
 ## Validation Checklist
 
 Before finishing a change, run at least:
 
-1. `python3 -m compileall src`
-2. Relevant smoke run for touched flows (for example `PYTHONPATH=src python3 -m app.main <agent_workdir>`, channel scripts, or mock scripts in `scripts/testing/`).
+1. `cd src && go test ./...`
+2. Relevant smoke run for touched flows (for example `make run`, or channel mocks).
 3. Verify docs/env examples if behavior or config changed.
 
 ## Documentation Expectations

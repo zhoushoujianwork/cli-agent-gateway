@@ -38,3 +38,18 @@
 - Add GUI controls for setup/start/stop/status and live log viewing.
 - Reuse single-instance lock and existing env/config semantics.
 - Package and document a `.app` distribution flow.
+
+## Phase 7: Go backend migration (cross-platform)
+
+- Introduce Go implementation of gateway runtime while keeping ACP-first architecture.
+- Keep config/state/report contracts compatible for macOS app and existing scripts.
+- Port modules by boundary: `infra` -> `agents` -> `core` -> `channels`.
+- Validate in shadow mode against Python runtime before default cutover.
+- Keep Python runtime as temporary fallback during stabilization window.
+
+### Branch Goal (codex/feat/init-go-cli-actions)
+
+- Step 1 complete: `gateway-cli run` now uses the Go-native gateway loop (legacy bridge removed).
+- Step 2 complete: `gateway-cli config` now writes `.env` via Go-native flow (no Python bridge).
+- Next: migrate channel adapters to Go-native implementations and remove runtime dependence on Python scripts.
+- Final target: runtime `run/status/config` and default channels all Go-native, then delete Python runtime modules.

@@ -12,7 +12,7 @@ Options:
   --app-name <name>    App bundle display name (default: CLI Agent Gateway)
   --ui-mode <mode>     Launcher mode: terminal|gui (default: terminal)
   --repo-root <dir>    Repository root path (default: auto-detected)
-  --workdir <dir>      Workdir argument passed to app.main (default: CODEX_WORKDIR from .env or repo root)
+  --workdir <dir>      Session workspace hint for app config only (not passed to run)
   --help               Show this help
 EOF
 }
@@ -104,7 +104,7 @@ mkdir -p "$MACOS_PATH"
 
 LAUNCH_SCRIPT="$MACOS_PATH/launch_gateway"
 if [[ "$UI_MODE" == "terminal" ]]; then
-  RUN_CMD="cd \"$REPO_ROOT\" && PYTHONPATH=src python3 -m app.main \"$WORKDIR\""
+  RUN_CMD="cd \"$REPO_ROOT/src\" && go run ./cmd/gateway-cli run"
   RUN_CMD="$RUN_CMD; echo; echo \"[launcher] Process exited. Press Enter to close this window.\"; read -r _"
   ESCAPED_CMD="${RUN_CMD//\\/\\\\}"
   ESCAPED_CMD="${ESCAPED_CMD//\"/\\\"}"
@@ -135,26 +135,13 @@ mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
 
 get_lock_pid() {
-  python3 - "$LOCK_FILE" <<'PY'
-import json
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-if not path.exists():
-    print("")
-    raise SystemExit(0)
-try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-except Exception:
-    print("")
-    raise SystemExit(0)
-pid = data.get("pid")
-if isinstance(pid, int):
-    print(pid)
-else:
-    print("")
-PY
+  local out
+  out="$(cd "$REPO_ROOT/src" && go run ./cmd/gateway-cli status 2>/dev/null || true)"
+  if [[ "$out" == RUNNING* ]]; then
+    printf '%s\n' "$out" | sed -nE 's/^RUNNING pid=([0-9]+).*/\1/p'
+  else
+    printf ''
+  fi
 }
 
 is_running() {
@@ -177,8 +164,8 @@ start_gateway() {
     return 0
   fi
   (
-    cd "$REPO_ROOT"
-    nohup env PYTHONPATH=src python3 -m app.main "$WORKDIR" >>"$LOG_FILE" 2>&1 &
+    cd "$REPO_ROOT/src"
+    nohup env CHANNEL_TYPE="${CHANNEL_TYPE:-command}" go run ./cmd/gateway-cli run >>"$LOG_FILE" 2>&1 &
   )
   sleep 1
   if is_running; then

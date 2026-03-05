@@ -21,10 +21,8 @@ enum ChannelType: String, CaseIterable, Identifiable {
 
 enum RepairAction: String {
     case setupEnv
-    case installPython
     case installCodexACP
     case installIMsg
-    case installDingTalkStream
 }
 
 struct HealthCheckItem: Identifiable {
@@ -295,17 +293,6 @@ final class GatewayController: ObservableObject {
             )
         )
 
-        let pyOK = commandExists("python3")
-        checks.append(
-            HealthCheckItem(
-                id: "python3",
-                title: "Python runtime",
-                ok: pyOK,
-                detail: pyOK ? "python3 is available in PATH." : "python3 not found in PATH.",
-                repairAction: pyOK ? nil : .installPython
-            )
-        )
-
         let acpCmd = (envValue("ACP_AGENT_CMD")?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             ? envValue("ACP_AGENT_CMD")!.trimmingCharacters(in: .whitespacesAndNewlines)
             : "codex-acp"
@@ -333,20 +320,6 @@ final class GatewayController: ObservableObject {
             )
         }
 
-        if selectedChannel == .dingtalk {
-            let dt = shellOutput("python3 -c 'import dingtalk_stream' >/dev/null 2>&1")
-            let dtOK = dt.code == 0
-            checks.append(
-                HealthCheckItem(
-                    id: "dingtalk_stream",
-                    title: "dingtalk-stream Python package",
-                    ok: dtOK,
-                    detail: dtOK ? "dingtalk-stream is installed." : "Missing dingtalk-stream package.",
-                    repairAction: dtOK ? nil : .installDingTalkStream
-                )
-            )
-        }
-
         healthChecks = checks
     }
 
@@ -359,27 +332,14 @@ final class GatewayController: ObservableObject {
             _ = shellOutput("osascript -e \"\(script.replacingOccurrences(of: "\"", with: "\\\""))\"")
             detailText = "Opened setup wizard in Terminal. Complete it, then checks will pass."
 
-        case .installPython:
-            if commandExists("brew") {
-                let out = shellOutput("brew install python")
-                detailText = out.code == 0 ? "Python install completed." : "Python install failed:\n\(out.output)"
-            } else {
-                NSWorkspace.shared.open(URL(string: "https://www.python.org/downloads/")!)
-                detailText = "Opened Python download page (Homebrew not found)."
-            }
-
         case .installCodexACP:
-            let cmd = "if command -v pipx >/dev/null 2>&1; then pipx install codex-acp || pipx upgrade codex-acp; else python3 -m pip install --user -U codex-acp; fi"
-            let out = shellOutput(cmd)
-            detailText = out.code == 0 ? "codex-acp install/upgrade completed." : "codex-acp repair failed:\n\(out.output)"
+            NSWorkspace.shared.open(URL(string: "https://github.com/openai/codex")!)
+            detailText = "Opened Codex setup page. Install codex-acp command manually, then retry."
 
         case .installIMsg:
             NSWorkspace.shared.open(URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent("docs/IMESSAGE_SETUP.md"))
             detailText = "Opened iMessage setup guide. Install and configure imsg first."
 
-        case .installDingTalkStream:
-            let out = shellOutput("python3 -m pip install -U dingtalk-stream")
-            detailText = out.code == 0 ? "dingtalk-stream install completed." : "dingtalk-stream install failed:\n\(out.output)"
         }
         refreshHealthChecks()
     }
@@ -401,37 +361,22 @@ final class GatewayController: ObservableObject {
     }
 
     private func gatewayPIDsByWorkdir() -> [Int32] {
-        let cmd = """
-        TARGET_WORKDIR=\(shellEscape(cfg.workdir)) python3 - <<'PY'
-        import os, subprocess
-        target = os.environ.get("TARGET_WORKDIR", "").strip()
-        if not target:
-            raise SystemExit(0)
-        needle = f"-m app.main {target}"
-        out = subprocess.check_output(["ps", "-Ao", "pid=,command="], text=True)
-        pids = []
-        for raw in out.splitlines():
-            line = raw.strip()
-            if not line or needle not in line:
-                continue
-            parts = line.split(None, 1)
-            if not parts:
-                continue
-            try:
-                pids.append(int(parts[0]))
-            except Exception:
-                pass
-        for pid in sorted(set(pids)):
-            print(pid)
-        PY
-        """
+        let cmd = "cd \(shellEscape(cfg.repoRoot))/src && go run ./cmd/gateway-cli status 2>/dev/null || true"
         let out = shellOutput(cmd)
         guard out.code == 0 else { return [] }
         var result: [Int32] = []
-        for line in out.output.split(separator: "\n") {
-            guard let pid = Int32(line.trimmingCharacters(in: .whitespacesAndNewlines)) else { continue }
-            if kill(pid, 0) == 0 || errno == EPERM {
-                result.append(pid)
+        for line in out.output.split(separator: "\n").map({ String($0) }) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("RUNNING ") else { continue }
+            let parts = trimmed.split(separator: " ")
+            for part in parts {
+                let token = String(part)
+                guard token.hasPrefix("pid=") else { continue }
+                let pidRaw = String(token.dropFirst(4))
+                guard let pid = Int32(pidRaw) else { continue }
+                if kill(pid, 0) == 0 || errno == EPERM {
+                    result.append(pid)
+                }
             }
         }
         return result
@@ -1014,16 +959,7 @@ final class GatewayController: ObservableObject {
             return
         }
         let selectedSessionKey = session.sessionKey
-        let channel = session.channel.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sender = session.senderId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let thread = session.threadId == "-" ? "" : session.threadId
         let baseSessionKey = session.sessionKey.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? session.sessionKey
-        let selectedSessionIdRaw = session.sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectedSessionId = (selectedSessionIdRaw == "-" || selectedSessionIdRaw.hasPrefix("segment-")) ? "" : selectedSessionIdRaw
-        if channel.isEmpty || channel == "-" || sender.isEmpty || sender == "-" {
-            detailText = "Cannot send local chat: missing session channel/sender."
-            return
-        }
 
         if let cmd = parseLocalCommand(text) {
             let cleared = clearSessionMapping(baseSessionKey: baseSessionKey)
@@ -1065,110 +1001,14 @@ final class GatewayController: ObservableObject {
         )
         appendOverlayMessage(localUser, sessionKey: selectedSessionKey)
         localDraftText = ""
-
-        let cmd = "cd \(shellEscape(cfg.repoRoot)) && PYTHONPATH=src python3 -m app.local_chat --workdir \(shellEscape(cfg.workdir)) --channel \(shellEscape(channel)) --sender \(shellEscape(sender)) --thread-id \(shellEscape(thread)) --session-key \(shellEscape(baseSessionKey)) --session-id \(shellEscape(selectedSessionId)) --text \(shellEscape(text))"
-        let timeoutSec = localChatTimeoutSec()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let token = UUID().uuidString
-            let outFile = URL(fileURLWithPath: self.cfg.repoRoot).appendingPathComponent("tmp/local_chat_\(token).out").path
-            let errFile = URL(fileURLWithPath: self.cfg.repoRoot).appendingPathComponent("tmp/local_chat_\(token).err").path
-            _ = self.shellOutput("mkdir -p \(self.shellEscape(URL(fileURLWithPath: self.cfg.repoRoot).appendingPathComponent("tmp").path))")
-            let wrapped = "\(cmd) >\(self.shellEscape(outFile)) 2>\(self.shellEscape(errFile))"
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            proc.arguments = ["-lc", wrapped]
-            var code: Int32 = 127
-            var output = ""
-            do {
-                try proc.run()
-                let deadline = Date().addingTimeInterval(timeoutSec)
-                while proc.isRunning && Date() < deadline {
-                    Thread.sleep(forTimeInterval: 0.05)
-                }
-                if proc.isRunning {
-                    proc.terminate()
-                    let killDeadline = Date().addingTimeInterval(3)
-                    while proc.isRunning && Date() < killDeadline {
-                        Thread.sleep(forTimeInterval: 0.05)
-                    }
-                    if proc.isRunning {
-                        _ = kill(proc.processIdentifier, SIGKILL)
-                    }
-                    code = 124
-                } else {
-                    code = proc.terminationStatus
-                }
-                output = (try? String(contentsOfFile: outFile, encoding: .utf8)) ?? ""
-                let errOut = (try? String(contentsOfFile: errFile, encoding: .utf8)) ?? ""
-                if !errOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    output = output + (output.isEmpty ? "" : "\n") + errOut
-                }
-            } catch {
-                output = error.localizedDescription
-                code = 127
-            }
-            try? FileManager.default.removeItem(atPath: outFile)
-            try? FileManager.default.removeItem(atPath: errFile)
-            DispatchQueue.main.async {
-                defer { self.localSending = false }
-                guard code == 0 else {
-                    let errText = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if code == 124 {
-                        self.detailText = "Local chat timeout after \(Int(timeoutSec))s."
-                        self.updateOverlayMessage(
-                            sessionKey: selectedSessionKey,
-                            messageId: userMsgId,
-                            deliveryStatus: .failed,
-                            statusDetail: "Timeout after \(Int(timeoutSec))s"
-                        )
-                    } else {
-                        self.detailText = "Local chat failed: \(errText)"
-                        self.updateOverlayMessage(
-                            sessionKey: selectedSessionKey,
-                            messageId: userMsgId,
-                            deliveryStatus: .failed,
-                            statusDetail: errText.isEmpty ? "Unknown error" : errText
-                        )
-                    }
-                    return
-                }
-                guard
-                    let jsonText = self.extractLastJSONLine(output),
-                    let data = jsonText.data(using: .utf8),
-                    let node = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else {
-                    self.detailText = "Local chat failed: invalid response."
-                    self.updateOverlayMessage(
-                        sessionKey: selectedSessionKey,
-                        messageId: userMsgId,
-                        deliveryStatus: .failed,
-                        statusDetail: "Invalid response"
-                    )
-                    return
-                }
-                self.updateOverlayMessage(
-                    sessionKey: selectedSessionKey,
-                    messageId: userMsgId,
-                    deliveryStatus: .sent,
-                    statusDetail: ""
-                )
-                let summary = ((node["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                let answer = summary.isEmpty ? "..." : summary
-                let aiMsgId = "local-a-\(Int(Date().timeIntervalSince1970 * 1000))"
-                let localAI = ChatMessage(
-                    id: aiMsgId,
-                    sourceMsgId: aiMsgId,
-                    role: "assistant",
-                    text: answer,
-                    time: ISO8601DateFormatter().string(from: Date()),
-                    deliveryStatus: .sent,
-                    statusDetail: ""
-                )
-                self.appendOverlayMessage(localAI, sessionKey: selectedSessionKey)
-                self.refreshSessions()
-                self.detailText = "Local chat sent."
-            }
-        }
+        localSending = false
+        detailText = "Local chat TODO: Go-native path not implemented yet."
+        updateOverlayMessage(
+            sessionKey: selectedSessionKey,
+            messageId: userMsgId,
+            deliveryStatus: .failed,
+            statusDetail: "TODO: Go-native local chat not implemented"
+        )
     }
 
     func deleteSelectedSession() {
@@ -1281,7 +1121,7 @@ final class GatewayController: ObservableObject {
             return
         }
 
-        let cmd = "cd \(shellEscape(cfg.repoRoot)) && nohup env CHANNEL_TYPE=\(selectedChannel.rawValue) LOCK_FILE=\(shellEscape(cfg.lockFile)) STATE_FILE=\(shellEscape(cfg.stateFile)) INTERACTION_LOG_FILE=\(shellEscape(cfg.interactionLogFile)) PYTHONPATH=src python3 -m app.main \(shellEscape(cfg.workdir)) >>\(shellEscape(cfg.logFile)) 2>&1 &"
+        let cmd = "cd \(shellEscape(cfg.repoRoot))/src && nohup env CHANNEL_TYPE=\(selectedChannel.rawValue) LOCK_FILE=\(shellEscape(cfg.lockFile)) STATE_FILE=\(shellEscape(cfg.stateFile)) INTERACTION_LOG_FILE=\(shellEscape(cfg.interactionLogFile)) go run ./cmd/gateway-cli run >>\(shellEscape(cfg.logFile)) 2>&1 &"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", cmd]
