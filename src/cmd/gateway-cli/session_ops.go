@@ -235,21 +235,21 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 	}
 	msgIDs := map[string]struct{}{}
 	for _, rec := range records {
-		kind := strings.TrimSpace(fmt.Sprint(rec["kind"]))
-		msgID := strings.TrimSpace(fmt.Sprint(rec["msg_id"]))
+		kind := cleanAnyString(rec["kind"])
+		msgID := cleanAnyString(rec["msg_id"])
 		if msgID == "" {
 			continue
 		}
-		if kind == "trace" && strings.TrimSpace(fmt.Sprint(rec["stage"])) == "session_resolved" {
-			if strings.TrimSpace(fmt.Sprint(rec["session_key"])) == sessionKey {
+		if kind == "trace" && cleanAnyString(rec["stage"]) == "session_resolved" {
+			if cleanAnyString(rec["session_key"]) == sessionKey {
 				msgIDs[msgID] = struct{}{}
 			}
 		}
 		if kind == "inbound_received" {
 			profile, _ := rec["user_profile"].(map[string]any)
-			channel := strings.TrimSpace(fmt.Sprint(profile["channel"]))
-			threadID := strings.TrimSpace(fmt.Sprint(profile["thread_id"]))
-			sender := strings.TrimSpace(fmt.Sprint(rec["sender"]))
+			channel := cleanAnyString(profile["channel"])
+			threadID := cleanAnyString(profile["thread_id"])
+			sender := cleanAnyString(rec["sender"])
 			if buildSessionKey(channel, sender, threadID) == sessionKey {
 				msgIDs[msgID] = struct{}{}
 			}
@@ -262,17 +262,17 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 	seenFinal := map[string]struct{}{}
 
 	for idx, rec := range records {
-		msgID := strings.TrimSpace(fmt.Sprint(rec["msg_id"]))
+		msgID := cleanAnyString(rec["msg_id"])
 		if msgID == "" {
 			continue
 		}
 		if _, ok := msgIDs[msgID]; !ok {
 			continue
 		}
-		kind := strings.TrimSpace(fmt.Sprint(rec["kind"]))
-		ts := strings.TrimSpace(fmt.Sprint(rec["ts"]))
+		kind := cleanAnyString(rec["kind"])
+		ts := cleanAnyString(rec["ts"])
 		if ts == "" {
-			ts = strings.TrimSpace(fmt.Sprint(rec["time"]))
+			ts = cleanAnyString(rec["time"])
 		}
 		if ts == "" {
 			ts = time.Now().UTC().Format(time.RFC3339)
@@ -282,7 +282,7 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 			if _, ok := seenInbound[msgID]; ok {
 				continue
 			}
-			text := strings.TrimSpace(fmt.Sprint(rec["text"]))
+			text := cleanAnyString(rec["text"])
 			if text == "" {
 				continue
 			}
@@ -297,13 +297,13 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 			continue
 		}
 		if kind == "trace" {
-			title := strings.TrimSpace(fmt.Sprint(rec["stage"]))
+			title := cleanAnyString(rec["stage"])
 			if title == "" {
 				continue
 			}
-			detail := strings.TrimSpace(fmt.Sprint(rec["text"]))
+			detail := cleanAnyString(rec["text"])
 			if detail == "" {
-				detail = strings.TrimSpace(fmt.Sprint(rec["error"]))
+				detail = cleanAnyString(rec["error"])
 			}
 			timelineMap[msgID] = append(timelineMap[msgID], SessionProcessEvent{
 				ID:     fmt.Sprintf("evt-%s-%d", msgID, idx),
@@ -314,9 +314,9 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 			continue
 		}
 
-		resultText := strings.TrimSpace(fmt.Sprint(rec["result"]))
-		errText := strings.TrimSpace(fmt.Sprint(rec["error"]))
-		status := strings.TrimSpace(fmt.Sprint(rec["status"]))
+		resultText := cleanAnyString(rec["result"])
+		errText := cleanAnyString(rec["error"])
+		status := cleanAnyString(rec["status"])
 		role := "assistant"
 		finalText := resultText
 		if finalText == "" && errText != "" {
@@ -404,4 +404,15 @@ func normalizeSessionKey(v string) string {
 		raw = raw[:idx]
 	}
 	return strings.TrimSpace(raw)
+}
+
+func cleanAnyString(v any) string {
+	if v == nil {
+		return ""
+	}
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "<nil>" {
+		return ""
+	}
+	return s
 }
