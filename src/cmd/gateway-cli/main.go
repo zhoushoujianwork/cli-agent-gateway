@@ -508,7 +508,7 @@ func runRestart(repoRoot string, args []string) int {
 		}
 	}
 
-	logPath := resolveLogPath(repoRoot)
+	logPath := resolveLogPath(repoRoot, args)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		printJSONActionError("restart", "log_prepare_failed", err.Error())
 		return 1
