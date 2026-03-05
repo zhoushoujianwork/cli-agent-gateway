@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 type cmdResult struct {
@@ -98,6 +99,31 @@ func TestCLIConfigCommand(t *testing.T) {
 	}
 	if !strings.Contains(res.Stdout, envPath) {
 		t.Fatalf("config output should mention env path, out=%q", res.Stdout)
+	}
+}
+
+func TestCLIStartWithLogFileFlag(t *testing.T) {
+	t.Parallel()
+
+	bin := buildGatewayBinary(t)
+	repo := createTempRepo(t)
+	logPath := filepath.Join(repo, "tmp", "gateway-custom.log")
+
+	res := runBin(t, bin, repo, "start", "--json", "--log-file", logPath)
+	if res.Code != 0 {
+		t.Fatalf("start with log-file failed: code=%d stderr=%s", res.Code, res.Stderr)
+	}
+	started := parseStatusJSON(t, res.Stdout)
+	if !started.Running {
+		t.Fatalf("expected running after start, got: %+v", started)
+	}
+	t.Cleanup(func() {
+		_ = runBin(t, bin, repo, "stop", "--json")
+	})
+
+	time.Sleep(300 * time.Millisecond)
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("expected custom log file created at %s: %v", logPath, err)
 	}
 }
 
