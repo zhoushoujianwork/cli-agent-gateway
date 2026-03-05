@@ -57,6 +57,7 @@ cd src && go run ./cmd/gateway-cli health
 cd src && go run ./cmd/gateway-cli health --json
 cd src && go run ./cmd/gateway-cli doctor --json
 cd src && go run ./cmd/gateway-cli send --to tester --text "hello" --json
+cd src && go run ./cmd/gateway-cli send --to tester --file ./message.md --msgtype markdown --dry-run --json
 ```
 
 ## DingTalk（已实现）
@@ -88,3 +89,4 @@ cd src && go run ./cmd/gateway-cli send --to tester --text "hello" --json
 - `src/internal/channels/imessage/`：iMessage 通道（命令适配）
 - `src/internal/storage/`：`localfile` / `sqlite` 后端
 - `docs/GO_BACKEND_ARCHITECTURE.md`：Go 后端架构方案
+- `docs/CLI_SPEC.md`：CLI 命令与 JSON 合约（冻结）

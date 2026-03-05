@@ -54,6 +54,9 @@ type SendPayload struct {
 	Channel   string `json:"channel"`
 	To        string `json:"to"`
 	MessageID string `json:"message_id"`
+	MsgType   string `json:"msg_type"`
+	DryRun    bool   `json:"dry_run"`
+	Source    string `json:"source"`
 	Error     string `json:"error,omitempty"`
 }
 
@@ -128,8 +131,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  config [workdir]    Generate/update .env using Go-native defaults")
 	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
-	fmt.Fprintln(out, "  doctor [--json]     Extended diagnostics (health + path writability)")
-	fmt.Fprintln(out, "  send [opts]         Send a message via selected channel")
+	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run)")
 	fmt.Fprintln(out, "  actions             Print supported action names")
 	fmt.Fprintln(out, "  help                Show this message")
 }
@@ -599,17 +601,48 @@ func runSend(repoRoot string, args []string) int {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	text := fs.String("text", "", "message text")
+	fileInput := fs.String("file", "", "read message body from file")
 	to := fs.String("to", "", "target receiver/user")
 	channelOverride := fs.String("channel", "", "channel override: command|dingtalk|imessage")
+	msgType := fs.String("msgtype", "text", "message type: text|markdown")
 	messageID := fs.String("message-id", "", "message id")
 	reportFile := fs.String("report-file", "", "report file path")
+	dryRun := fs.Bool("dry-run", false, "validate and print payload without sending")
 	jsonOut := fs.Bool("json", false, "json output")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	if strings.TrimSpace(*text) == "" {
-		fmt.Fprintln(os.Stderr, "send requires --text")
+	mt := strings.ToLower(strings.TrimSpace(*msgType))
+	if mt != "text" && mt != "markdown" {
+		fmt.Fprintln(os.Stderr, "send --msgtype must be one of: text, markdown")
+		return 2
+	}
+
+	textIn := strings.TrimSpace(*text)
+	fileIn := strings.TrimSpace(*fileInput)
+	if (textIn == "" && fileIn == "") || (textIn != "" && fileIn != "") {
+		fmt.Fprintln(os.Stderr, "send requires exactly one input source: --text or --file")
+		return 2
+	}
+
+	body := textIn
+	source := "text"
+	if fileIn != "" {
+		path := fileIn
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(repoRoot, path)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read send --file failed: %v\n", err)
+			return 1
+		}
+		body = strings.TrimSpace(string(raw))
+		source = "file"
+	}
+	if strings.TrimSpace(body) == "" {
+		fmt.Fprintln(os.Stderr, "send body is empty")
 		return 2
 	}
 
@@ -624,6 +657,15 @@ func runSend(repoRoot string, args []string) int {
 			_ = os.Unsetenv("CHANNEL_TYPE")
 		}()
 	}
+	origMsgType, hasOrigMsgType := os.LookupEnv("DINGTALK_SEND_MSGTYPE")
+	_ = os.Setenv("DINGTALK_SEND_MSGTYPE", mt)
+	defer func() {
+		if hasOrigMsgType {
+			_ = os.Setenv("DINGTALK_SEND_MSGTYPE", origMsgType)
+			return
+		}
+		_ = os.Unsetenv("DINGTALK_SEND_MSGTYPE")
+	}()
 
 	cfg, err := config.Load(repoRoot, "")
 	if err != nil {
@@ -646,14 +688,28 @@ func runSend(repoRoot string, args []string) int {
 		msgID = fmt.Sprintf("manual-%d", time.Now().UnixMilli())
 	}
 
-	sendErr := channel.Send(strings.TrimSpace(*text), target, msgID, strings.TrimSpace(*reportFile))
-	if *jsonOut {
-		payload := SendPayload{
-			OK:        sendErr == nil,
-			Channel:   cfg.ChannelType,
-			To:        target,
-			MessageID: msgID,
+	payload := SendPayload{
+		OK:        true,
+		Channel:   cfg.ChannelType,
+		To:        target,
+		MessageID: msgID,
+		MsgType:   mt,
+		DryRun:    *dryRun,
+		Source:    source,
+	}
+
+	if *dryRun {
+		if *jsonOut {
+			printJSON(payload)
+		} else {
+			fmt.Printf("dry-run channel=%s to=%s message_id=%s msgtype=%s source=%s\n", payload.Channel, payload.To, payload.MessageID, payload.MsgType, payload.Source)
 		}
+		return 0
+	}
+
+	sendErr := channel.Send(body, target, msgID, strings.TrimSpace(*reportFile))
+	if *jsonOut {
+		payload.OK = sendErr == nil
 		if sendErr != nil {
 			payload.Error = sendErr.Error()
 		}
@@ -667,7 +723,7 @@ func runSend(repoRoot string, args []string) int {
 		fmt.Fprintf(os.Stderr, "send failed: %v\n", sendErr)
 		return 1
 	}
-	fmt.Printf("sent channel=%s to=%s message_id=%s\n", cfg.ChannelType, target, msgID)
+	fmt.Printf("sent channel=%s to=%s message_id=%s msgtype=%s source=%s\n", cfg.ChannelType, target, msgID, mt, source)
 	return 0
 }
 
