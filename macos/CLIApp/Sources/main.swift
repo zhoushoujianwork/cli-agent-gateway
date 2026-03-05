@@ -105,6 +105,7 @@ final class GatewayController: ObservableObject {
     @Published var timelineByMsgId: [String: [ProcessEvent]] = [:]
     @Published var localDraftText: String = ""
     @Published var localSending: Bool = false
+    @Published var currentLogFile: String = ""
 
     private let cfg: GatewayConfig
     private let channelDefaultsKey = "gateway.selected_channel"
@@ -120,6 +121,7 @@ final class GatewayController: ObservableObject {
         refreshHealthChecks()
         refreshStatus()
         refreshSessions()
+        currentLogFile = cfg.logFile
     }
 
     private var hiddenSessionsDefaultsKey: String {
@@ -479,17 +481,23 @@ final class GatewayController: ObservableObject {
         let status = (node["status"] as? String) ?? "unknown"
         let channelRaw = (node["channel"] as? String) ?? selectedChannel.rawValue
         let channel = ChannelType(rawValue: channelRaw) ?? selectedChannel
+        let nodeLog = ((node["log_file"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !nodeLog.isEmpty {
+            currentLogFile = nodeLog
+        } else if currentLogFile.isEmpty {
+            currentLogFile = cfg.logFile
+        }
         activeChannelText = channel.title
         if status == "running" {
             statusText = "Running"
             let pidPart = (node["pid"] as? Int).map { "PID \($0)\n" } ?? ""
             let lockPart = (node["lock_file"] as? String).map { "Lock: \($0)\n" } ?? ""
-            let logPart = (node["log_file"] as? String) ?? cfg.logFile
+            let logPart = currentLogFile
             detailText = "\(pidPart)Channel: \(channel.title)\n\(lockPart)Log: \(logPart)"
         } else {
             statusText = "Stopped"
             let lockPart = (node["lock_file"] as? String).map { "\nLock: \($0)" } ?? ""
-            detailText = "Channel: \(channel.title)\nLog: \(cfg.logFile)\(lockPart)"
+            detailText = "Channel: \(channel.title)\nLog: \(currentLogFile)\(lockPart)"
         }
     }
 
@@ -511,376 +519,44 @@ final class GatewayController: ObservableObject {
     }
 
     func refreshSessions() {
-        var sessionMap: [String: String] = [:]
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: cfg.stateFile)),
-           let node = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let rawMap = node["session_map"] as? [String: Any] {
-            for (k, v) in rawMap {
-                sessionMap[k] = String(describing: v)
-            }
-        }
-
-        typealias InboundMeta = (sender: String, senderName: String, text: String, channel: String, thread: String, ts: String)
-        var inboundByMsgId: [String: InboundMeta] = [:]
-        var sessionByKey: [String: InboundMeta] = [:]
-        var sessionKeyByMsgId: [String: String] = [:]
-        var sessionIdByMsgId: [String: String] = [:]
-        var chatBySession: [String: [ChatMessage]] = [:]
-        var timelineByMsg: [String: [ProcessEvent]] = [:]
-        var sessionResetTimes: [String: [String]] = [:]
-        var segmentSessionIdByKey: [String: String] = [:]
-        var records: [[String: Any]] = []
-
-        if let content = try? String(contentsOfFile: cfg.interactionLogFile, encoding: .utf8) {
-            let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
-            for line in lines.suffix(5000) {
-                guard
-                    let data = line.data(using: .utf8),
-                    let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                    let kind = record["kind"] as? String
-                else {
-                    continue
-                }
-                records.append(record)
-
-                if kind == "inbound_received" {
-                    guard let msgId = record["msg_id"] as? String else { continue }
-                    let sender = (record["sender"] as? String) ?? ""
-                    var senderName = ""
-                    if let profile = record["user_profile"] as? [String: Any] {
-                        senderName = (profile["sender_name"] as? String) ?? ""
-                    }
-                    let text = (record["text"] as? String) ?? ""
-                    let ts = (record["time"] as? String) ?? ""
-                    let channel = channelFromProfile(record["user_profile"])
-                    let thread = threadFromProfile(record["user_profile"])
-                    inboundByMsgId[msgId] = (
-                        sender: sender,
-                        senderName: senderName.trimmingCharacters(in: .whitespacesAndNewlines),
-                        text: text,
-                        channel: channel,
-                        thread: thread,
-                        ts: ts
+        let sessionsResult = cagJSON("sessions", args: ["--limit", "200"])
+        if let node = sessionsResult.json,
+           let ok = node["ok"] as? Bool, ok,
+           let items = node["items"] as? [[String: Any]] {
+            var built: [SessionEntry] = []
+            for item in items {
+                let sessionKey = (item["session_key"] as? String) ?? ""
+                if sessionKey.isEmpty { continue }
+                let senderName = ((item["sender_name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let senderID = ((item["sender"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                built.append(
+                    SessionEntry(
+                        sessionKey: sessionKey,
+                        sessionId: (item["session_id"] as? String) ?? "-",
+                        channel: (item["channel"] as? String) ?? "-",
+                        senderId: senderID.isEmpty ? "-" : senderID,
+                        sender: senderName.isEmpty ? (senderID.isEmpty ? "-" : senderID) : senderName,
+                        threadId: (item["thread_id"] as? String) ?? "-",
+                        lastText: (item["last_message"] as? String) ?? "",
+                        lastTime: (item["last_time"] as? String) ?? ""
                     )
-                    let computedKey = buildSessionKey(channel: channel, sender: sender, threadId: thread)
-                    sessionKeyByMsgId[msgId] = computedKey
-                    if let prev = sessionByKey[computedKey] {
-                        if ts >= prev.ts {
-                            sessionByKey[computedKey] = (
-                                sender: sender,
-                                senderName: senderName.trimmingCharacters(in: .whitespacesAndNewlines),
-                                text: text,
-                                channel: channel,
-                                thread: thread,
-                                ts: ts
-                            )
-                        }
-                    } else {
-                        sessionByKey[computedKey] = (
-                            sender: sender,
-                            senderName: senderName.trimmingCharacters(in: .whitespacesAndNewlines),
-                            text: text,
-                            channel: channel,
-                            thread: thread,
-                            ts: ts
-                        )
-                    }
-                }
-
-                if kind == "trace",
-                   let stage = record["stage"] as? String,
-                   stage == "session_resolved",
-                   let sessionKey = record["session_key"] as? String,
-                   let msgId = record["msg_id"] as? String,
-                   let inbound = inboundByMsgId[msgId] {
-                    sessionKeyByMsgId[msgId] = sessionKey
-                    if let sid = record["session_id"] as? String {
-                        let v = sid.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !v.isEmpty {
-                            sessionIdByMsgId[msgId] = v
-                        }
-                    }
-                    if let prev = sessionByKey[sessionKey] {
-                        if inbound.ts >= prev.ts {
-                            sessionByKey[sessionKey] = inbound
-                        }
-                    } else {
-                        sessionByKey[sessionKey] = inbound
-                    }
-                }
-
-                if kind == "trace",
-                   let msgId = record["msg_id"] as? String,
-                   let sid = record["session_id"] as? String {
-                    let v = sid.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !v.isEmpty {
-                        sessionIdByMsgId[msgId] = v
-                    }
-                }
-
-                if kind == "session_command",
-                   let sessionKey = record["session_key"] as? String,
-                   let command = record["command"] as? String,
-                   let ts = record["time"] as? String,
-                   command == "/clear" || command == "/new" {
-                    sessionResetTimes[sessionKey, default: []].append(ts)
-                }
-            }
-
-            for key in sessionResetTimes.keys {
-                let sortedUnique = Array(Set(sessionResetTimes[key] ?? [])).sorted()
-                sessionResetTimes[key] = sortedUnique
-            }
-
-            func segmentedSessionKey(base: String, ts: String) -> String {
-                guard !base.isEmpty else { return base }
-                let cuts = sessionResetTimes[base] ?? []
-                if cuts.isEmpty {
-                    return base
-                }
-                let idx = cuts.filter { ts >= $0 }.count
-                if idx >= cuts.count {
-                    return base
-                }
-                return "\(base)#\(idx)"
-            }
-
-            var remappedSessionKeyByMsgId: [String: String] = [:]
-            var remappedSessionByKey: [String: InboundMeta] = [:]
-            for (msgId, baseKey) in sessionKeyByMsgId {
-                let ts = inboundByMsgId[msgId]?.ts ?? ""
-                let segKey = segmentedSessionKey(base: baseKey, ts: ts)
-                remappedSessionKeyByMsgId[msgId] = segKey
-                if let inbound = inboundByMsgId[msgId] {
-                    if let prev = remappedSessionByKey[segKey] {
-                        if inbound.ts >= prev.ts {
-                            remappedSessionByKey[segKey] = inbound
-                        }
-                    } else {
-                        remappedSessionByKey[segKey] = inbound
-                    }
-                }
-            }
-            sessionKeyByMsgId = remappedSessionKeyByMsgId
-            sessionByKey = remappedSessionByKey
-
-            var segmentSessionIdTs: [String: String] = [:]
-            for (msgId, segKey) in sessionKeyByMsgId {
-                guard let sid = sessionIdByMsgId[msgId], !sid.isEmpty else { continue }
-                let ts = inboundByMsgId[msgId]?.ts ?? ""
-                if let prevTs = segmentSessionIdTs[segKey], !prevTs.isEmpty, !ts.isEmpty, ts < prevTs {
-                    continue
-                }
-                segmentSessionIdTs[segKey] = ts
-                segmentSessionIdByKey[segKey] = sid
-            }
-
-            for record in records {
-                guard let kind = record["kind"] as? String else { continue }
-
-                if kind == "inbound_received",
-                   let msgId = record["msg_id"] as? String,
-                   let sessionKey = sessionKeyByMsgId[msgId] {
-                    let text = ((record["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !text.isEmpty {
-                        let ts = (record["time"] as? String) ?? ""
-                        let msg = ChatMessage(
-                            id: "\(msgId)-u",
-                            sourceMsgId: msgId,
-                            role: "user",
-                            text: text,
-                            time: ts,
-                            deliveryStatus: .sent,
-                            statusDetail: ""
-                        )
-                        chatBySession[sessionKey, default: []].append(msg)
-                        let e = ProcessEvent(
-                            id: "\(msgId)-evt-in",
-                            time: ts,
-                            title: "User Message",
-                            detail: text
-                        )
-                        timelineByMsg[msgId, default: []].append(e)
-                    }
-                }
-
-                if kind == "trace",
-                   let stage = record["stage"] as? String,
-                   let msgId = record["msg_id"] as? String,
-                   stage.hasPrefix("acp.") {
-                    let ts = (record["time"] as? String) ?? ""
-                    var details: [String] = []
-                    for key in ["status", "title", "session_update", "session_id", "elapsed_sec", "raw_events"] {
-                        if let val = record[key] {
-                            details.append("\(key)=\(val)")
-                        }
-                    }
-                    let e = ProcessEvent(
-                        id: "\(msgId)-evt-\(timelineByMsg[msgId, default: []].count)-trace",
-                        time: ts,
-                        title: stage,
-                        detail: details.joined(separator: " | ")
-                    )
-                    timelineByMsg[msgId, default: []].append(e)
-                }
-
-                if kind == "tool_progress_notify",
-                   let msgId = record["msg_id"] as? String {
-                    let ts = (record["time"] as? String) ?? ""
-                    let title = ((record["title"] as? String) ?? "tool").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let status = ((record["status"] as? String) ?? "in_progress").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let text = ((record["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let e = ProcessEvent(
-                        id: "\(msgId)-evt-\(timelineByMsg[msgId, default: []].count)-tool",
-                        time: ts,
-                        title: "Tool \(status)",
-                        detail: text.isEmpty ? title : text
-                    )
-                    timelineByMsg[msgId, default: []].append(e)
-                }
-
-                if kind == "tool_trace",
-                   let msgId = record["msg_id"] as? String {
-                    let ts = (record["time"] as? String) ?? ""
-                    let tools = (record["tools"] as? [String]) ?? []
-                    let callsSummary = summarizeToolCalls(record["tool_calls"])
-                    var detail = tools.isEmpty ? "" : tools.joined(separator: ", ")
-                    if !callsSummary.isEmpty {
-                        detail = detail.isEmpty ? callsSummary : "\(detail)\n\(callsSummary)"
-                    }
-                    let e = ProcessEvent(
-                        id: "\(msgId)-evt-\(timelineByMsg[msgId, default: []].count)-trace2",
-                        time: ts,
-                        title: "Tools Used",
-                        detail: detail
-                    )
-                    timelineByMsg[msgId, default: []].append(e)
-                }
-
-                if kind == "exec_finished",
-                   let msgId = record["msg_id"] as? String,
-                   let sessionKey = sessionKeyByMsgId[msgId] {
-                    let text = ((record["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !text.isEmpty {
-                        let ts = (record["time"] as? String) ?? ""
-                        let msg = ChatMessage(
-                            id: "\(msgId)-a",
-                            sourceMsgId: msgId,
-                            role: "assistant",
-                            text: text,
-                            time: ts,
-                            deliveryStatus: .sent,
-                            statusDetail: ""
-                        )
-                        chatBySession[sessionKey, default: []].append(msg)
-                        let elapsed = String(describing: record["elapsed_sec"] ?? "")
-                        let detail = elapsed.isEmpty ? "Completed." : "Completed in \(elapsed)s."
-                        let e = ProcessEvent(
-                            id: "\(msgId)-evt-\(timelineByMsg[msgId, default: []].count)-done",
-                            time: ts,
-                            title: "Completed",
-                            detail: detail
-                        )
-                        timelineByMsg[msgId, default: []].append(e)
-                    }
-                }
-
-                if kind == "exec_error",
-                   let msgId = record["msg_id"] as? String,
-                   let sessionKey = sessionKeyByMsgId[msgId] {
-                    let text = ((record["error"] as? String) ?? "Execution error").trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !text.isEmpty {
-                        let ts = (record["time"] as? String) ?? ""
-                        let msg = ChatMessage(
-                            id: "\(msgId)-e",
-                            sourceMsgId: msgId,
-                            role: "assistant",
-                            text: "Error: \(text)",
-                            time: ts,
-                            deliveryStatus: .failed,
-                            statusDetail: text
-                        )
-                        chatBySession[sessionKey, default: []].append(msg)
-                        let e = ProcessEvent(
-                            id: "\(msgId)-evt-\(timelineByMsg[msgId, default: []].count)-err",
-                            time: ts,
-                            title: "Error",
-                            detail: text
-                        )
-                        timelineByMsg[msgId, default: []].append(e)
-                    }
-                }
-            }
-        }
-
-        var allKeys = Set<String>()
-        allKeys.formUnion(sessionMap.keys)
-        allKeys.formUnion(sessionByKey.keys)
-        allKeys.formUnion(chatBySession.keys)
-
-        func displaySessionId(for sessionKey: String) -> String {
-            if let sid = segmentSessionIdByKey[sessionKey], !sid.isEmpty {
-                return sid
-            }
-            let base = sessionKey.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? sessionKey
-            if let sid = sessionMap[base], !sid.isEmpty {
-                return sid
-            }
-            if let suffix = sessionKey.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().first {
-                return "segment-\(suffix)"
-            }
-            return "-"
-        }
-
-        var built: [SessionEntry] = []
-        for key in allKeys {
-                    let sid = displaySessionId(for: key)
-                    let meta = sessionByKey[key]
-                    let shownSender = {
-                        let name = meta?.senderName ?? ""
-                        if !name.isEmpty { return name }
-                        return meta?.sender ?? "-"
-                    }()
-                    built.append(
-                        SessionEntry(
-                            sessionKey: key,
-                    sessionId: sid,
-                    channel: meta?.channel ?? "-",
-                    senderId: meta?.sender ?? "-",
-                    sender: shownSender,
-                    threadId: meta?.thread ?? "-",
-                    lastText: meta?.text ?? "(no recent chat found)",
-                    lastTime: meta?.ts ?? ""
                 )
-                    )
-        }
-
-        built.sort { lhs, rhs in
-            if lhs.lastTime.isEmpty && rhs.lastTime.isEmpty {
-                return lhs.sessionKey < rhs.sessionKey
             }
-            if lhs.lastTime.isEmpty { return false }
-            if rhs.lastTime.isEmpty { return true }
-            return lhs.lastTime > rhs.lastTime
+            sessions = built
+            if let selected = selectedSessionKey, !sessions.contains(where: { $0.sessionKey == selected }) {
+                selectedSessionKey = nil
+            }
+            chatMessages = []
+            timelineByMsgId = [:]
+            return
         }
 
-        let hiddenCountBefore = hiddenSessionCutoffByKey.count
-        built = built.filter { session in
-            shouldShowSession(session)
-        }
-        if hiddenSessionCutoffByKey.count != hiddenCountBefore {
-            saveHiddenSessionCutoffByKey()
-        }
-        sessions = built
-        if let selected = selectedSessionKey, !sessions.contains(where: { $0.sessionKey == selected }) {
-            selectedSessionKey = nil
-        }
-        if let selected = selectedSessionKey {
-            chatMessages = mergedMessages(for: selected, persisted: chatBySession[selected, default: []])
-        } else {
-            chatMessages = []
-        }
-        timelineByMsgId = timelineByMsg
+        // GUI session list is CLI-driven only.
+        sessions = []
+        selectedSessionKey = nil
+        chatMessages = []
+        timelineByMsgId = [:]
+        return
     }
 
     func selectSession(_ key: String?) {
@@ -996,6 +672,34 @@ final class GatewayController: ObservableObject {
         appendOverlayMessage(msg, sessionKey: sessionKey)
     }
 
+    private func latestDingTalkSessionWebhook(for session: SessionEntry) -> String {
+        guard session.channel == "dingtalk" else { return "" }
+        guard let content = try? String(contentsOfFile: cfg.interactionLogFile, encoding: .utf8) else { return "" }
+        let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
+        for line in lines.reversed().prefix(1500) {
+            guard let data = String(line).data(using: .utf8),
+                  let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (record["kind"] as? String) == "inbound_received"
+            else {
+                continue
+            }
+            let sender = (record["sender"] as? String) ?? ""
+            if sender != session.senderId { continue }
+            let profile = (record["user_profile"] as? [String: Any]) ?? [:]
+            let thread = (profile["thread_id"] as? String) ?? ""
+            if !session.threadId.isEmpty, session.threadId != "-", thread != session.threadId {
+                continue
+            }
+            let messageMeta = (record["message_metadata"] as? [String: Any]) ?? [:]
+            let rawCallback = (messageMeta["raw_callback"] as? [String: Any]) ?? [:]
+            let webhook = ((rawCallback["sessionWebhook"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !webhook.isEmpty {
+                return webhook
+            }
+        }
+        return ""
+    }
+
     func sendLocalChat() {
         var text = localDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
@@ -1046,14 +750,65 @@ final class GatewayController: ObservableObject {
         )
         appendOverlayMessage(localUser, sessionKey: selectedSessionKey)
         localDraftText = ""
-        localSending = false
-        detailText = "Local chat TODO: Go-native path not implemented yet."
-        updateOverlayMessage(
-            sessionKey: selectedSessionKey,
-            messageId: userMsgId,
-            deliveryStatus: .failed,
-            statusDetail: "TODO: Go-native local chat not implemented"
-        )
+        let rawTo = session.senderId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let to = rawTo == "-" ? "" : rawTo
+        if to.isEmpty {
+            localSending = false
+            detailText = "Send failed: missing session sender id."
+            updateOverlayMessage(
+                sessionKey: selectedSessionKey,
+                messageId: userMsgId,
+                deliveryStatus: .failed,
+                statusDetail: "missing session sender id"
+            )
+            return
+        }
+        let rawChannel = session.channel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let channel = rawChannel == "-" || rawChannel.isEmpty ? selectedChannel.rawValue : rawChannel
+        let timeout = localChatTimeoutSec()
+        let sessionWebhook = latestDingTalkSessionWebhook(for: session)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            var sendArgs = ["--to", to, "--text", text, "--channel", channel]
+            if channel == "dingtalk", !sessionWebhook.isEmpty {
+                sendArgs.append(contentsOf: ["--session-webhook", sessionWebhook])
+            }
+            let result = self.cagJSON("send", args: sendArgs, timeoutSec: timeout)
+            DispatchQueue.main.async {
+                self.localSending = false
+                guard let node = result.json else {
+                    self.updateOverlayMessage(
+                        sessionKey: selectedSessionKey,
+                        messageId: userMsgId,
+                        deliveryStatus: .failed,
+                        statusDetail: "invalid CLI response"
+                    )
+                    self.detailText = "Send failed: invalid CLI response."
+                    return
+                }
+                let ok = (node["ok"] as? Bool) ?? false
+                if ok {
+                    self.updateOverlayMessage(
+                        sessionKey: selectedSessionKey,
+                        messageId: userMsgId,
+                        deliveryStatus: .sent,
+                        statusDetail: ""
+                    )
+                    self.detailText = sessionWebhook.isEmpty ? "Sent via cag send." : "Sent via session webhook."
+                    return
+                }
+                let nestedErr = ((node["error"] as? [String: Any])?["message"] as? String) ?? ""
+                let plainErr = (node["error"] as? String) ?? ""
+                let errText = nestedErr.isEmpty ? (plainErr.isEmpty ? "send failed" : plainErr) : nestedErr
+                self.updateOverlayMessage(
+                    sessionKey: selectedSessionKey,
+                    messageId: userMsgId,
+                    deliveryStatus: .failed,
+                    statusDetail: errText
+                )
+                self.detailText = "Send failed: \(errText)"
+            }
+        }
     }
 
     func deleteSelectedSession() {
@@ -1152,8 +907,12 @@ final class GatewayController: ObservableObject {
         if ok {
             refreshStatus()
             let pidText = (node["pid"] as? Int).map { "PID: \($0)\n" } ?? ""
-            let logPath = (node["log_file"] as? String) ?? cfg.logFile
-            detailText = "\(pidText)Channel: \(activeChannelText)\nLog: \(logPath)"
+            let logPath = ((node["log_file"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !logPath.isEmpty {
+                currentLogFile = logPath
+            }
+            let shownLog = currentLogFile.isEmpty ? cfg.logFile : currentLogFile
+            detailText = "\(pidText)Channel: \(activeChannelText)\nLog: \(shownLog)"
             return
         }
         statusText = "Start failed"
@@ -1196,12 +955,40 @@ final class GatewayController: ObservableObject {
         }
         refreshStatus()
         let pidText = (node["pid"] as? Int).map { "PID: \($0)\n" } ?? ""
-        detailText = "\(pidText)Gateway restarted."
+        let logPath = ((node["log_file"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !logPath.isEmpty {
+            currentLogFile = logPath
+        }
+        let shownLog = currentLogFile.isEmpty ? cfg.logFile : currentLogFile
+        detailText = "\(pidText)Gateway restarted.\nLog: \(shownLog)"
     }
 
     func openLogs() {
-        let url = URL(fileURLWithPath: cfg.logFile)
-        NSWorkspace.shared.open(url)
+        let target = currentLogFile.isEmpty ? cfg.logFile : currentLogFile
+        let url = URL(fileURLWithPath: target)
+        if FileManager.default.fileExists(atPath: target) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        openLogsFolder()
+    }
+
+    func openLogsFolder() {
+        let target = currentLogFile.isEmpty ? cfg.logFile : currentLogFile
+        let folder = URL(fileURLWithPath: target).deletingLastPathComponent()
+        NSWorkspace.shared.open(folder)
+    }
+
+    func previewLatestLog(lines: Int = 60) {
+        let target = currentLogFile.isEmpty ? cfg.logFile : currentLogFile
+        guard FileManager.default.fileExists(atPath: target),
+              let content = try? String(contentsOfFile: target, encoding: .utf8) else {
+            detailText = "Log preview failed: file not found.\n\(target)"
+            return
+        }
+        let recent = content.split(separator: "\n", omittingEmptySubsequences: false).suffix(max(1, lines))
+        let preview = recent.joined(separator: "\n")
+        detailText = "Log: \(target)\n--- tail \(lines) ---\n\(preview)"
     }
 
     private func shellEscape(_ raw: String) -> String {
@@ -1504,6 +1291,8 @@ struct ContentView: View {
                 Button("Restart") { controller.restart() }
                     .disabled(controller.statusText == "Blocked")
                 Button("Open Logs") { controller.openLogs() }
+                Button("Log Tail") { controller.previewLatestLog() }
+                Button("Open Log Dir") { controller.openLogsFolder() }
                 Button("Config") { showConfig = true }
             }
             .padding(.horizontal, 18)
