@@ -50,6 +50,22 @@ func TestCLIContractJSONFlow(t *testing.T) {
 	if !send.OK {
 		t.Fatalf("expected send ok=true, got: %+v", send)
 	}
+	if send.MsgType != "text" || send.Source != "text" {
+		t.Fatalf("unexpected send payload: %+v", send)
+	}
+
+	msgFile := filepath.Join(repo, "message.md")
+	if err := os.WriteFile(msgFile, []byte("# hello\nfrom file\n"), 0o644); err != nil {
+		t.Fatalf("write message file failed: %v", err)
+	}
+	res = runBin(t, bin, repo, "send", "--to", "tester", "--file", msgFile, "--msgtype", "markdown", "--dry-run", "--json")
+	if res.Code != 0 {
+		t.Fatalf("send dry-run file failed: code=%d stderr=%s", res.Code, res.Stderr)
+	}
+	dry := parseSendJSON(t, res.Stdout)
+	if !dry.OK || !dry.DryRun || dry.MsgType != "markdown" || dry.Source != "file" {
+		t.Fatalf("unexpected send dry-run payload: %+v", dry)
+	}
 
 	res = runBin(t, bin, repo, "start", "--json")
 	if res.Code != 0 {
@@ -226,6 +242,12 @@ func parseSendJSON(t *testing.T, out string) SendPayload {
 	}
 	if strings.TrimSpace(node.MessageID) == "" {
 		t.Fatalf("send.message_id should not be empty")
+	}
+	if strings.TrimSpace(node.MsgType) == "" {
+		t.Fatalf("send.msg_type should not be empty")
+	}
+	if strings.TrimSpace(node.Source) == "" {
+		t.Fatalf("send.source should not be empty")
 	}
 	return node
 }

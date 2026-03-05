@@ -17,7 +17,7 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
 - `config [workdir]`
 - `status [--json]`
 - `health [--json]`
-- `send --to <id> --text <msg> [--channel <name>] [--message-id <id>] [--report-file <path>] [--json]`
+- `send --to <id> (--text <msg> | --file <path>) [--msgtype text|markdown] [--channel <name>] [--message-id <id>] [--report-file <path>] [--dry-run] [--json]`
 - `actions`
 - `help`
 
@@ -109,6 +109,9 @@ Output object:
   "channel": "command",
   "to": "tester",
   "message_id": "manual-1772688340592",
+  "msg_type": "text",
+  "dry_run": false,
+  "source": "text",
   "error": ""
 }
 ```
@@ -119,6 +122,9 @@ Field rules:
 - `channel` (`string`, required)
 - `to` (`string`, required)
 - `message_id` (`string`, required)
+- `msg_type` (`string`, required; `text` or `markdown`)
+- `dry_run` (`bool`, required)
+- `source` (`string`, required; `text` or `file`)
 - `error` (`string`, optional; present on failure)
 
 Semantics:
@@ -149,13 +155,15 @@ Semantics:
 Required:
 
 - `--to`
-- `--text`
+- exactly one source: `--text` or `--file`
 
 Optional:
 
+- `--msgtype` (`text` default, `markdown` supported)
 - `--channel`
 - `--message-id`
 - `--report-file`
+- `--dry-run` (validate + emit result, skip real send)
 - `--json`
 
 Defaulting:
