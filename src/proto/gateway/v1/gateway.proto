@@ -6,6 +6,8 @@ option go_package = "cli-agent-gateway/internal/gen/gatewayv1;gatewayv1";
 
 message StatusRequest {
   string repo_root = 1;
+  string log_file = 2;
+  bool quiet = 3;
 }
 
 message StatusResponse {
@@ -121,9 +123,35 @@ message EmptyRepoRequest {
   string repo_root = 1;
 }
 
+message HealthCheckRequest {
+  string repo_root = 1;
+  bool include_paths = 2;
+}
+
+message HealthCheckItem {
+  string key = 1;
+  bool ok = 2;
+  string detail = 3;
+  string suggestion = 4;
+}
+
+message HealthCheckResponse {
+  bool ok = 1;
+  string error = 2;
+  string action = 3;
+  string status = 4;
+  string channel = 5;
+  repeated HealthCheckItem items = 6;
+}
+
 service GatewayControl {
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc Sessions(SessionsRequest) returns (SessionsResponse);
+  rpc Start(StatusRequest) returns (StatusResponse);
+  rpc Stop(StatusRequest) returns (StatusResponse);
+  rpc Restart(StatusRequest) returns (StatusResponse);
+  rpc Health(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Doctor(HealthCheckRequest) returns (HealthCheckResponse);
   rpc SendToSession(SendToSessionRequest) returns (SendToSessionResponse);
   rpc SessionMessages(SessionMessagesRequest) returns (SessionMessagesResponse);
   rpc ClearSession(SessionKeyRequest) returns (SessionMutationResponse);

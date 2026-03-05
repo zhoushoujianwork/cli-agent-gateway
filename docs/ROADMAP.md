@@ -64,6 +64,8 @@
   - RPC 扩展：`SendToSession`、`SessionMessages`、`ClearSession`、`DeleteSession`、`DeleteAllSessions`
   - CLI 新增命令：`messages`、`session-clear`、`session-delete`、`sessions-delete-all`
   - CLI `sessions/messages/send --session-key/session-*` 改为 gRPC 必达（移除本地回退），并增加 gatewayd 自动拉起重试
+  - RPC 扩展：`Start`、`Stop`、`Restart`、`Health`、`Doctor`
+  - CLI `start/stop/restart/health/doctor` 改为 gRPC 优先（不可达回退本地）
   - GUI 聊天读取改为 `cag messages`，会话清理/删除改为 `cag session-*`
 - 下一步：
   - 启停与健康检查也统一迁移到 `gatewayd` 常驻模式（减少本地 fallback）

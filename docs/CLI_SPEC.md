@@ -36,6 +36,7 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
 - Missing `.env` for runtime commands (`run`, `start`, `send`) is fatal.
 - `run` does not accept positional workdir arg.
 - `sessions/send(--session-key)/messages/session-*` 仅通过 gRPC 控制面访问 `gatewayd`，连接失败时会自动尝试拉起 `gatewayd` 后重试一次。
+- `start/stop/restart/health/doctor` 优先通过 gRPC 控制面调用 `gatewayd`；不可达时回退本地实现。
 - `status` 保持 gRPC 优先，不可达时回退本地实现。
 
 ## Exit codes
@@ -188,6 +189,11 @@ Defaulting:
 - `--listen`: gRPC 监听地址（默认读取 `GATEWAYD_ADDR`，再回退 `127.0.0.1:58473`）。
 - 当前开放 RPC：
   - `Status`
+  - `Start`
+  - `Stop`
+  - `Restart`
+  - `Health`
+  - `Doctor`
   - `Sessions`
   - `SendToSession`
   - `SessionMessages`

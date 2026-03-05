@@ -68,9 +68,10 @@ cd src && go run ./cmd/gateway-cli send --to tester --file ./message.md --msgtyp
 
 ### gRPC 控制面（阶段二进行中）
 
-- `gatewayd` 提供控制面 gRPC 服务（当前已开放 `Status`、`Sessions`、`SendToSession`、`SessionMessages`、`Clear/Delete`）。
+- `gatewayd` 提供控制面 gRPC 服务（当前已开放 `Status/Start/Stop/Restart`、`Health/Doctor`、`Sessions`、`SendToSession`、`SessionMessages`、`Clear/Delete`）。
 - 会话一致性相关命令：`cag sessions` / `cag send --session-key` / `cag messages` / `cag session-*` 仅通过 gRPC 访问 `gatewayd`；若未启动会自动尝试拉起 `gatewayd` 后重试一次。
-- `cag status` 仍保留 gRPC 优先 + 本地回退。
+- 生命周期与诊断命令：`cag start/stop/restart/health/doctor` 改为 gRPC 优先（`gatewayd` 不可达时回退本地实现）。
+- `cag status` 保留 gRPC 优先 + 本地回退。
 - 地址通过 `GATEWAYD_ADDR` 控制（默认 `127.0.0.1:58473`）。
 - 可通过 `CAG_GRPC_DISABLE=1` 强制禁用 gRPC 路径。
 

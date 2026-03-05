@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -89,6 +91,67 @@ func (s *gatewayControlServer) Sessions(_ context.Context, req *gatewayv1.Sessio
 		})
 	}
 	return out, nil
+}
+
+func (s *gatewayControlServer) Start(_ context.Context, req *gatewayv1.StatusRequest) (*gatewayv1.StatusResponse, error) {
+	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
+	args := []string{"start", "--json"}
+	if logFile := strings.TrimSpace(req.GetLogFile()); logFile != "" {
+		args = append(args, "--log-file", logFile)
+	}
+	node, err := runLocalJSONAction(root, args...)
+	if err != nil {
+		return &gatewayv1.StatusResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return statusResponseFromNode(node), nil
+}
+
+func (s *gatewayControlServer) Stop(_ context.Context, req *gatewayv1.StatusRequest) (*gatewayv1.StatusResponse, error) {
+	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
+	args := []string{"stop", "--json"}
+	if req.GetQuiet() {
+		args = append(args, "--quiet")
+	}
+	node, err := runLocalJSONAction(root, args...)
+	if err != nil {
+		return &gatewayv1.StatusResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return statusResponseFromNode(node), nil
+}
+
+func (s *gatewayControlServer) Restart(_ context.Context, req *gatewayv1.StatusRequest) (*gatewayv1.StatusResponse, error) {
+	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
+	args := []string{"restart", "--json"}
+	if logFile := strings.TrimSpace(req.GetLogFile()); logFile != "" {
+		args = append(args, "--log-file", logFile)
+	}
+	node, err := runLocalJSONAction(root, args...)
+	if err != nil {
+		return &gatewayv1.StatusResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return statusResponseFromNode(node), nil
+}
+
+func (s *gatewayControlServer) Health(_ context.Context, req *gatewayv1.HealthCheckRequest) (*gatewayv1.HealthCheckResponse, error) {
+	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
+	args := []string{"health", "--json"}
+	if req.GetIncludePaths() {
+		args[0] = "doctor"
+	}
+	node, err := runLocalJSONAction(root, args...)
+	if err != nil {
+		return &gatewayv1.HealthCheckResponse{Ok: false, Error: err.Error(), Action: "health", Status: "failed"}, nil
+	}
+	return healthResponseFromNode(node, "health"), nil
+}
+
+func (s *gatewayControlServer) Doctor(_ context.Context, req *gatewayv1.HealthCheckRequest) (*gatewayv1.HealthCheckResponse, error) {
+	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
+	node, err := runLocalJSONAction(root, "doctor", "--json")
+	if err != nil {
+		return &gatewayv1.HealthCheckResponse{Ok: false, Error: err.Error(), Action: "doctor", Status: "failed"}, nil
+	}
+	return healthResponseFromNode(node, "doctor"), nil
 }
 
 func (s *gatewayControlServer) SendToSession(_ context.Context, req *gatewayv1.SendToSessionRequest) (*gatewayv1.SendToSessionResponse, error) {
@@ -229,6 +292,151 @@ func (s *gatewayControlServer) mutateSession(repoRoot, sessionKey string, fn fun
 	return &gatewayv1.SessionMutationResponse{Ok: true, SessionKey: key}, nil
 }
 
+func runLocalJSONAction(repoRoot string, args ...string) (map[string]any, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "CAG_GRPC_DISABLE=1")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	raw := strings.TrimSpace(stdout.String())
+	if raw == "" {
+		raw = strings.TrimSpace(stderr.String())
+	}
+	if raw == "" {
+		if runErr != nil {
+			return nil, runErr
+		}
+		return nil, fmt.Errorf("empty json output")
+	}
+	var node map[string]any
+	if err := json.Unmarshal([]byte(raw), &node); err != nil {
+		if runErr != nil {
+			return nil, fmt.Errorf("%v: %s", runErr, strings.TrimSpace(stderr.String()))
+		}
+		return nil, err
+	}
+	return node, nil
+}
+
+func statusResponseFromNode(node map[string]any) *gatewayv1.StatusResponse {
+	resp := &gatewayv1.StatusResponse{
+		Ok:                 boolFromNode(node, "ok"),
+		Error:              errorMessageFromNode(node),
+		Running:            boolFromNode(node, "running"),
+		StartedAt:          stringFromNode(node, "started_at"),
+		LockFile:           stringFromNode(node, "lock_file"),
+		Channel:            stringFromNode(node, "channel"),
+		Workdir:            stringFromNode(node, "workdir"),
+		LogFile:            stringFromNode(node, "log_file"),
+		InteractionLogFile: stringFromNode(node, "interaction_log_file"),
+		StateFile:          stringFromNode(node, "state_file"),
+		Status:             stringFromNode(node, "status"),
+	}
+	if pid, ok := int64FromNode(node, "pid"); ok && pid > 0 {
+		resp.HasPid = true
+		resp.Pid = pid
+	}
+	if resp.Status == "" {
+		if resp.Running {
+			resp.Status = "running"
+		} else {
+			resp.Status = "stopped"
+		}
+	}
+	return resp
+}
+
+func healthResponseFromNode(node map[string]any, fallbackAction string) *gatewayv1.HealthCheckResponse {
+	resp := &gatewayv1.HealthCheckResponse{
+		Ok:      boolFromNode(node, "ok"),
+		Error:   errorMessageFromNode(node),
+		Action:  nonEmpty(stringFromNode(node, "action"), fallbackAction),
+		Status:  stringFromNode(node, "status"),
+		Channel: stringFromNode(node, "channel"),
+		Items:   []*gatewayv1.HealthCheckItem{},
+	}
+	rawItems, _ := node["items"].([]any)
+	for _, it := range rawItems {
+		itemNode, _ := it.(map[string]any)
+		if len(itemNode) == 0 {
+			continue
+		}
+		resp.Items = append(resp.Items, &gatewayv1.HealthCheckItem{
+			Key:        stringFromNode(itemNode, "key"),
+			Ok:         boolFromNode(itemNode, "ok"),
+			Detail:     stringFromNode(itemNode, "detail"),
+			Suggestion: stringFromNode(itemNode, "suggestion"),
+		})
+	}
+	if resp.Status == "" {
+		if resp.Ok {
+			resp.Status = "healthy"
+		} else {
+			resp.Status = "failed"
+		}
+	}
+	return resp
+}
+
+func boolFromNode(node map[string]any, key string) bool {
+	v, ok := node[key]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+func stringFromNode(node map[string]any, key string) string {
+	v, ok := node[key]
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
+}
+
+func int64FromNode(node map[string]any, key string) (int64, bool) {
+	v, ok := node[key]
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case float64:
+		return int64(n), true
+	default:
+		return 0, false
+	}
+}
+
+func errorMessageFromNode(node map[string]any) string {
+	errNode, ok := node["error"]
+	if !ok || errNode == nil {
+		return ""
+	}
+	if m, ok := errNode.(map[string]any); ok {
+		if msg, ok := m["message"].(string); ok {
+			return strings.TrimSpace(msg)
+		}
+		if msg, ok := m["error"].(string); ok {
+			return strings.TrimSpace(msg)
+		}
+	}
+	return strings.TrimSpace(fmt.Sprint(errNode))
+}
+
 func runGatewayd(repoRoot string, args []string) int {
 	fs := flag.NewFlagSet("gatewayd", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -266,6 +474,76 @@ func tryStatusViaGRPC(repoRoot string) (*gatewayv1.StatusResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
 	defer cancel()
 	return cli.Status(ctx, &gatewayv1.StatusRequest{RepoRoot: repoRoot})
+}
+
+func tryStartViaGRPC(repoRoot, logFile string) (*gatewayv1.StatusResponse, error) {
+	cli, conn, err := grpcGatewayClient()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	return cli.Start(ctx, &gatewayv1.StatusRequest{
+		RepoRoot: repoRoot,
+		LogFile:  strings.TrimSpace(logFile),
+	})
+}
+
+func tryStopViaGRPC(repoRoot string, quiet bool) (*gatewayv1.StatusResponse, error) {
+	cli, conn, err := grpcGatewayClient()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	return cli.Stop(ctx, &gatewayv1.StatusRequest{
+		RepoRoot: repoRoot,
+		Quiet:    quiet,
+	})
+}
+
+func tryRestartViaGRPC(repoRoot, logFile string) (*gatewayv1.StatusResponse, error) {
+	cli, conn, err := grpcGatewayClient()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
+	defer cancel()
+	return cli.Restart(ctx, &gatewayv1.StatusRequest{
+		RepoRoot: repoRoot,
+		LogFile:  strings.TrimSpace(logFile),
+	})
+}
+
+func tryHealthViaGRPC(repoRoot string, includePaths bool) (*gatewayv1.HealthCheckResponse, error) {
+	cli, conn, err := grpcGatewayClient()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	return cli.Health(ctx, &gatewayv1.HealthCheckRequest{
+		RepoRoot:     repoRoot,
+		IncludePaths: includePaths,
+	})
+}
+
+func tryDoctorViaGRPC(repoRoot string, includePaths bool) (*gatewayv1.HealthCheckResponse, error) {
+	cli, conn, err := grpcGatewayClient()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	return cli.Doctor(ctx, &gatewayv1.HealthCheckRequest{
+		RepoRoot:     repoRoot,
+		IncludePaths: includePaths,
+	})
 }
 
 func trySessionsViaGRPC(repoRoot string, limit int) (*gatewayv1.SessionsResponse, error) {
