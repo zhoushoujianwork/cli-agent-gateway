@@ -44,6 +44,7 @@ cd src && go run ./cmd/gateway-cli status
 cd src && go run ./cmd/gateway-cli status --json
 cd src && go run ./cmd/gateway-cli health
 cd src && go run ./cmd/gateway-cli health --json
+cd src && go run ./cmd/gateway-cli send --to tester --text "hello" --json
 ```
 
 ## DingTalk（已实现）

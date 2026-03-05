@@ -51,5 +51,22 @@
 
 - Step 1 complete: `gateway-cli run` now uses the Go-native gateway loop (legacy bridge removed).
 - Step 2 complete: `gateway-cli config` now writes `.env` via Go-native flow (no Python bridge).
-- Next: migrate channel adapters to Go-native implementations and remove runtime dependence on Python scripts.
-- Final target: runtime `run/status/config` and default channels all Go-native, then delete Python runtime modules.
+- Step 3 complete: `start/stop/restart/health` added with dashboard-friendly JSON output.
+
+### Next focus (Go core hardening)
+
+1. ACP error model
+- Introduce structured ACP error kinds: `timeout`, `transport`, `protocol`.
+- Keep method context in errors to improve diagnostics and GUI display.
+
+2. Reliability tests
+- Add integration tests for CLI control flow and lock semantics.
+- Add smoke tests for dedup/session routing and restart behavior.
+
+3. Storage hardening
+- Make sqlite backend production defaults explicit (`WAL`, `busy_timeout`, migration hooks).
+- Add schema version checks for future evolutions.
+
+4. Observability and contracts
+- Freeze JSON contract for `status --json` and `health --json`.
+- Add basic metrics/log conventions for operational dashboards.
