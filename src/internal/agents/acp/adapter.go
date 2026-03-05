@@ -40,7 +40,7 @@ func (a *Adapter) Close() error {
 
 func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 	if err := a.ensureReady(); err != nil {
-		return core.TaskResult{}, err
+		return core.TaskResult{}, wrapACPError("initialize", err)
 	}
 
 	start := time.Now()
@@ -48,7 +48,7 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 	if sessionID == "" {
 		sid, err := a.createSession(req)
 		if err != nil {
-			return core.TaskResult{}, err
+			return core.TaskResult{}, wrapACPError("session/new", err)
 		}
 		sessionID = sid
 	}
@@ -62,7 +62,7 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 		"metadata": req.Metadata,
 	})
 	if err != nil {
-		return core.TaskResult{}, err
+		return core.TaskResult{}, wrapACPError("session/prompt", err)
 	}
 	a.debugf("prompt start request_id=%d session_id=%s", promptID, sessionID)
 
@@ -75,12 +75,12 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 	for time.Now().Before(deadline) {
 		resp, err := a.client.PollResponse(promptID, 100*time.Millisecond)
 		if err != nil {
-			return core.TaskResult{}, err
+			return core.TaskResult{}, wrapACPError("session/prompt", err)
 		}
 		if resp != nil {
 			a.debugf("prompt response id=%d error=%v", resp.ID, resp.Error)
 			if resp.Error != nil {
-				return core.TaskResult{}, fmt.Errorf("session/prompt error: %v", resp.Error)
+				return core.TaskResult{}, newProtocolError("session/prompt", fmt.Sprintf("jsonrpc error: %v", resp.Error))
 			}
 			if result, ok := resp.Result.(map[string]any); ok {
 				text := extractText(result)
@@ -170,7 +170,7 @@ func (a *Adapter) debugf(format string, args ...any) {
 func (a *Adapter) ensureReady() error {
 	a.debugf("ensureReady start")
 	if err := a.client.Start(); err != nil {
-		return err
+		return wrapACPError("process/start", err)
 	}
 	if a.initialized {
 		a.debugf("ensureReady already initialized")
@@ -183,7 +183,7 @@ func (a *Adapter) ensureReady() error {
 		"clientInfo":         map[string]any{"name": "cli-agent-gateway-go", "version": "0.1.0"},
 	}, time.Duration(a.initializeTimeoutSec)*time.Second)
 	if err != nil {
-		return err
+		return wrapACPError("initialize", err)
 	}
 	a.initialized = true
 	a.debugf("initialize ok")
@@ -220,16 +220,16 @@ func (a *Adapter) createSession(req core.TaskRequest) (string, error) {
 					return sid, nil
 				}
 			}
-			return "", nil
+			return "", newProtocolError("session/new", "response missing session id")
 		}
 		if i == attempts-1 {
-			return "", err
+			return "", wrapACPError("session/new", err)
 		}
 		if a.sessionNewBackoffSec > 0 {
 			time.Sleep(time.Duration(a.sessionNewBackoffSec*float64(time.Second)) * time.Duration(1<<i))
 		}
 	}
-	return "", nil
+	return "", newProtocolError("session/new", "exhausted retries without session id")
 }
 
 func extractText(payload map[string]any) string {

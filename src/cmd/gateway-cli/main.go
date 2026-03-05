@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,6 +49,14 @@ type StatusPayload struct {
 	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
+type SendPayload struct {
+	OK        bool   `json:"ok"`
+	Channel   string `json:"channel"`
+	To        string `json:"to"`
+	MessageID string `json:"message_id"`
+	Error     string `json:"error,omitempty"`
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage(os.Stderr)
@@ -80,6 +89,8 @@ func main() {
 		os.Exit(runHealth(repoRoot, args))
 	case "doctor":
 		os.Exit(runDoctor(repoRoot, args))
+	case "send":
+		os.Exit(runSend(repoRoot, args))
 	case "actions":
 		printActions(os.Stdout)
 	case "help", "-h", "--help":
@@ -100,6 +111,7 @@ func printActions(out *os.File) {
 	fmt.Fprintln(out, "status")
 	fmt.Fprintln(out, "health")
 	fmt.Fprintln(out, "doctor")
+	fmt.Fprintln(out, "send")
 	fmt.Fprintln(out, "actions")
 	fmt.Fprintln(out, "help")
 }
@@ -116,6 +128,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
 	fmt.Fprintln(out, "  doctor [--json]     Extended diagnostics (health + path writability)")
+	fmt.Fprintln(out, "  send [opts]         Send a message via selected channel")
 	fmt.Fprintln(out, "  actions             Print supported action names")
 	fmt.Fprintln(out, "  help                Show this message")
 }
@@ -172,48 +185,7 @@ func runGoMain(repoRoot string, args []string) int {
 	fmt.Printf("[%s] startup channel=%s workdir=%s\n", time.Now().UTC().Format(time.RFC3339), cfg.ChannelType, cfg.Workdir)
 	fmt.Printf("[%s] startup acp_cmd=%s permission_policy=%s\n", time.Now().UTC().Format(time.RFC3339), cfg.ACPAgentCmd, cfg.PermissionPolicy)
 
-	var channel core.ChannelAdapter
-	switch strings.ToLower(strings.TrimSpace(cfg.ChannelType)) {
-	case "dingtalk":
-		channel = dingtalk.NewAdapter(dingtalk.Options{
-			RepoRoot:              cfg.RepoRoot,
-			QueueFile:             cfg.DingTalkQueueFile,
-			FetchMaxEvents:        cfg.DingTalkFetchMax,
-			DMPolicy:              cfg.DingTalkDMPolicy,
-			GroupPolicy:           cfg.DingTalkGroupPolicy,
-			AllowedFrom:           cfg.DingTalkAllowedFrom,
-			GroupAllowlist:        cfg.DingTalkGroupAllowed,
-			RequireMentionInGroup: cfg.DingTalkRequireAt,
-			SendMode:              cfg.DingTalkSendMode,
-			SendMsgType:           cfg.DingTalkSendMsgType,
-			SendTimeoutSec:        cfg.DingTalkSendTimeout,
-			MarkdownTitle:         cfg.DingTalkTitle,
-			PrettyStatus:          cfg.DingTalkPrettyStatus,
-			BotWebhook:            cfg.DingTalkBotWebhook,
-			BotSecret:             cfg.DingTalkBotSecret,
-			AppKey:                cfg.DingTalkAppKey,
-			AppSecret:             cfg.DingTalkAppSecret,
-			AgentID:               cfg.DingTalkAgentID,
-			DefaultToUser:         cfg.DingTalkDefaultTo,
-			TokenURL:              cfg.DingTalkTokenURL,
-			SendURL:               cfg.DingTalkSendURL,
-		})
-	case "imessage":
-		channel = imessage.NewAdapter(imessage.Options{
-			FetchCmd:        cfg.IMessageFetchCmd,
-			SendCmd:         cfg.IMessageSendCmd,
-			FetchTimeoutSec: cfg.IMessageFetchTimeoutSec,
-			SendTimeoutSec:  cfg.IMessageSendTimeoutSec,
-		})
-	default:
-		channel = &command.Adapter{
-			FetchCmd:        cfg.FetchCmd,
-			SendCmd:         cfg.SendCmd,
-			ChannelID:       cfg.ChannelType,
-			FetchTimeoutSec: 120,
-			SendTimeoutSec:  120,
-		}
-	}
+	channel := buildChannelAdapter(cfg)
 	agent := acp.NewAdapter(
 		cfg.ACPAgentCmd,
 		cfg.Workdir,
@@ -403,6 +375,7 @@ func runStart(repoRoot string, args []string) int {
 func runStop(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
 	cfg, _ := config.Load(repoRoot, "")
+	quiet := hasFlag(args, "--quiet")
 	payload, err := getStatusPayload(repoRoot)
 	if err != nil {
 		if jsonOut {
@@ -413,6 +386,9 @@ func runStop(repoRoot string, args []string) int {
 		return 1
 	}
 	if !payload.Running {
+		if quiet {
+			return 0
+		}
 		if jsonOut {
 			printJSON(statusJSON("stop", payload, cfg, ""))
 		} else {
@@ -466,6 +442,9 @@ func runStop(repoRoot string, args []string) int {
 		}
 		fmt.Fprintf(os.Stderr, "status after stop failed: %v\n", err)
 		return 1
+	}
+	if quiet {
+		return 0
 	}
 	if jsonOut {
 		printJSON(statusJSON("stop", after, cfg, ""))
@@ -610,6 +589,131 @@ func runDoctor(repoRoot string, args []string) int {
 	return 1
 }
 
+func runSend(repoRoot string, args []string) int {
+	envPath := filepath.Join(repoRoot, ".env")
+	if _, err := os.Stat(envPath); err != nil {
+		panic(fmt.Sprintf(".env not found: %s", envPath))
+	}
+
+	fs := flag.NewFlagSet("send", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	text := fs.String("text", "", "message text")
+	to := fs.String("to", "", "target receiver/user")
+	channelOverride := fs.String("channel", "", "channel override: command|dingtalk|imessage")
+	messageID := fs.String("message-id", "", "message id")
+	reportFile := fs.String("report-file", "", "report file path")
+	jsonOut := fs.Bool("json", false, "json output")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	if strings.TrimSpace(*text) == "" {
+		fmt.Fprintln(os.Stderr, "send requires --text")
+		return 2
+	}
+
+	origChannel, hasOrigChannel := os.LookupEnv("CHANNEL_TYPE")
+	if strings.TrimSpace(*channelOverride) != "" {
+		_ = os.Setenv("CHANNEL_TYPE", strings.TrimSpace(*channelOverride))
+		defer func() {
+			if hasOrigChannel {
+				_ = os.Setenv("CHANNEL_TYPE", origChannel)
+				return
+			}
+			_ = os.Unsetenv("CHANNEL_TYPE")
+		}()
+	}
+
+	cfg, err := config.Load(repoRoot, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
+		return 1
+	}
+	channel := buildChannelAdapter(cfg)
+
+	target := strings.TrimSpace(*to)
+	if target == "" && strings.EqualFold(cfg.ChannelType, "dingtalk") {
+		target = strings.TrimSpace(cfg.DingTalkDefaultTo)
+	}
+	if target == "" {
+		fmt.Fprintln(os.Stderr, "send requires --to (or DINGTALK_DEFAULT_TO_USER for dingtalk)")
+		return 2
+	}
+
+	msgID := strings.TrimSpace(*messageID)
+	if msgID == "" {
+		msgID = fmt.Sprintf("manual-%d", time.Now().UnixMilli())
+	}
+
+	sendErr := channel.Send(strings.TrimSpace(*text), target, msgID, strings.TrimSpace(*reportFile))
+	if *jsonOut {
+		payload := SendPayload{
+			OK:        sendErr == nil,
+			Channel:   cfg.ChannelType,
+			To:        target,
+			MessageID: msgID,
+		}
+		if sendErr != nil {
+			payload.Error = sendErr.Error()
+		}
+		printJSON(payload)
+		if sendErr != nil {
+			return 1
+		}
+		return 0
+	}
+	if sendErr != nil {
+		fmt.Fprintf(os.Stderr, "send failed: %v\n", sendErr)
+		return 1
+	}
+	fmt.Printf("sent channel=%s to=%s message_id=%s\n", cfg.ChannelType, target, msgID)
+	return 0
+}
+
+func buildChannelAdapter(cfg config.AppConfig) core.ChannelAdapter {
+	switch strings.ToLower(strings.TrimSpace(cfg.ChannelType)) {
+	case "dingtalk":
+		return dingtalk.NewAdapter(dingtalk.Options{
+			RepoRoot:              cfg.RepoRoot,
+			QueueFile:             cfg.DingTalkQueueFile,
+			FetchMaxEvents:        cfg.DingTalkFetchMax,
+			DMPolicy:              cfg.DingTalkDMPolicy,
+			GroupPolicy:           cfg.DingTalkGroupPolicy,
+			AllowedFrom:           cfg.DingTalkAllowedFrom,
+			GroupAllowlist:        cfg.DingTalkGroupAllowed,
+			RequireMentionInGroup: cfg.DingTalkRequireAt,
+			SendMode:              cfg.DingTalkSendMode,
+			SendMsgType:           cfg.DingTalkSendMsgType,
+			SendTimeoutSec:        cfg.DingTalkSendTimeout,
+			MarkdownTitle:         cfg.DingTalkTitle,
+			PrettyStatus:          cfg.DingTalkPrettyStatus,
+			BotWebhook:            cfg.DingTalkBotWebhook,
+			BotSecret:             cfg.DingTalkBotSecret,
+			AppKey:                cfg.DingTalkAppKey,
+			AppSecret:             cfg.DingTalkAppSecret,
+			AgentID:               cfg.DingTalkAgentID,
+			DefaultToUser:         cfg.DingTalkDefaultTo,
+			TokenURL:              cfg.DingTalkTokenURL,
+			SendURL:               cfg.DingTalkSendURL,
+		})
+	case "imessage":
+		return imessage.NewAdapter(imessage.Options{
+			FetchCmd:        cfg.IMessageFetchCmd,
+			SendCmd:         cfg.IMessageSendCmd,
+			FetchTimeoutSec: cfg.IMessageFetchTimeoutSec,
+			SendTimeoutSec:  cfg.IMessageSendTimeoutSec,
+		})
+	default:
+		return &command.Adapter{
+			FetchCmd:        cfg.FetchCmd,
+			SendCmd:         cfg.SendCmd,
+			ChannelID:       cfg.ChannelType,
+			FetchTimeoutSec: 120,
+			SendTimeoutSec:  120,
+		}
+	}
+}
+
 func getStatusPayload(repoRoot string) (StatusPayload, error) {
 	_ = envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env"))
 	lockPath := strings.TrimSpace(os.Getenv("LOCK_FILE"))
@@ -648,6 +752,7 @@ func statusJSON(action string, p StatusPayload, cfg config.AppConfig, logPath st
 		"ok":        true,
 		"action":    action,
 		"status":    status,
+		"running":   p.Running,
 		"lock_file": lockFile,
 	}
 	if p.PID != nil && *p.PID > 0 {

@@ -19,7 +19,7 @@ func WriteDefaultEnv(repoRoot, workdir string) (string, error) {
 		"CODEX_WORKDIR":                     workdir,
 		"CHANNEL_TYPE":                      "command",
 		"SMS_FETCH_CMD":                     "printf '[]'",
-		"SMS_SEND_CMD":                      "/bin/true",
+		"SMS_SEND_CMD":                      "true",
 		"REMOTE_USER_ID":                    "tester",
 		"ALLOWED_FROM":                      "tester",
 		"ACP_AGENT_CMD":                     "codex-acp",

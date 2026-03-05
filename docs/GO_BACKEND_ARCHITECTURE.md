@@ -91,6 +91,28 @@ To minimize migration risk, keep these contracts stable:
 - Backward compatibility breaks in config/state:
   - Mitigation: schema/version checks and migration helpers.
 
+## Next engineering priorities (Go core)
+
+1. Stability baseline
+- Add integration tests for `run/start/stop/restart/status/health`.
+- Add lock-contention and crash-recovery smoke cases.
+- Add long-run and duplicate-message checks.
+
+2. ACP reliability
+- Classify ACP failures into `timeout`, `transport`, `protocol`.
+- Keep method-level context (`initialize`, `session/new`, `session/prompt`) in errors.
+- Standardize retry/backoff behavior and expose config knobs.
+
+3. Storage hardening (sqlite default)
+- Introduce schema version and migrations for state/report metadata.
+- Tune sqlite runtime (`WAL`, `busy_timeout`, indexes).
+- Define corruption recovery behavior and fallback path.
+
+4. Observability
+- Keep structured logs with trace/session/message IDs.
+- Add simple metrics export (at least counters/latency/error-rate).
+- Make status/health JSON contract stable for GUI consumers.
+
 ## Suggested repository structure for Go implementation
 
 ```text

@@ -31,6 +31,12 @@ func New(dbPath, reportDir string) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := applyPragmas(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	b := &Backend{db: db, reportDir: reportDir}
 	if err := b.initSchema(); err != nil {
 		_ = db.Close()
@@ -49,6 +55,21 @@ func (b *Backend) initSchema() error {
 	}
 	for _, s := range stmts {
 		if _, err := b.db.Exec(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyPragmas(db *sql.DB) error {
+	stmts := []string{
+		`PRAGMA journal_mode=WAL;`,
+		`PRAGMA synchronous=NORMAL;`,
+		`PRAGMA busy_timeout=5000;`,
+		`PRAGMA foreign_keys=ON;`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
 			return err
 		}
 	}

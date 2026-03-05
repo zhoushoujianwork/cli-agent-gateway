@@ -73,10 +73,10 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 	}
 
 	defaultFetchCmd := "printf '[]'"
-	defaultSendCmd := "/bin/true"
+	defaultSendCmd := "true"
 	if channel == "dingtalk" {
 		defaultFetchCmd = "builtin:dingtalk-stream"
-		defaultSendCmd = "/bin/true"
+		defaultSendCmd = "true"
 	}
 	if channel == "imessage" {
 		defaultFetchCmd = "imsg fetch --json"
