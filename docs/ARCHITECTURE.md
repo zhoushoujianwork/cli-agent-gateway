@@ -26,11 +26,31 @@ flowchart TD
 ## 运行链路（vNext）
 
 1. Channel adapter 接收消息并规范化。
-2. Gateway core 执行去重、鉴权、会话路由。
+2. Gateway core 执行去重、鉴权、会话路由与管理指令（如 `/clear`）。
 3. ACP adapter 发起 `initialize/session/new/session/prompt`。
 4. 循环处理 `session/update` 与 `session/request_permission`。
 5. Gateway 生成最终回复并通过 channel 发送。
 6. 写入状态、交互日志、任务报告供 CLI/GUI 查询。
+
+### 数据与控制职责
+
+- Channel 层：只负责 ingress/egress，不负责会话编排。
+- Gateway Loop：负责管理行为与内容路由决策。
+- ACP Adapter：负责执行，不承担通道细节。
+- Storage：负责状态恢复、审计追踪与查询支持。
+
+### 观测日志（主程序）
+
+主程序（`gateway-cli run`）输出的结构化阶段日志应覆盖整条链路：
+
+1. `fetch ok`：已从 channel 拉到消息批次。
+2. `inbound accepted`：消息通过去重和鉴权。
+3. `session resolved`：会话 key/session id 已决策。
+4. `send ack ok|failed`：回执消息发送结果。
+5. `execute start`：开始交给 ACP 执行。
+6. `execute done|failed`：ACP 返回终态。
+7. `send final ok|failed`：最终回复发送结果。
+8. `persist done`：状态/交互日志落库完成。
 
 ## 组件职责
 

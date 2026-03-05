@@ -68,6 +68,38 @@ cd src && go run ./cmd/gateway-cli send --to tester --file ./message.md --msgtyp
   - `DINGTALK_SEND_MODE=api`：走企业应用 API（`DINGTALK_APP_KEY/SECRET/AGENT_ID`）
   - `DINGTALK_SEND_MODE=webhook`：走机器人 webhook（`DINGTALK_BOT_WEBHOOK`）
 
+## 处理链路与职责
+
+统一链路：
+
+1. Channel（DingTalk/command/imessage/GUI）接收消息，标准化为 `InboundMessage`。
+2. Gateway Loop 执行管理行为（去重、鉴权、会话路由、`/clear`、ack/final 发送策略）。
+3. 普通内容请求转发给 ACP Adapter（`initialize/session/new/session/prompt`）。
+4. ACP 返回结果后，Gateway 组装最终回复并回发到 Channel。
+5. 全过程写入存储（state/session_map、interaction trace、report JSON）。
+
+职责边界：
+
+- `src/internal/channels/*`：只做通道收发与通道字段适配。
+- `src/internal/core/loop.go`：统一编排、会话管理、回发策略、可观测日志。
+- `src/internal/agents/acp/*`：只做 ACP 协议交互。
+- `src/internal/storage/*`：状态与日志落库。
+
+## 主程序可观测日志
+
+`cag run` 的 stderr 会输出主链路日志，便于定位卡点。常见阶段：
+
+- `fetch ok`
+- `inbound accepted`
+- `session resolved`
+- `send ack ok` / `send ack failed`
+- `execute start`
+- `execute done` / `execute failed`
+- `send final ok` / `send final failed`
+- `persist done`
+
+ACP 调试日志默认开启（`CAG_GO_DEBUG` 默认视为开启）；如需关闭可设 `CAG_GO_DEBUG=0`。
+
 ## 存储
 
 - `sqlite`（默认）：状态/交互/报告元数据写 SQLite，并继续输出报告 JSON 文件。

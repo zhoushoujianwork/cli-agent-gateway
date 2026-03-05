@@ -30,7 +30,7 @@ func NewAdapter(command, cwd, permissionPolicy string, timeoutSec, initializeTim
 		sessionNewTimeoutSec: sessionNewTimeoutSec,
 		sessionNewRetries:    sessionNewRetries,
 		sessionNewBackoffSec: sessionNewBackoffSec,
-		debug:                strings.TrimSpace(os.Getenv("CAG_GO_DEBUG")) == "1",
+		debug:                envBoolDefaultTrue("CAG_GO_DEBUG"),
 	}
 }
 
@@ -45,6 +45,7 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 
 	start := time.Now()
 	sessionID := strings.TrimSpace(req.SessionID)
+	hadExistingSession := sessionID != ""
 	if sessionID == "" {
 		sid, err := a.createSession(req)
 		if err != nil {
@@ -53,43 +54,166 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 		sessionID = sid
 	}
 
-	promptID, err := a.client.StartRequest("session/prompt", map[string]any{
-		"sessionId": sessionID,
-		"prompt": []map[string]any{{
-			"type": "text",
-			"text": req.UserText,
-		}},
-		"metadata": req.Metadata,
-	})
-	if err != nil {
-		return core.TaskResult{}, wrapACPError("session/prompt", err)
-	}
-	a.debugf("prompt start request_id=%d session_id=%s", promptID, sessionID)
-
 	deadline := time.Now().Add(time.Duration(a.timeoutSec) * time.Second)
 	summary := ""
 	status := "timeout"
 	output := ""
 	rawEvents := make([]map[string]any, 0)
+	lastHeartbeat := time.Now()
+	sawChunk := false
+	lastContentAt := time.Time{}
+	softIdleSec := envIntDefault("ACP_SOFT_TERMINAL_IDLE_SEC", 8)
+	softIdle := time.Duration(softIdleSec) * time.Second
 
-	for time.Now().Before(deadline) {
-		resp, err := a.client.PollResponse(promptID, 100*time.Millisecond)
+	for attempt := 0; attempt < 2; attempt++ {
+		promptID, err := a.client.StartRequest("session/prompt", map[string]any{
+			"sessionId": sessionID,
+			"prompt": []map[string]any{{
+				"type": "text",
+				"text": req.UserText,
+			}},
+			"metadata": req.Metadata,
+		})
 		if err != nil {
 			return core.TaskResult{}, wrapACPError("session/prompt", err)
 		}
-		if resp != nil {
-			a.debugf("prompt response id=%d error=%v", resp.ID, resp.Error)
-			if resp.Error != nil {
-				return core.TaskResult{}, newProtocolError("session/prompt", fmt.Sprintf("jsonrpc error: %v", resp.Error))
-			}
-			if result, ok := resp.Result.(map[string]any); ok {
-				text := extractText(result)
-				if text != "" {
-					summary = text
-					output = text
+		a.debugf("prompt start request_id=%d session_id=%s attempt=%d", promptID, sessionID, attempt+1)
+
+		retryWithNewSession := false
+		for time.Now().Before(deadline) {
+			if softIdleSec > 0 && sawChunk && !lastContentAt.IsZero() && time.Since(lastContentAt) >= softIdle {
+				a.debugf("soft terminal request_id=%d session_id=%s reason=idle_after_chunk idle=%ds", promptID, sessionID, softIdleSec)
+				rawEvents = append(rawEvents, map[string]any{
+					"method": "session/soft_terminal",
+					"params": map[string]any{
+						"reason":   "idle_after_chunk",
+						"idle_sec": softIdleSec,
+					},
+				})
+				if strings.TrimSpace(summary) == "" {
+					summary = strings.TrimSpace(output)
 				}
-				if isTerminal(result) {
-					status = statusFrom(result)
+				if strings.TrimSpace(summary) == "" {
+					summary = "任务已处理完成。"
+				}
+				return core.TaskResult{
+					TraceID:    req.TraceID,
+					Status:     "ok",
+					Summary:    summary,
+					ElapsedSec: int(time.Since(start).Seconds()),
+					SessionID:  sessionID,
+					OutputText: output,
+					RawEvents:  rawEvents,
+				}, nil
+			}
+
+			if time.Since(lastHeartbeat) >= 5*time.Second {
+				elapsed := int(time.Since(start).Seconds())
+				remaining := int(time.Until(deadline).Seconds())
+				if remaining < 0 {
+					remaining = 0
+				}
+				a.debugf("execute waiting request_id=%d session_id=%s elapsed=%ds remaining=%ds", promptID, sessionID, elapsed, remaining)
+				lastHeartbeat = time.Now()
+			}
+
+			resp, err := a.client.PollResponse(promptID, 100*time.Millisecond)
+			if err != nil {
+				return core.TaskResult{}, wrapACPError("session/prompt", err)
+			}
+			if resp != nil {
+				rawEvents = append(rawEvents, map[string]any{
+					"method": "session/prompt.response",
+					"params": map[string]any{
+						"id":     resp.ID,
+						"error":  resp.Error,
+						"result": resp.Result,
+					},
+				})
+				a.debugf("prompt response id=%d error=%v", resp.ID, resp.Error)
+				if resp.Error != nil {
+					if attempt == 0 && hadExistingSession && isSessionResourceNotFound(resp.Error) {
+						a.debugf("session not found for session_id=%s, recreating session and retrying prompt", sessionID)
+						sid, serr := a.createSession(req)
+						if serr != nil {
+							return core.TaskResult{}, wrapACPError("session/new", serr)
+						}
+						sessionID = sid
+						retryWithNewSession = true
+						break
+					}
+					return core.TaskResult{}, newProtocolError("session/prompt", fmt.Sprintf("jsonrpc error: %v", resp.Error))
+				}
+				if result, ok := resp.Result.(map[string]any); ok {
+					text := extractText(result)
+					if text != "" {
+						if isChunkUpdate(sessionUpdateType(result)) {
+							output = appendChunk(output, text)
+							summary = strings.TrimSpace(output)
+							sawChunk = true
+						} else {
+							summary = text
+							output = text
+						}
+						lastContentAt = time.Now()
+					}
+					if isTerminal(result) {
+						status = statusFrom(result)
+						if summary == "" {
+							summary = "任务已处理完成。"
+						}
+						return core.TaskResult{
+							TraceID:    req.TraceID,
+							Status:     status,
+							Summary:    summary,
+							ElapsedSec: int(time.Since(start).Seconds()),
+							SessionID:  sessionID,
+							OutputText: output,
+							RawEvents:  rawEvents,
+						}, nil
+					}
+				}
+			}
+
+			serverReq := a.client.PopRequest(50 * time.Millisecond)
+			if serverReq != nil {
+				rawEvents = append(rawEvents, map[string]any{
+					"method": "session/server_request",
+					"params": map[string]any{
+						"id":     serverReq.ID,
+						"method": serverReq.Method,
+						"params": serverReq.Params,
+					},
+				})
+				a.debugf("server request method=%s id=%d", serverReq.Method, serverReq.ID)
+				if strings.Contains(strings.ToLower(serverReq.Method), "request_permission") {
+					decision := "allow"
+					if strings.EqualFold(a.permissionPolicy, "auto_deny") {
+						decision = "deny"
+					}
+					_ = a.client.SendResponse(serverReq.ID, map[string]any{"decision": decision, "reason": "policy:" + a.permissionPolicy}, nil)
+				} else {
+					_ = a.client.SendResponse(serverReq.ID, nil, map[string]any{"code": -32601, "message": "unsupported method"})
+				}
+			}
+
+			n := a.client.PopNotification(50 * time.Millisecond)
+			if n != nil {
+				a.debugf("notification method=%s params=%v", n.Method, n.Params)
+				rawEvents = append(rawEvents, map[string]any{"method": n.Method, "params": n.Params})
+				if text := extractText(n.Params); text != "" {
+					if isChunkUpdate(sessionUpdateType(n.Params)) {
+						output = appendChunk(output, text)
+						summary = strings.TrimSpace(output)
+						sawChunk = true
+					} else {
+						summary = text
+						output = text
+					}
+					lastContentAt = time.Now()
+				}
+				if isTerminal(n.Params) {
+					status = statusFrom(n.Params)
 					if summary == "" {
 						summary = "任务已处理完成。"
 					}
@@ -105,44 +229,8 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 				}
 			}
 		}
-
-		serverReq := a.client.PopRequest(50 * time.Millisecond)
-		if serverReq != nil {
-			a.debugf("server request method=%s id=%d", serverReq.Method, serverReq.ID)
-			if strings.Contains(strings.ToLower(serverReq.Method), "request_permission") {
-				decision := "allow"
-				if strings.EqualFold(a.permissionPolicy, "auto_deny") {
-					decision = "deny"
-				}
-				_ = a.client.SendResponse(serverReq.ID, map[string]any{"decision": decision, "reason": "policy:" + a.permissionPolicy}, nil)
-			} else {
-				_ = a.client.SendResponse(serverReq.ID, nil, map[string]any{"code": -32601, "message": "unsupported method"})
-			}
-		}
-
-		n := a.client.PopNotification(50 * time.Millisecond)
-		if n != nil {
-			a.debugf("notification method=%s params=%v", n.Method, n.Params)
-			rawEvents = append(rawEvents, map[string]any{"method": n.Method, "params": n.Params})
-			if text := extractText(n.Params); text != "" {
-				summary = text
-				output = text
-			}
-			if isTerminal(n.Params) {
-				status = statusFrom(n.Params)
-				if summary == "" {
-					summary = "任务已处理完成。"
-				}
-				return core.TaskResult{
-					TraceID:    req.TraceID,
-					Status:     status,
-					Summary:    summary,
-					ElapsedSec: int(time.Since(start).Seconds()),
-					SessionID:  sessionID,
-					OutputText: output,
-					RawEvents:  rawEvents,
-				}, nil
-			}
+		if !retryWithNewSession {
+			break
 		}
 	}
 
@@ -293,4 +381,104 @@ func statusFrom(payload map[string]any) string {
 func anyString(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func envBoolDefaultTrue(key string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return true
+	}
+	return v != "0" && v != "false" && v != "off"
+}
+
+func envIntDefault(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	n := 0
+	if _, err := fmt.Sscanf(raw, "%d", &n); err != nil {
+		return fallback
+	}
+	if n < 0 {
+		return fallback
+	}
+	return n
+}
+
+func isSessionResourceNotFound(errObj any) bool {
+	if m, ok := errObj.(map[string]any); ok {
+		code := toInt(m["code"])
+		msg := strings.ToLower(strings.TrimSpace(anyString(m["message"])))
+		if code == -32002 {
+			return true
+		}
+		return strings.Contains(msg, "resource not found") || strings.Contains(msg, "session not found")
+	}
+	msg := strings.ToLower(strings.TrimSpace(fmt.Sprint(errObj)))
+	return strings.Contains(msg, "resource not found") || strings.Contains(msg, "session not found")
+}
+
+func toInt(v any) int {
+	switch t := v.(type) {
+	case int:
+		return t
+	case int32:
+		return int(t)
+	case int64:
+		return int(t)
+	case float64:
+		return int(t)
+	case string:
+		n := strings.TrimSpace(t)
+		if n == "" {
+			return 0
+		}
+		var out int
+		_, _ = fmt.Sscanf(n, "%d", &out)
+		return out
+	default:
+		return 0
+	}
+}
+
+func sessionUpdateType(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	if u, ok := payload["update"].(map[string]any); ok {
+		return strings.ToLower(strings.TrimSpace(anyString(u["sessionUpdate"])))
+	}
+	return ""
+}
+
+func isChunkUpdate(t string) bool {
+	v := strings.ToLower(strings.TrimSpace(t))
+	return strings.HasSuffix(v, "_chunk")
+}
+
+func appendChunk(base, chunk string) string {
+	next := strings.TrimSpace(chunk)
+	if next == "" {
+		return base
+	}
+	if strings.TrimSpace(base) == "" {
+		return next
+	}
+	if punctuationOnly(next) {
+		return base + next
+	}
+	if strings.HasSuffix(base, " ") || strings.HasSuffix(base, "\n") {
+		return base + next
+	}
+	return base + " " + next
+}
+
+func punctuationOnly(s string) bool {
+	switch s {
+	case ".", ",", "!", "?", ":", ";", "。", "，", "！", "？", "：", "；":
+		return true
+	default:
+		return false
+	}
 }

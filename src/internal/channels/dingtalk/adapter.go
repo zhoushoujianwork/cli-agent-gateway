@@ -54,6 +54,14 @@ type Adapter struct {
 	streamClient *dtclient.StreamClient
 	startErr     error
 	mu           sync.Mutex
+	webhookByMsg map[string]string
+	webhookOrder []string
+	profileCache map[string]cachedProfile
+}
+
+type cachedProfile struct {
+	data      map[string]any
+	expiresAt time.Time
 }
 
 func NewAdapter(opts Options) *Adapter {
@@ -73,9 +81,12 @@ func NewAdapter(opts Options) *Adapter {
 		opts.MarkdownTitle = "CLI Agent Gateway"
 	}
 	a := &Adapter{
-		opts:       opts,
-		httpClient: &http.Client{Timeout: time.Duration(opts.SendTimeoutSec) * time.Second},
-		inbox:      make(chan map[string]any, max(128, opts.FetchMaxEvents*8)),
+		opts:         opts,
+		httpClient:   &http.Client{Timeout: time.Duration(opts.SendTimeoutSec) * time.Second},
+		inbox:        make(chan map[string]any, max(128, opts.FetchMaxEvents*8)),
+		webhookByMsg: map[string]string{},
+		webhookOrder: make([]string, 0, 512),
+		profileCache: map[string]cachedProfile{},
 	}
 	a.startStream()
 	return a
@@ -136,19 +147,32 @@ func (a *Adapter) onStreamMessage(data *dtchatbot.BotCallbackDataModel) {
 		return
 	}
 	node := map[string]any{
-		"messageId":      sanitize(data.MsgId),
-		"conversationId": sanitize(data.ConversationId),
-		"threadId":       sanitize(data.ConversationId),
-		"senderStaffId":  sanitize(data.SenderStaffId),
-		"senderId":       sanitize(data.SenderId),
-		"senderName":     sanitize(data.SenderNick),
-		"chatType":       sanitize(data.ConversationType),
-		"isAtBot":        data.IsInAtList,
-		"isGroup":        sanitize(data.ConversationType) == "2",
-		"text":           sanitize(data.Text.Content),
-		"ts":             strconv.FormatInt(data.CreateAt, 10),
-		"sessionWebhook": sanitize(data.SessionWebhook),
+		"messageId":                 sanitize(data.MsgId),
+		"conversationId":            sanitize(data.ConversationId),
+		"threadId":                  sanitize(data.ConversationId),
+		"senderStaffId":             sanitize(data.SenderStaffId),
+		"senderId":                  sanitize(data.SenderId),
+		"senderName":                sanitize(data.SenderNick),
+		"senderCorpId":              sanitize(data.SenderCorpId),
+		"isAdmin":                   data.IsAdmin,
+		"chatType":                  sanitize(data.ConversationType),
+		"conversationTitle":         sanitize(data.ConversationTitle),
+		"isAtBot":                   data.IsInAtList,
+		"isGroup":                   sanitize(data.ConversationType) == "2",
+		"text":                      sanitize(data.Text.Content),
+		"msgType":                   sanitize(data.Msgtype),
+		"content":                   data.Content,
+		"atUsers":                   data.AtUsers,
+		"ts":                        strconv.FormatInt(data.CreateAt, 10),
+		"sessionWebhook":            sanitize(data.SessionWebhook),
+		"sessionWebhookExpiredTime": strconv.FormatInt(data.SessionWebhookExpiredTime, 10),
+		"chatbotCorpId":             sanitize(data.ChatbotCorpId),
+		"chatbotUserId":             sanitize(data.ChatbotUserId),
 	}
+	if strings.TrimSpace(anyString(node["text"])) == "" {
+		node["text"] = extractTextFromContent(data.Content)
+	}
+	a.rememberSessionWebhook(anyString(node["messageId"]), anyString(node["sessionWebhook"]))
 	if strings.TrimSpace(anyString(node["text"])) == "" {
 		a.logf("stream drop msg_id=%s reason=empty_text sender=%s chat_type=%s", sanitize(data.MsgId), sanitize(data.SenderStaffId), sanitize(data.ConversationType))
 		return
@@ -206,10 +230,23 @@ func (a *Adapter) Fetch() ([]core.InboundMessage, error) {
 func (a *Adapter) Send(text, to, messageID, reportFile string) error {
 	_ = reportFile
 	mode := strings.ToLower(strings.TrimSpace(a.opts.SendMode))
+	sessionWebhook := a.getSessionWebhook(messageID)
 	if mode == "webhook" {
+		if strings.TrimSpace(sessionWebhook) != "" {
+			return a.sendToWebhookURL(sessionWebhook, text, messageID, "")
+		}
 		return a.sendWebhook(text, messageID)
 	}
-	return a.sendAPI(text, to, messageID)
+	if err := a.sendAPI(text, to, messageID); err != nil {
+		if strings.TrimSpace(sessionWebhook) != "" {
+			a.logf("api send failed for message_id=%s target=%s err=%v, fallback=session_webhook", sanitize(messageID), sanitize(to), err)
+			if werr := a.sendToWebhookURL(sessionWebhook, text, messageID, ""); werr == nil {
+				return nil
+			}
+		}
+		return err
+	}
+	return nil
 }
 
 func (a *Adapter) shouldKeep(node map[string]any) bool {
@@ -315,14 +352,33 @@ func (a *Adapter) normalize(node map[string]any) *core.InboundMessage {
 	}
 
 	meta := map[string]any{
-		"conversation_id": conversationID,
-		"chat_type":       sanitize(anyString(node["chatType"])),
-		"is_group":        anyBool(node["isGroup"]),
-		"is_at_bot":       anyBool(node["isAtBot"]),
-		"sender_name":     sanitize(anyString(node["senderName"])),
+		"conversation_id":    conversationID,
+		"chat_type":          sanitize(anyString(node["chatType"])),
+		"is_group":           anyBool(node["isGroup"]),
+		"is_at_bot":          anyBool(node["isAtBot"]),
+		"sender_name":        sanitize(anyString(node["senderName"])),
+		"sender_staff_id":    sanitize(anyString(node["senderStaffId"])),
+		"sender_id":          sanitize(anyString(node["senderId"])),
+		"sender_corp_id":     sanitize(anyString(node["senderCorpId"])),
+		"is_admin":           anyBool(node["isAdmin"]),
+		"conversation_title": sanitize(anyString(node["conversationTitle"])),
+		"msg_type":           sanitize(anyString(node["msgType"])),
+		"chatbot_corp_id":    sanitize(anyString(node["chatbotCorpId"])),
+		"chatbot_user_id":    sanitize(anyString(node["chatbotUserId"])),
+		"at_users":           node["atUsers"],
+		"raw_content":        node["content"],
 	}
 	if webhook := sanitize(anyString(node["sessionWebhook"])); webhook != "" {
 		meta["session_webhook"] = webhook
+	}
+	if v := sanitize(anyString(node["sessionWebhookExpiredTime"])); v != "" {
+		meta["session_webhook_expired_time"] = v
+	}
+	if profile := a.getUserProfile(sanitize(anyString(node["senderStaffId"]))); len(profile) > 0 {
+		meta["sender_profile"] = profile
+		if province := firstNonEmpty(profile, "province", "state", "stateCode", "state_code"); province != "" {
+			meta["sender_province"] = province
+		}
 	}
 
 	return &core.InboundMessage{
@@ -344,15 +400,7 @@ func (a *Adapter) sendWebhook(text, messageID string) error {
 	if strings.TrimSpace(a.opts.BotSecret) != "" {
 		u = signedWebhookURL(u, a.opts.BotSecret)
 	}
-	payload := a.buildWebhookPayload(text, messageID)
-	resp, err := a.requestJSON(http.MethodPost, u, payload, nil)
-	if err != nil {
-		return err
-	}
-	if toInt(resp["errcode"]) != 0 {
-		return fmt.Errorf("webhook send failed: errcode=%v errmsg=%v", resp["errcode"], resp["errmsg"])
-	}
-	return nil
+	return a.sendToWebhookURL(u, text, messageID, "")
 }
 
 func (a *Adapter) sendAPI(text, to, messageID string) error {
@@ -391,11 +439,11 @@ func (a *Adapter) sendAPI(text, to, messageID string) error {
 		return err
 	}
 	if toInt(resp["errcode"]) != 0 {
-		return fmt.Errorf("api send failed: errcode=%v errmsg=%v", resp["errcode"], resp["errmsg"])
+		return fmt.Errorf("api send failed: %s", formatSendFailure(resp))
 	}
 	for _, key := range []string{"invaliduser", "invalid_user_id", "forbidden_user_id", "forbidden_userid", "invalidparty", "invalid_party_id"} {
 		if v := strings.TrimSpace(anyString(resp[key])); v != "" {
-			return fmt.Errorf("api send not delivered: %s=%s", key, v)
+			return fmt.Errorf("api send not delivered: %s", formatSendFailure(resp))
 		}
 	}
 	return nil
@@ -432,6 +480,90 @@ func (a *Adapter) getAccessToken() (string, error) {
 		return "", fmt.Errorf("empty access_token")
 	}
 	return token, nil
+}
+
+func (a *Adapter) sendToWebhookURL(rawURL, text, messageID, secret string) error {
+	u := strings.TrimSpace(rawURL)
+	if u == "" {
+		return fmt.Errorf("empty webhook url")
+	}
+	if strings.TrimSpace(secret) != "" {
+		u = signedWebhookURL(u, secret)
+	}
+	payload := a.buildWebhookPayload(text, messageID)
+	resp, err := a.requestJSON(http.MethodPost, u, payload, nil)
+	if err != nil {
+		return err
+	}
+	if toInt(resp["errcode"]) != 0 {
+		return fmt.Errorf("webhook send failed: errcode=%v errmsg=%v", resp["errcode"], resp["errmsg"])
+	}
+	return nil
+}
+
+func (a *Adapter) getUserProfile(staffID string) map[string]any {
+	id := strings.TrimSpace(staffID)
+	if id == "" {
+		return nil
+	}
+	now := time.Now()
+	a.mu.Lock()
+	if c, ok := a.profileCache[id]; ok && now.Before(c.expiresAt) {
+		cp := shallowCopyMap(c.data)
+		a.mu.Unlock()
+		return cp
+	}
+	a.mu.Unlock()
+
+	token, err := a.getAccessToken()
+	if err != nil {
+		return nil
+	}
+	u := "https://oapi.dingtalk.com/topapi/v2/user/get?access_token=" + url.QueryEscape(token)
+	resp, err := a.requestJSON(http.MethodPost, u, map[string]any{"userid": id, "language": "zh_CN"}, nil)
+	if err != nil {
+		return nil
+	}
+	if toInt(resp["errcode"]) != 0 {
+		return nil
+	}
+	result, _ := resp["result"].(map[string]any)
+	if len(result) == 0 {
+		return nil
+	}
+	a.mu.Lock()
+	a.profileCache[id] = cachedProfile{data: shallowCopyMap(result), expiresAt: now.Add(10 * time.Minute)}
+	a.mu.Unlock()
+	return shallowCopyMap(result)
+}
+
+func (a *Adapter) rememberSessionWebhook(messageID, webhook string) {
+	mid := strings.TrimSpace(messageID)
+	hook := strings.TrimSpace(webhook)
+	if mid == "" || hook == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.webhookByMsg[mid]; !ok {
+		a.webhookOrder = append(a.webhookOrder, mid)
+	}
+	a.webhookByMsg[mid] = hook
+	for len(a.webhookOrder) > 1024 {
+		old := a.webhookOrder[0]
+		a.webhookOrder = a.webhookOrder[1:]
+		delete(a.webhookByMsg, old)
+	}
+}
+
+func (a *Adapter) getSessionWebhook(messageID string) string {
+	base := stripPhasePrefix(messageID)
+	if base == "" {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return strings.TrimSpace(a.webhookByMsg[base])
 }
 
 func (a *Adapter) buildAPIMessage(text, messageID string) map[string]any {
@@ -526,6 +658,16 @@ func messagePhase(messageID string) string {
 		return "error"
 	}
 	return "final"
+}
+
+func stripPhasePrefix(messageID string) string {
+	mid := strings.TrimSpace(messageID)
+	for _, p := range []string{"ack-", "progress-", "error-"} {
+		if strings.HasPrefix(mid, p) {
+			return strings.TrimSpace(strings.TrimPrefix(mid, p))
+		}
+	}
+	return mid
 }
 
 func phaseLabelCN(phase string) string {
@@ -625,4 +767,60 @@ func shortMask(s string) string {
 		return v
 	}
 	return v[:4]
+}
+
+func extractTextFromContent(content any) string {
+	switch t := content.(type) {
+	case string:
+		return sanitize(t)
+	case map[string]any:
+		for _, key := range []string{"text", "content", "title"} {
+			if v := sanitize(anyString(t[key])); v != "" {
+				return v
+			}
+		}
+	case map[string]string:
+		for _, key := range []string{"text", "content", "title"} {
+			if v := sanitize(t[key]); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(node map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v := sanitize(anyString(node[key])); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func shallowCopyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func formatSendFailure(resp map[string]any) string {
+	if len(resp) == 0 {
+		return "empty_response"
+	}
+	parts := []string{
+		fmt.Sprintf("errcode=%d", toInt(resp["errcode"])),
+		fmt.Sprintf("errmsg=%s", sanitize(anyString(resp["errmsg"]))),
+	}
+	for _, key := range []string{"request_id", "task_id", "invaliduser", "invalid_user_id", "forbidden_user_id", "forbidden_userid", "invalidparty", "invalid_party_id"} {
+		if v := sanitize(anyString(resp[key])); v != "" {
+			parts = append(parts, key+"="+v)
+		}
+	}
+	return strings.Join(parts, " ")
 }

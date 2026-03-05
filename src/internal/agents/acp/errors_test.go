@@ -46,3 +46,15 @@ func TestNewProtocolError(t *testing.T) {
 		t.Fatalf("expected non-empty detail")
 	}
 }
+
+func TestIsSessionResourceNotFound_MapCode(t *testing.T) {
+	if !isSessionResourceNotFound(map[string]any{"code": -32002, "message": "Resource not found"}) {
+		t.Fatalf("expected true for -32002 resource not found")
+	}
+}
+
+func TestIsSessionResourceNotFound_MessageOnly(t *testing.T) {
+	if !isSessionResourceNotFound("jsonrpc error: session not found") {
+		t.Fatalf("expected true for session not found message")
+	}
+}
