@@ -148,10 +148,29 @@ ICON_NAME="AppIcon"
 ICON_ICNS="$RESOURCES_DIR/$ICON_NAME.icns"
 EXEC_PATTERN="/Contents/MacOS/$EXEC_NAME"
 
+run_osascript_quit_with_timeout() {
+  local script="$1"
+  (
+    osascript \
+      -e 'with timeout of 2 seconds' \
+      -e "$script" \
+      -e 'end timeout' \
+      >/dev/null 2>&1
+  ) &
+  local pid=$!
+  for _ in {1..20}; do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  kill -9 "$pid" >/dev/null 2>&1 || true
+}
+
 if [[ "$KILL_OLD" == "1" ]]; then
   # Best-effort: close previously running GUI app instance before replacing bundle.
-  osascript -e 'tell application id "com.cli-agent-gateway.gui" to quit' >/dev/null 2>&1 || true
-  osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
+  run_osascript_quit_with_timeout 'tell application id "com.cli-agent-gateway.gui" to quit' || true
+  run_osascript_quit_with_timeout "tell application \"$APP_NAME\" to quit" || true
   pkill -f "$EXEC_PATTERN" >/dev/null 2>&1 || true
   # Wait up to 5 seconds for existing process to exit.
   for _ in {1..10}; do

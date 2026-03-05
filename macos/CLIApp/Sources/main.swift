@@ -51,6 +51,7 @@ struct SessionEntry: Identifiable {
     let threadId: String
     let lastText: String
     let lastTime: String
+    let latest: Bool
 
     var id: String { sessionKey }
 }
@@ -93,6 +94,51 @@ enum GatewayError: Error, LocalizedError {
     }
 }
 
+final class GUILogger {
+    static let shared = GUILogger()
+
+    private let queue = DispatchQueue(label: "cag.gui.logger", qos: .utility)
+    private let fmt = ISO8601DateFormatter()
+    private var logPath: String
+
+    private init() {
+        let base = ("~/Library/Logs/cli-agent-gateway" as NSString).expandingTildeInPath
+        try? FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
+        logPath = URL(fileURLWithPath: base).appendingPathComponent("gui.log").path
+    }
+
+    func setLogPath(_ path: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let dir = URL(fileURLWithPath: path).deletingLastPathComponent().path
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            self.logPath = path
+            self.writeLine("logger path set path=\(path)")
+        }
+    }
+
+    func log(_ message: String) {
+        queue.async { [weak self] in
+            self?.writeLine(message)
+        }
+    }
+
+    private func writeLine(_ message: String) {
+        let ts = fmt.string(from: Date())
+        let line = "[\(ts)] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if FileManager.default.fileExists(atPath: logPath) {
+            if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) {
+                defer { try? fh.close() }
+                _ = try? fh.seekToEnd()
+                try? fh.write(contentsOf: data)
+                return
+            }
+        }
+        try? data.write(to: URL(fileURLWithPath: logPath), options: .atomic)
+    }
+}
+
 final class GatewayController: ObservableObject {
     @Published var statusText: String = "Checking status..."
     @Published var activeChannelText: String = "Unknown"
@@ -113,15 +159,19 @@ final class GatewayController: ObservableObject {
     private var hiddenSessionCutoffByKey: [String: String] = [:]
     private var localOverlayMessagesBySession: [String: [ChatMessage]] = [:]
     private var didAutoStartOnLaunch = false
+    private let refreshLock = NSLock()
+    private var refreshingHealth = false
+    private var refreshingStatus = false
+    private var refreshingSessions = false
 
     init() throws {
         cfg = try GatewayController.loadConfig()
         selectedChannel = GatewayController.detectEnvChannel(repoRoot: cfg.repoRoot)
         hiddenSessionCutoffByKey = loadHiddenSessionCutoffByKey()
-        refreshHealthChecks()
-        refreshStatus()
-        refreshSessions()
         currentLogFile = cfg.logFile
+        let guiLogPath = URL(fileURLWithPath: cfg.logFile).deletingLastPathComponent().appendingPathComponent("gui.log").path
+        GUILogger.shared.setLogPath(guiLogPath)
+        log("controller init repo=\(cfg.repoRoot) workdir=\(cfg.workdir)")
     }
 
     private var hiddenSessionsDefaultsKey: String {
@@ -130,6 +180,10 @@ final class GatewayController: ObservableObject {
 
     private func nowISO8601() -> String {
         ISO8601DateFormatter().string(from: Date())
+    }
+
+    private func log(_ message: String) {
+        GUILogger.shared.log(message)
     }
 
     private func loadHiddenSessionCutoffByKey() -> [String: String] {
@@ -238,33 +292,63 @@ final class GatewayController: ObservableObject {
         try? finalText.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
-    private func shellOutput(_ command: String, timeoutSec: TimeInterval? = nil) -> (code: Int32, output: String) {
+    private func shellOutput(_ command: String, timeoutSec: TimeInterval? = nil) -> (code: Int32, stdout: String, stderr: String, output: String) {
+        let t0 = Date()
         let proc = Process()
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
         proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
         proc.arguments = ["-lc", command]
         do {
             try proc.run()
+            var outData = Data()
+            var errData = Data()
+            let readGroup = DispatchGroup()
+            readGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                readGroup.leave()
+            }
+            readGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                readGroup.leave()
+            }
+
+            var didTimeout = false
             if let timeoutSec {
                 let deadline = Date().addingTimeInterval(timeoutSec)
                 while proc.isRunning && Date() < deadline {
                     Thread.sleep(forTimeInterval: 0.05)
                 }
                 if proc.isRunning {
+                    didTimeout = true
                     proc.terminate()
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let text = String(data: data, encoding: .utf8) ?? ""
-                    return (124, (text + "\n[timeout]").trimmingCharacters(in: .whitespacesAndNewlines))
                 }
             }
             proc.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let text = String(data: data, encoding: .utf8) ?? ""
-            return (proc.terminationStatus, text)
+            readGroup.wait()
+            let stdout = String(data: outData, encoding: .utf8) ?? ""
+            let stderr = String(data: errData, encoding: .utf8) ?? ""
+            var mergedParts = [stdout.trimmingCharacters(in: .whitespacesAndNewlines), stderr.trimmingCharacters(in: .whitespacesAndNewlines)]
+            if didTimeout {
+                mergedParts.append("[timeout]")
+            }
+            let merged = mergedParts
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            if didTimeout {
+                log("shell timeout code=124 elapsed_ms=\(ms)")
+                return (124, stdout, stderr, merged)
+            }
+            log("shell done code=\(proc.terminationStatus) elapsed_ms=\(ms)")
+            return (proc.terminationStatus, stdout, stderr, merged)
         } catch {
-            return (127, error.localizedDescription)
+            log("shell run error err=\(error.localizedDescription)")
+            return (127, "", error.localizedDescription, error.localizedDescription)
         }
     }
 
@@ -273,17 +357,41 @@ final class GatewayController: ObservableObject {
         return shellOutput("command -v '\(esc)' >/dev/null 2>&1").code == 0
     }
 
+    private func fileModDate(_ path: String) -> Date? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+        return attrs[.modificationDate] as? Date
+    }
+
+    private func cagRunner() -> (workdir: String, prefix: [String]) {
+        let binPath = URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent("bin/cag").path
+        if FileManager.default.isExecutableFile(atPath: binPath) {
+            let srcMain = URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent("src/cmd/gateway-cli/main.go").path
+            if let binMod = fileModDate(binPath), let srcMod = fileModDate(srcMain), binMod >= srcMod {
+                return (cfg.repoRoot, [binPath])
+            }
+            log("runner fallback reason=stale_bin bin=\(binPath)")
+        }
+        let srcPath = URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent("src").path
+        return (srcPath, ["go", "run", "./cmd/gateway-cli"])
+    }
+
     private func cagJSON(_ action: String, args: [String] = [], timeoutSec: TimeInterval? = nil) -> (code: Int32, json: [String: Any]?, raw: String) {
-        let cmdParts = ["go", "run", "./cmd/gateway-cli", action] + args + ["--json"]
+        let t0 = Date()
+        let runner = cagRunner()
+        let cmdParts = runner.prefix + [action] + args + ["--json"]
         let full = cmdParts.map { shellEscape($0) }.joined(separator: " ")
-        let cmd = "cd \(shellEscape(cfg.repoRoot))/src && \(full)"
+        let cmd = "cd \(shellEscape(runner.workdir)) && \(full)"
         let out = shellOutput(cmd, timeoutSec: timeoutSec)
-        guard let line = extractLastJSONLine(out.output),
+        let ms = Int(Date().timeIntervalSince(t0) * 1000)
+        let parseSource = out.stdout.isEmpty ? out.output : out.stdout
+        guard let line = extractLastJSONLine(parseSource) ?? extractLastJSONLine(out.output),
               let data = line.data(using: .utf8),
               let node = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
+            log("cag json parse failed action=\(action) code=\(out.code) elapsed_ms=\(ms)")
             return (out.code, nil, out.output)
         }
+        log("cag json ok action=\(action) code=\(out.code) elapsed_ms=\(ms)")
         return (out.code, node, out.output)
     }
 
@@ -304,17 +412,109 @@ final class GatewayController: ObservableObject {
         healthChecks.contains(where: { !$0.ok })
     }
 
+    private func onMain(_ block: @escaping () -> Void) {
+        if Thread.isMainThread {
+            block()
+        } else {
+            DispatchQueue.main.async(execute: block)
+        }
+    }
+
+    private func runInBackground(_ block: @escaping () -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async(execute: block)
+    }
+
+    private func beginRefresh(kind: String) -> Bool {
+        refreshLock.lock()
+        defer { refreshLock.unlock() }
+        switch kind {
+        case "health":
+            if refreshingHealth { return false }
+            refreshingHealth = true
+        case "status":
+            if refreshingStatus { return false }
+            refreshingStatus = true
+        case "sessions":
+            if refreshingSessions { return false }
+            refreshingSessions = true
+        default:
+            return true
+        }
+        return true
+    }
+
+    private func endRefresh(kind: String) {
+        refreshLock.lock()
+        defer { refreshLock.unlock() }
+        switch kind {
+        case "health":
+            refreshingHealth = false
+        case "status":
+            refreshingStatus = false
+        case "sessions":
+            refreshingSessions = false
+        default:
+            break
+        }
+    }
+
+    func refreshHealthChecksAsync() {
+        if !beginRefresh(kind: "health") {
+            log("refresh skip kind=health reason=inflight")
+            return
+        }
+        log("refresh start kind=health")
+        runInBackground { [weak self] in
+            defer {
+                self?.endRefresh(kind: "health")
+                self?.log("refresh end kind=health")
+            }
+            self?.refreshHealthChecks()
+        }
+    }
+
+    func refreshStatusAsync() {
+        if !beginRefresh(kind: "status") {
+            log("refresh skip kind=status reason=inflight")
+            return
+        }
+        log("refresh start kind=status")
+        runInBackground { [weak self] in
+            defer {
+                self?.endRefresh(kind: "status")
+                self?.log("refresh end kind=status")
+            }
+            self?.refreshStatus()
+        }
+    }
+
+    func refreshSessionsAsync() {
+        if !beginRefresh(kind: "sessions") {
+            log("refresh skip kind=sessions reason=inflight")
+            return
+        }
+        log("refresh start kind=sessions")
+        runInBackground { [weak self] in
+            defer {
+                self?.endRefresh(kind: "sessions")
+                self?.log("refresh end kind=sessions")
+            }
+            self?.refreshSessions()
+        }
+    }
+
     func timeline(for message: ChatMessage) -> [ProcessEvent] {
         timelineByMsgId[message.sourceMsgId, default: []]
     }
 
     func refreshHealthChecks() {
+        let t0 = Date()
         let doctor = cagJSON("doctor")
         let fallback = cagJSON("health")
         let response = doctor.json ?? fallback.json
 
         guard let node = response else {
-            healthChecks = [
+            let fallbackChecks = [
                 HealthCheckItem(
                     id: "doctor",
                     title: "Gateway doctor",
@@ -323,6 +523,11 @@ final class GatewayController: ObservableObject {
                     repairAction: nil
                 )
             ]
+            onMain { [weak self] in
+                self?.healthChecks = fallbackChecks
+            }
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            log("refresh result kind=health status=fallback elapsed_ms=\(ms)")
             return
         }
 
@@ -356,7 +561,11 @@ final class GatewayController: ObservableObject {
                 )
             ]
         }
-        healthChecks = checks
+        onMain { [weak self] in
+            self?.healthChecks = checks
+        }
+        let ms = Int(Date().timeIntervalSince(t0) * 1000)
+        log("refresh result kind=health status=ok checks=\(checks.count) elapsed_ms=\(ms)")
     }
 
     func runRepair(_ action: RepairAction) {
@@ -377,7 +586,7 @@ final class GatewayController: ObservableObject {
             detailText = "Opened iMessage setup guide. Install and configure imsg first."
 
         }
-        refreshHealthChecks()
+        refreshHealthChecksAsync()
     }
 
     private func runningPID() -> Int32? {
@@ -397,7 +606,9 @@ final class GatewayController: ObservableObject {
     }
 
     private func gatewayPIDsByWorkdir() -> [Int32] {
-        let cmd = "cd \(shellEscape(cfg.repoRoot))/src && go run ./cmd/gateway-cli status 2>/dev/null || true"
+        let runner = cagRunner()
+        let statusCmd = (runner.prefix + ["status"]).map { shellEscape($0) }.joined(separator: " ")
+        let cmd = "cd \(shellEscape(runner.workdir)) && \(statusCmd) 2>/dev/null || true"
         let out = shellOutput(cmd)
         guard out.code == 0 else { return [] }
         var result: [Int32] = []
@@ -447,9 +658,193 @@ final class GatewayController: ObservableObject {
 
     private func buildSessionKey(channel: String, sender: String, threadId: String) -> String {
         let raw = "\(channel)|\(sender)|\(threadId.isEmpty ? "-" : threadId)"
-        let digest = SHA256.hash(data: Data(raw.utf8))
+        let digest = Insecure.SHA1.hash(data: Data(raw.utf8))
         let hex = digest.map { String(format: "%02x", $0) }.joined()
         return "sess_" + String(hex.prefix(24))
+    }
+
+    private func interactionRecords() -> [[String: Any]] {
+        let backend = (envValue("STORAGE_BACKEND") ?? "sqlite")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if backend == "sqlite" {
+            let rawPath = (envValue("STORAGE_SQLITE_PATH") ?? ".agent_gateway.db")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let dbPath = rawPath.hasPrefix("/")
+                ? rawPath
+                : URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent(rawPath).path
+            guard commandExists("sqlite3") else { return [] }
+            let sql = "SELECT payload_json FROM (SELECT id, payload_json FROM interactions ORDER BY id DESC LIMIT 2500) t ORDER BY id ASC;"
+            let cmd = "sqlite3 \(shellEscape(dbPath)) \(shellEscape(sql))"
+            let out = shellOutput(cmd, timeoutSec: 8)
+            guard out.code == 0 else { return [] }
+            var rows: [[String: Any]] = []
+            for line in out.stdout.split(separator: "\n", omittingEmptySubsequences: true) {
+                let raw = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !raw.isEmpty,
+                      let data = raw.data(using: .utf8),
+                      let rec = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else {
+                    continue
+                }
+                rows.append(rec)
+            }
+            return rows
+        }
+
+        guard let content = try? String(contentsOfFile: cfg.interactionLogFile, encoding: .utf8) else {
+            return []
+        }
+        var rows: [[String: Any]] = []
+        for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
+            let raw = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !raw.isEmpty,
+                  let data = raw.data(using: .utf8),
+                  let rec = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                continue
+            }
+            rows.append(rec)
+        }
+        return rows
+    }
+
+    private func refreshSelectedSessionChat() {
+        guard let sessionKey = selectedSessionKey, !sessionKey.isEmpty else {
+            chatMessages = []
+            timelineByMsgId = [:]
+            log("chat refresh skipped reason=no_selected_session")
+            return
+        }
+        let t0 = Date()
+        log("chat refresh start session_key=\(sessionKey)")
+        let overlay = localOverlayMessagesBySession[sessionKey, default: []]
+        runInBackground { [weak self] in
+            guard let self else { return }
+            let loaded = self.loadPersistedMessages(sessionKey: sessionKey)
+            let merged = self.mergedMessages(persisted: loaded.messages, overlay: overlay)
+            self.onMain {
+                guard self.selectedSessionKey == sessionKey else { return }
+                self.timelineByMsgId = loaded.timeline
+                self.chatMessages = merged
+            }
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            self.log("chat refresh done session_key=\(sessionKey) persisted=\(loaded.messages.count) overlay=\(overlay.count) merged=\(merged.count) elapsed_ms=\(ms)")
+        }
+    }
+
+    private func loadPersistedMessages(sessionKey: String) -> (messages: [ChatMessage], timeline: [String: [ProcessEvent]]) {
+        let records = interactionRecords()
+        guard !records.isEmpty else {
+            return ([], [:])
+        }
+
+        var msgIDs = Set<String>()
+        for rec in records {
+            let kind = ((rec["kind"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if kind == "trace" {
+                let stage = ((rec["stage"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if stage == "session_resolved",
+                   let sk = rec["session_key"] as? String,
+                   sk == sessionKey,
+                   let msgID = rec["msg_id"] as? String,
+                   !msgID.isEmpty {
+                    msgIDs.insert(msgID)
+                }
+            }
+            if kind == "inbound_received" {
+                let sender = ((rec["sender"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let profile = rec["user_profile"] as? [String: Any]
+                let key = buildSessionKey(
+                    channel: channelFromProfile(profile).trimmingCharacters(in: .whitespacesAndNewlines),
+                    sender: sender,
+                    threadId: threadFromProfile(profile).trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+                if key == sessionKey,
+                   let msgID = rec["msg_id"] as? String,
+                   !msgID.isEmpty {
+                    msgIDs.insert(msgID)
+                }
+            }
+        }
+
+        guard !msgIDs.isEmpty else {
+            return ([], [:])
+        }
+
+        var messages: [ChatMessage] = []
+        var timeline: [String: [ProcessEvent]] = [:]
+        var hasInbound = Set<String>()
+        var hasFinal = Set<String>()
+
+        for (idx, rec) in records.enumerated() {
+            guard let msgID = rec["msg_id"] as? String, msgIDs.contains(msgID) else { continue }
+            let kind = ((rec["kind"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let ts = ((rec["ts"] as? String) ?? (rec["time"] as? String) ?? ISO8601DateFormatter().string(from: Date()))
+
+            if kind == "inbound_received" {
+                if hasInbound.contains(msgID) { continue }
+                hasInbound.insert(msgID)
+                let text = ((rec["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if text.isEmpty { continue }
+                messages.append(
+                    ChatMessage(
+                        id: "persist-u-\(msgID)",
+                        sourceMsgId: msgID,
+                        role: "user",
+                        text: text,
+                        time: ts,
+                        deliveryStatus: nil,
+                        statusDetail: ""
+                    )
+                )
+                continue
+            }
+
+            if kind == "trace" {
+                let stage = ((rec["stage"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !stage.isEmpty {
+                    let detail = ((rec["text"] as? String) ?? (rec["error"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    timeline[msgID, default: []].append(
+                        ProcessEvent(
+                            id: "evt-\(msgID)-\(idx)",
+                            time: ts,
+                            title: stage,
+                            detail: detail
+                        )
+                    )
+                }
+                continue
+            }
+
+            let errText = ((rec["error"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let resultText = ((rec["result"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let statusText = ((rec["status"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            var finalText = resultText
+            var role = "assistant"
+            if finalText.isEmpty, !errText.isEmpty {
+                finalText = errText
+                role = "system"
+            }
+            if finalText.isEmpty || hasFinal.contains(msgID) {
+                continue
+            }
+            hasFinal.insert(msgID)
+            messages.append(
+                ChatMessage(
+                    id: "persist-a-\(msgID)",
+                    sourceMsgId: msgID,
+                    role: role,
+                    text: finalText,
+                    time: ts,
+                    deliveryStatus: nil,
+                    statusDetail: statusText
+                )
+            )
+        }
+
+        messages.sort { $0.time < $1.time }
+        return (messages, timeline)
     }
 
     private func summarizeToolCalls(_ raw: Any?) -> String {
@@ -466,39 +861,50 @@ final class GatewayController: ObservableObject {
         selectedChannel = channel
         UserDefaults.standard.set(channel.rawValue, forKey: channelDefaultsKey)
         writeEnvValue("CHANNEL_TYPE", value: channel.rawValue)
-        refreshHealthChecks()
-        refreshStatus()
+        refreshHealthChecksAsync()
+        refreshStatusAsync()
     }
 
     func refreshStatus() {
+        let t0 = Date()
         let res = cagJSON("status")
         guard let node = res.json else {
-            statusText = "Unknown"
-            activeChannelText = selectedChannel.title
-            detailText = "Status command failed.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
+            onMain { [weak self] in
+                guard let self else { return }
+                self.statusText = "Unknown"
+                self.activeChannelText = self.selectedChannel.title
+                self.detailText = "Status command failed.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
+            }
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            log("refresh result kind=status status=parse_failed elapsed_ms=\(ms)")
             return
         }
         let status = (node["status"] as? String) ?? "unknown"
         let channelRaw = (node["channel"] as? String) ?? selectedChannel.rawValue
         let channel = ChannelType(rawValue: channelRaw) ?? selectedChannel
         let nodeLog = ((node["log_file"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if !nodeLog.isEmpty {
-            currentLogFile = nodeLog
-        } else if currentLogFile.isEmpty {
-            currentLogFile = cfg.logFile
+        onMain { [weak self] in
+            guard let self else { return }
+            if !nodeLog.isEmpty {
+                self.currentLogFile = nodeLog
+            } else if self.currentLogFile.isEmpty {
+                self.currentLogFile = self.cfg.logFile
+            }
+            self.activeChannelText = channel.title
+            if status == "running" {
+                self.statusText = "Running"
+                let pidPart = (node["pid"] as? Int).map { "PID \($0)\n" } ?? ""
+                let lockPart = (node["lock_file"] as? String).map { "Lock: \($0)\n" } ?? ""
+                let logPart = self.currentLogFile
+                self.detailText = "\(pidPart)Channel: \(channel.title)\n\(lockPart)Log: \(logPart)"
+            } else {
+                self.statusText = "Stopped"
+                let lockPart = (node["lock_file"] as? String).map { "\nLock: \($0)" } ?? ""
+                self.detailText = "Channel: \(channel.title)\nLog: \(self.currentLogFile)\(lockPart)"
+            }
         }
-        activeChannelText = channel.title
-        if status == "running" {
-            statusText = "Running"
-            let pidPart = (node["pid"] as? Int).map { "PID \($0)\n" } ?? ""
-            let lockPart = (node["lock_file"] as? String).map { "Lock: \($0)\n" } ?? ""
-            let logPart = currentLogFile
-            detailText = "\(pidPart)Channel: \(channel.title)\n\(lockPart)Log: \(logPart)"
-        } else {
-            statusText = "Stopped"
-            let lockPart = (node["lock_file"] as? String).map { "\nLock: \($0)" } ?? ""
-            detailText = "Channel: \(channel.title)\nLog: \(currentLogFile)\(lockPart)"
-        }
+        let ms = Int(Date().timeIntervalSince(t0) * 1000)
+        log("refresh result kind=status status=\(status) elapsed_ms=\(ms)")
     }
 
     func autoStartOnLaunch() {
@@ -519,6 +925,7 @@ final class GatewayController: ObservableObject {
     }
 
     func refreshSessions() {
+        let t0 = Date()
         let sessionsResult = cagJSON("sessions", args: ["--limit", "200"])
         if let node = sessionsResult.json,
            let ok = node["ok"] as? Bool, ok,
@@ -538,30 +945,42 @@ final class GatewayController: ObservableObject {
                         sender: senderName.isEmpty ? (senderID.isEmpty ? "-" : senderID) : senderName,
                         threadId: (item["thread_id"] as? String) ?? "-",
                         lastText: (item["last_message"] as? String) ?? "",
-                        lastTime: (item["last_time"] as? String) ?? ""
+                        lastTime: (item["last_time"] as? String) ?? "",
+                        latest: (item["latest"] as? Bool) ?? false
                     )
                 )
             }
-            sessions = built
-            if let selected = selectedSessionKey, !sessions.contains(where: { $0.sessionKey == selected }) {
-                selectedSessionKey = nil
+            onMain { [weak self] in
+                guard let self else { return }
+                self.sessions = built.filter { self.shouldShowSession($0) }
+                if let selected = self.selectedSessionKey, !self.sessions.contains(where: { $0.sessionKey == selected }) {
+                    self.selectedSessionKey = nil
+                }
+                if self.selectedSessionKey == nil {
+                    self.selectedSessionKey = self.sessions.first(where: { $0.latest })?.sessionKey ?? self.sessions.first?.sessionKey
+                }
+                self.refreshSelectedSessionChat()
             }
-            chatMessages = []
-            timelineByMsgId = [:]
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            log("refresh result kind=sessions status=ok count=\(built.count) elapsed_ms=\(ms)")
             return
         }
 
         // GUI session list is CLI-driven only.
-        sessions = []
-        selectedSessionKey = nil
-        chatMessages = []
-        timelineByMsgId = [:]
+        onMain { [weak self] in
+            self?.sessions = []
+            self?.selectedSessionKey = nil
+            self?.chatMessages = []
+            self?.timelineByMsgId = [:]
+        }
+        let ms = Int(Date().timeIntervalSince(t0) * 1000)
+        log("refresh result kind=sessions status=empty elapsed_ms=\(ms)")
         return
     }
 
     func selectSession(_ key: String?) {
         selectedSessionKey = key
-        refreshSessions()
+        refreshSelectedSessionChat()
     }
 
     private func selectedSessionEntry() -> SessionEntry? {
@@ -569,10 +988,13 @@ final class GatewayController: ObservableObject {
         return sessions.first(where: { $0.sessionKey == key })
     }
 
-    private func mergedMessages(for sessionKey: String, persisted: [ChatMessage]) -> [ChatMessage] {
-        let overlay = localOverlayMessagesBySession[sessionKey, default: []]
+    private func mergedMessages(persisted: [ChatMessage], overlay: [ChatMessage]) -> [ChatMessage] {
         var merged = persisted
-        merged.append(contentsOf: overlay)
+        for msg in overlay {
+            if !merged.contains(where: { $0.id == msg.id }) {
+                merged.append(msg)
+            }
+        }
         return merged.sorted { $0.time < $1.time }
     }
 
@@ -630,13 +1052,43 @@ final class GatewayController: ObservableObject {
         if trimmed.hasPrefix("{"), trimmed.hasSuffix("}") {
             return trimmed
         }
-        for raw in text.split(separator: "\n").reversed() {
-            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.hasPrefix("{"), line.hasSuffix("}") {
-                return line
+
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if lines.isEmpty {
+            return nil
+        }
+        var lastValid: String?
+        for start in 0..<lines.count {
+            var balance = 0
+            var started = false
+            for end in start..<lines.count {
+                for ch in lines[end] {
+                    if ch == "{" {
+                        balance += 1
+                        started = true
+                    } else if ch == "}" {
+                        balance -= 1
+                    }
+                }
+                if !started { continue }
+                if balance < 0 { break }
+                if balance == 0 {
+                    let candidate = lines[start...end].joined(separator: "\n")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard candidate.hasPrefix("{"), candidate.hasSuffix("}") else {
+                        break
+                    }
+                    guard let data = candidate.data(using: .utf8) else {
+                        break
+                    }
+                    if (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) != nil {
+                        lastValid = candidate
+                    }
+                    break
+                }
             }
         }
-        return nil
+        return lastValid
     }
 
     private func parseLocalCommand(_ text: String) -> (cmd: String, payload: String)? {
@@ -674,13 +1126,10 @@ final class GatewayController: ObservableObject {
 
     private func latestDingTalkSessionWebhook(for session: SessionEntry) -> String {
         guard session.channel == "dingtalk" else { return "" }
-        guard let content = try? String(contentsOfFile: cfg.interactionLogFile, encoding: .utf8) else { return "" }
-        let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
-        for line in lines.reversed().prefix(1500) {
-            guard let data = String(line).data(using: .utf8),
-                  let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  (record["kind"] as? String) == "inbound_received"
-            else {
+        let rows = interactionRecords()
+        guard !rows.isEmpty else { return "" }
+        for record in rows.reversed().prefix(1800) {
+            guard (record["kind"] as? String) == "inbound_received" else {
                 continue
             }
             let sender = (record["sender"] as? String) ?? ""
@@ -719,7 +1168,7 @@ final class GatewayController: ObservableObject {
                 )
                 detailText = cleared ? "Session mapping cleared." : "Failed to clear session mapping."
                 localDraftText = ""
-                refreshSessions()
+                refreshSessionsAsync()
                 return
             }
             appendLocalActionMessage(
@@ -729,7 +1178,7 @@ final class GatewayController: ObservableObject {
             detailText = cleared ? "New session started." : "Could not reset old session; continuing send."
             if cmd.payload.isEmpty {
                 localDraftText = ""
-                refreshSessions()
+                refreshSessionsAsync()
                 return
             }
             text = cmd.payload
@@ -750,16 +1199,14 @@ final class GatewayController: ObservableObject {
         )
         appendOverlayMessage(localUser, sessionKey: selectedSessionKey)
         localDraftText = ""
-        let rawTo = session.senderId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let to = rawTo == "-" ? "" : rawTo
-        if to.isEmpty {
+        if baseSessionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             localSending = false
-            detailText = "Send failed: missing session sender id."
+            detailText = "Send failed: missing session key."
             updateOverlayMessage(
                 sessionKey: selectedSessionKey,
                 messageId: userMsgId,
                 deliveryStatus: .failed,
-                statusDetail: "missing session sender id"
+                statusDetail: "missing session key"
             )
             return
         }
@@ -769,7 +1216,7 @@ final class GatewayController: ObservableObject {
         let sessionWebhook = latestDingTalkSessionWebhook(for: session)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            var sendArgs = ["--to", to, "--text", text, "--channel", channel]
+            var sendArgs = ["--session-key", baseSessionKey, "--text", text, "--channel", channel]
             if channel == "dingtalk", !sessionWebhook.isEmpty {
                 sendArgs.append(contentsOf: ["--session-webhook", sessionWebhook])
             }
@@ -794,7 +1241,25 @@ final class GatewayController: ObservableObject {
                         deliveryStatus: .sent,
                         statusDetail: ""
                     )
-                    self.detailText = sessionWebhook.isEmpty ? "Sent via cag send." : "Sent via session webhook."
+                    let elapsed = (node["elapsed_sec"] as? Int) ?? 0
+                    let replyText = ((node["result"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !replyText.isEmpty {
+                        let replyMsgId = "local-a-\(Int(Date().timeIntervalSince1970 * 1000))"
+                        self.appendOverlayMessage(
+                            ChatMessage(
+                                id: replyMsgId,
+                                sourceMsgId: replyMsgId,
+                                role: "assistant",
+                                text: replyText,
+                                time: ISO8601DateFormatter().string(from: Date()),
+                                deliveryStatus: nil,
+                                statusDetail: ""
+                            ),
+                            sessionKey: selectedSessionKey
+                        )
+                    }
+                    self.detailText = elapsed > 0 ? "Session processed (\(elapsed)s)." : "Session processed."
+                    self.refreshSessionsAsync()
                     return
                 }
                 let nestedErr = ((node["error"] as? [String: Any])?["message"] as? String) ?? ""
@@ -828,7 +1293,7 @@ final class GatewayController: ObservableObject {
             }
             saveHiddenSessionCutoffByKey()
             selectedSessionKey = nil
-            refreshSessions()
+            refreshSessionsAsync()
             detailText = "Deleted all sessions."
         } else {
             detailText = "Delete failed: cannot write state file."
@@ -842,7 +1307,7 @@ final class GatewayController: ObservableObject {
             if selectedSessionKey == key {
                 selectedSessionKey = nil
             }
-            refreshSessions()
+            refreshSessionsAsync()
             detailText = "Deleted archived session segment from app list."
             return
         }
@@ -863,7 +1328,7 @@ final class GatewayController: ObservableObject {
             if selectedSessionKey == key {
                 selectedSessionKey = nil
             }
-            refreshSessions()
+            refreshSessionsAsync()
             detailText = "Deleted session: \(key)"
         } else {
             detailText = "Delete failed: cannot write state file."
@@ -1403,16 +1868,16 @@ struct ContentView: View {
         }
         .frame(width: 1140, height: 700)
         .onAppear {
-            controller.refreshHealthChecks()
-            controller.refreshStatus()
-            controller.refreshSessions()
-            controller.autoStartOnLaunch()
+            GUILogger.shared.log("view onAppear bootstrap refresh")
+            controller.refreshHealthChecksAsync()
+            controller.refreshStatusAsync()
+            controller.refreshSessionsAsync()
         }
         .onReceive(refreshTimer) { _ in
             refreshTick += 1
-            controller.refreshStatus()
+            controller.refreshStatusAsync()
             if !controller.localSending && (refreshTick % 3 == 0) {
-                controller.refreshSessions()
+                controller.refreshSessionsAsync()
             }
         }
         .sheet(isPresented: $showConfig) {
@@ -1424,11 +1889,26 @@ struct ContentView: View {
     }
 }
 
+final class AppBootstrap: ObservableObject {
+    let controller: GatewayController?
+
+    init() {
+        controller = try? GatewayController()
+        if controller == nil {
+            GUILogger.shared.log("bootstrap controller init failed")
+        } else {
+            GUILogger.shared.log("bootstrap controller init ok")
+        }
+    }
+}
+
 @main
 struct CLIAppMain: App {
+    @StateObject private var bootstrap = AppBootstrap()
+
     var body: some Scene {
         WindowGroup {
-            if let controller = try? GatewayController() {
+            if let controller = bootstrap.controller {
                 ContentView(controller: controller)
             } else {
                 VStack(spacing: 10) {
