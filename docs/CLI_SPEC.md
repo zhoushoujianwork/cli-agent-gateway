@@ -35,9 +35,8 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
   - Else fallback to parent when parent has `.env`.
 - Missing `.env` for runtime commands (`run`, `start`, `send`) is fatal.
 - `run` does not accept positional workdir arg.
-- `sessions/send(--session-key)/messages/session-*` 仅通过 gRPC 控制面访问 `gatewayd`，连接失败时会自动尝试拉起 `gatewayd` 后重试一次。
-- `start/stop/restart/health/doctor` 优先通过 gRPC 控制面调用 `gatewayd`；不可达时回退本地实现。
-- `status` 保持 gRPC 优先，不可达时回退本地实现。
+- `status/start/stop/restart/health/doctor/sessions/send(--session-key)/messages/session-*` 仅通过 gRPC 控制面访问 `gatewayd`。
+- `gatewayd` 不可达时，命令直接失败并输出 `error.code=gateway_unreachable`；不做本地回退或自动拉起。
 
 ## Exit codes
 
@@ -204,7 +203,7 @@ Defaulting:
 ### 会话一致性约束
 
 - GUI 依赖的会话读写命令（`sessions/messages/send --session-key/session-*`）必须在 `gatewayd` 运行时执行。
-- 若 `gatewayd` 未运行，CLI 会先尝试自动拉起；仍不可达时返回非 0，并在 JSON 中输出 `error.code=gateway_unreachable`。
+- 若 `gatewayd` 不可达，CLI 返回非 0，并在 JSON 中输出 `error.code=gateway_unreachable`。
 
 ### `messages --json`
 

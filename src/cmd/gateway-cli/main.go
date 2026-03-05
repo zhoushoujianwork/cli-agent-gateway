@@ -297,7 +297,16 @@ func runGoConfig(repoRoot string, args []string) int {
 
 func runStatus(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
-	if grpc, err := tryStatusViaGRPC(repoRoot); err == nil {
+	if !grpcDisabled() {
+		grpc, err := tryStatusViaGRPC(repoRoot)
+		if err != nil {
+			if jsonOut {
+				printJSONActionError("status", "gateway_unreachable", formatGatewayUnavailable(err))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "status failed: %s\n", formatGatewayUnavailable(err))
+			return 1
+		}
 		if !grpc.GetOk() {
 			if jsonOut {
 				printJSONActionError("status", "grpc_status_failed", grpc.GetError())
@@ -381,37 +390,44 @@ func runStart(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
 	if !grpcDisabled() {
 		requestedLog := strings.TrimSpace(flagValue(args, "--log-file"))
-		if grpcRes, gerr := tryStartViaGRPC(repoRoot, requestedLog); gerr == nil {
-			if !grpcRes.GetOk() {
-				if jsonOut {
-					printJSONActionError("start", "grpc_start_failed", grpcRes.GetError())
-					return 1
-				}
-				fmt.Fprintf(os.Stderr, "start failed: %s\n", grpcRes.GetError())
+		grpcRes, gerr := tryStartViaGRPC(repoRoot, requestedLog)
+		if gerr != nil {
+			if jsonOut {
+				printJSONActionError("start", "gateway_unreachable", formatGatewayUnavailable(gerr))
 				return 1
 			}
-			payload := StatusPayload{
-				Running:   grpcRes.GetRunning(),
-				StartedAt: grpcRes.GetStartedAt(),
-				LockFile:  grpcRes.GetLockFile(),
-				Metadata:  map[string]any{},
-			}
-			if grpcRes.GetHasPid() {
-				pid := int(grpcRes.GetPid())
-				payload.PID = &pid
-			}
-			payload.Metadata["channel"] = grpcRes.GetChannel()
-			payload.Metadata["workdir"] = grpcRes.GetWorkdir()
-			payload.Metadata["log_file"] = grpcRes.GetLogFile()
-			payload.Metadata["lock_file"] = grpcRes.GetLockFile()
-			cfg, _ := config.Load(repoRoot, "")
-			if jsonOut {
-				printJSON(statusJSON("start", payload, cfg, grpcRes.GetLogFile()))
-			} else {
-				fmt.Printf("started lock=%s log=%s\n", payload.LockFile, nonEmpty(strings.TrimSpace(grpcRes.GetLogFile()), resolveLogPath(repoRoot, nil)))
-			}
-			return 0
+			fmt.Fprintf(os.Stderr, "start failed: %s\n", formatGatewayUnavailable(gerr))
+			return 1
 		}
+		if !grpcRes.GetOk() {
+			if jsonOut {
+				printJSONActionError("start", "grpc_start_failed", grpcRes.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "start failed: %s\n", grpcRes.GetError())
+			return 1
+		}
+		payload := StatusPayload{
+			Running:   grpcRes.GetRunning(),
+			StartedAt: grpcRes.GetStartedAt(),
+			LockFile:  grpcRes.GetLockFile(),
+			Metadata:  map[string]any{},
+		}
+		if grpcRes.GetHasPid() {
+			pid := int(grpcRes.GetPid())
+			payload.PID = &pid
+		}
+		payload.Metadata["channel"] = grpcRes.GetChannel()
+		payload.Metadata["workdir"] = grpcRes.GetWorkdir()
+		payload.Metadata["log_file"] = grpcRes.GetLogFile()
+		payload.Metadata["lock_file"] = grpcRes.GetLockFile()
+		cfg, _ := config.Load(repoRoot, "")
+		if jsonOut {
+			printJSON(statusJSON("start", payload, cfg, grpcRes.GetLogFile()))
+		} else {
+			fmt.Printf("started lock=%s log=%s\n", payload.LockFile, nonEmpty(strings.TrimSpace(grpcRes.GetLogFile()), resolveLogPath(repoRoot, nil)))
+		}
+		return 0
 	}
 
 	envPath := filepath.Join(repoRoot, ".env")
@@ -520,50 +536,57 @@ func runStop(repoRoot string, args []string) int {
 	quiet := hasFlag(args, "--quiet")
 	cfg, _ := config.Load(repoRoot, "")
 	if !grpcDisabled() {
-		if grpcRes, gerr := tryStopViaGRPC(repoRoot, quiet); gerr == nil {
-			if !grpcRes.GetOk() {
-				if jsonOut {
-					printJSONActionError("stop", "grpc_stop_failed", grpcRes.GetError())
-					return 1
-				}
-				fmt.Fprintf(os.Stderr, "stop failed: %s\n", grpcRes.GetError())
-				return 1
-			}
-			if quiet {
-				return 0
-			}
-			payload := StatusPayload{
-				Running:   grpcRes.GetRunning(),
-				StartedAt: grpcRes.GetStartedAt(),
-				LockFile:  grpcRes.GetLockFile(),
-				Metadata:  map[string]any{},
-			}
-			if grpcRes.GetHasPid() {
-				pid := int(grpcRes.GetPid())
-				payload.PID = &pid
-			}
-			payload.Metadata["channel"] = grpcRes.GetChannel()
-			payload.Metadata["workdir"] = grpcRes.GetWorkdir()
-			payload.Metadata["log_file"] = grpcRes.GetLogFile()
-			payload.Metadata["lock_file"] = grpcRes.GetLockFile()
+		grpcRes, gerr := tryStopViaGRPC(repoRoot, quiet)
+		if gerr != nil {
 			if jsonOut {
-				printJSON(statusJSON("stop", payload, cfg, grpcRes.GetLogFile()))
-			} else if !payload.Running {
-				if payload.PID != nil && *payload.PID > 0 {
-					fmt.Printf("stopped pid=%d lock=%s\n", *payload.PID, payload.LockFile)
-				} else {
-					fmt.Printf("stopped lock=%s\n", payload.LockFile)
-				}
-			} else {
-				if payload.PID != nil && *payload.PID > 0 {
-					fmt.Printf("stop requested but still running pid=%d\n", *payload.PID)
-				} else {
-					fmt.Printf("stop requested but still running lock=%s\n", payload.LockFile)
-				}
+				printJSONActionError("stop", "gateway_unreachable", formatGatewayUnavailable(gerr))
 				return 1
 			}
+			fmt.Fprintf(os.Stderr, "stop failed: %s\n", formatGatewayUnavailable(gerr))
+			return 1
+		}
+		if !grpcRes.GetOk() {
+			if jsonOut {
+				printJSONActionError("stop", "grpc_stop_failed", grpcRes.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "stop failed: %s\n", grpcRes.GetError())
+			return 1
+		}
+		if quiet {
 			return 0
 		}
+		payload := StatusPayload{
+			Running:   grpcRes.GetRunning(),
+			StartedAt: grpcRes.GetStartedAt(),
+			LockFile:  grpcRes.GetLockFile(),
+			Metadata:  map[string]any{},
+		}
+		if grpcRes.GetHasPid() {
+			pid := int(grpcRes.GetPid())
+			payload.PID = &pid
+		}
+		payload.Metadata["channel"] = grpcRes.GetChannel()
+		payload.Metadata["workdir"] = grpcRes.GetWorkdir()
+		payload.Metadata["log_file"] = grpcRes.GetLogFile()
+		payload.Metadata["lock_file"] = grpcRes.GetLockFile()
+		if jsonOut {
+			printJSON(statusJSON("stop", payload, cfg, grpcRes.GetLogFile()))
+		} else if !payload.Running {
+			if payload.PID != nil && *payload.PID > 0 {
+				fmt.Printf("stopped pid=%d lock=%s\n", *payload.PID, payload.LockFile)
+			} else {
+				fmt.Printf("stopped lock=%s\n", payload.LockFile)
+			}
+		} else {
+			if payload.PID != nil && *payload.PID > 0 {
+				fmt.Printf("stop requested but still running pid=%d\n", *payload.PID)
+			} else {
+				fmt.Printf("stop requested but still running lock=%s\n", payload.LockFile)
+			}
+			return 1
+		}
+		return 0
 	}
 
 	payload, err := getStatusPayload(repoRoot)
@@ -655,37 +678,44 @@ func runRestart(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
 	if !grpcDisabled() {
 		requestedLog := strings.TrimSpace(flagValue(args, "--log-file"))
-		if grpcRes, gerr := tryRestartViaGRPC(repoRoot, requestedLog); gerr == nil {
-			if !grpcRes.GetOk() {
-				if jsonOut {
-					printJSONActionError("restart", "grpc_restart_failed", grpcRes.GetError())
-					return 1
-				}
-				fmt.Fprintf(os.Stderr, "restart failed: %s\n", grpcRes.GetError())
+		grpcRes, gerr := tryRestartViaGRPC(repoRoot, requestedLog)
+		if gerr != nil {
+			if jsonOut {
+				printJSONActionError("restart", "gateway_unreachable", formatGatewayUnavailable(gerr))
 				return 1
 			}
-			payload := StatusPayload{
-				Running:   grpcRes.GetRunning(),
-				StartedAt: grpcRes.GetStartedAt(),
-				LockFile:  grpcRes.GetLockFile(),
-				Metadata:  map[string]any{},
-			}
-			if grpcRes.GetHasPid() {
-				pid := int(grpcRes.GetPid())
-				payload.PID = &pid
-			}
-			payload.Metadata["channel"] = grpcRes.GetChannel()
-			payload.Metadata["workdir"] = grpcRes.GetWorkdir()
-			payload.Metadata["log_file"] = grpcRes.GetLogFile()
-			payload.Metadata["lock_file"] = grpcRes.GetLockFile()
-			cfg, _ := config.Load(repoRoot, "")
-			if jsonOut {
-				printJSON(statusJSON("restart", payload, cfg, grpcRes.GetLogFile()))
-			} else {
-				fmt.Printf("restarted lock=%s log=%s\n", payload.LockFile, nonEmpty(strings.TrimSpace(grpcRes.GetLogFile()), resolveLogPath(repoRoot, nil)))
-			}
-			return 0
+			fmt.Fprintf(os.Stderr, "restart failed: %s\n", formatGatewayUnavailable(gerr))
+			return 1
 		}
+		if !grpcRes.GetOk() {
+			if jsonOut {
+				printJSONActionError("restart", "grpc_restart_failed", grpcRes.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "restart failed: %s\n", grpcRes.GetError())
+			return 1
+		}
+		payload := StatusPayload{
+			Running:   grpcRes.GetRunning(),
+			StartedAt: grpcRes.GetStartedAt(),
+			LockFile:  grpcRes.GetLockFile(),
+			Metadata:  map[string]any{},
+		}
+		if grpcRes.GetHasPid() {
+			pid := int(grpcRes.GetPid())
+			payload.PID = &pid
+		}
+		payload.Metadata["channel"] = grpcRes.GetChannel()
+		payload.Metadata["workdir"] = grpcRes.GetWorkdir()
+		payload.Metadata["log_file"] = grpcRes.GetLogFile()
+		payload.Metadata["lock_file"] = grpcRes.GetLockFile()
+		cfg, _ := config.Load(repoRoot, "")
+		if jsonOut {
+			printJSON(statusJSON("restart", payload, cfg, grpcRes.GetLogFile()))
+		} else {
+			fmt.Printf("restarted lock=%s log=%s\n", payload.LockFile, nonEmpty(strings.TrimSpace(grpcRes.GetLogFile()), resolveLogPath(repoRoot, nil)))
+		}
+		return 0
 	}
 
 	if !jsonOut {
@@ -778,46 +808,53 @@ func runRestart(repoRoot string, args []string) int {
 func runHealth(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
 	if !grpcDisabled() {
-		if grpcRes, gerr := tryHealthViaGRPC(repoRoot, false); gerr == nil {
-			if !grpcRes.GetOk() && len(grpcRes.GetItems()) == 0 && strings.TrimSpace(grpcRes.GetError()) != "" {
-				if jsonOut {
-					printJSONActionError("health", "grpc_health_failed", grpcRes.GetError())
-					return 1
-				}
-				fmt.Fprintf(os.Stderr, "health failed: %s\n", grpcRes.GetError())
+		grpcRes, gerr := tryHealthViaGRPC(repoRoot, false)
+		if gerr != nil {
+			if jsonOut {
+				printJSONActionError("health", "gateway_unreachable", formatGatewayUnavailable(gerr))
 				return 1
 			}
-			p := HealthPayload{
-				OK:      grpcRes.GetOk(),
-				Action:  nonEmpty(strings.TrimSpace(grpcRes.GetAction()), "health"),
-				Status:  nonEmpty(strings.TrimSpace(grpcRes.GetStatus()), "unhealthy"),
-				Channel: strings.TrimSpace(grpcRes.GetChannel()),
-				Items:   make([]HealthItem, 0, len(grpcRes.GetItems())),
-			}
-			for _, it := range grpcRes.GetItems() {
-				p.Items = append(p.Items, HealthItem{
-					Key:        it.GetKey(),
-					OK:         it.GetOk(),
-					Detail:     it.GetDetail(),
-					Suggestion: it.GetSuggestion(),
-				})
-			}
-			if jsonOut {
-				printJSON(p)
-			} else {
-				for _, it := range p.Items {
-					if it.OK {
-						fmt.Printf("[OK] %s: %s\n", it.Key, it.Detail)
-					} else {
-						fmt.Printf("[FAIL] %s: %s\n", it.Key, it.Detail)
-					}
-				}
-			}
-			if p.OK {
-				return 0
-			}
+			fmt.Fprintf(os.Stderr, "health failed: %s\n", formatGatewayUnavailable(gerr))
 			return 1
 		}
+		if !grpcRes.GetOk() && len(grpcRes.GetItems()) == 0 && strings.TrimSpace(grpcRes.GetError()) != "" {
+			if jsonOut {
+				printJSONActionError("health", "grpc_health_failed", grpcRes.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "health failed: %s\n", grpcRes.GetError())
+			return 1
+		}
+		p := HealthPayload{
+			OK:      grpcRes.GetOk(),
+			Action:  nonEmpty(strings.TrimSpace(grpcRes.GetAction()), "health"),
+			Status:  nonEmpty(strings.TrimSpace(grpcRes.GetStatus()), "unhealthy"),
+			Channel: strings.TrimSpace(grpcRes.GetChannel()),
+			Items:   make([]HealthItem, 0, len(grpcRes.GetItems())),
+		}
+		for _, it := range grpcRes.GetItems() {
+			p.Items = append(p.Items, HealthItem{
+				Key:        it.GetKey(),
+				OK:         it.GetOk(),
+				Detail:     it.GetDetail(),
+				Suggestion: it.GetSuggestion(),
+			})
+		}
+		if jsonOut {
+			printJSON(p)
+		} else {
+			for _, it := range p.Items {
+				if it.OK {
+					fmt.Printf("[OK] %s: %s\n", it.Key, it.Detail)
+				} else {
+					fmt.Printf("[FAIL] %s: %s\n", it.Key, it.Detail)
+				}
+			}
+		}
+		if p.OK {
+			return 0
+		}
+		return 1
 	}
 
 	p := buildHealthPayload(repoRoot, "health", false)
@@ -841,46 +878,53 @@ func runHealth(repoRoot string, args []string) int {
 func runDoctor(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
 	if !grpcDisabled() {
-		if grpcRes, gerr := tryDoctorViaGRPC(repoRoot, true); gerr == nil {
-			if !grpcRes.GetOk() && len(grpcRes.GetItems()) == 0 && strings.TrimSpace(grpcRes.GetError()) != "" {
-				if jsonOut {
-					printJSONActionError("doctor", "grpc_doctor_failed", grpcRes.GetError())
-					return 1
-				}
-				fmt.Fprintf(os.Stderr, "doctor failed: %s\n", grpcRes.GetError())
+		grpcRes, gerr := tryDoctorViaGRPC(repoRoot, true)
+		if gerr != nil {
+			if jsonOut {
+				printJSONActionError("doctor", "gateway_unreachable", formatGatewayUnavailable(gerr))
 				return 1
 			}
-			p := HealthPayload{
-				OK:      grpcRes.GetOk(),
-				Action:  nonEmpty(strings.TrimSpace(grpcRes.GetAction()), "doctor"),
-				Status:  nonEmpty(strings.TrimSpace(grpcRes.GetStatus()), "unhealthy"),
-				Channel: strings.TrimSpace(grpcRes.GetChannel()),
-				Items:   make([]HealthItem, 0, len(grpcRes.GetItems())),
-			}
-			for _, it := range grpcRes.GetItems() {
-				p.Items = append(p.Items, HealthItem{
-					Key:        it.GetKey(),
-					OK:         it.GetOk(),
-					Detail:     it.GetDetail(),
-					Suggestion: it.GetSuggestion(),
-				})
-			}
-			if jsonOut {
-				printJSON(p)
-			} else {
-				for _, it := range p.Items {
-					if it.OK {
-						fmt.Printf("[OK] %s: %s\n", it.Key, it.Detail)
-					} else {
-						fmt.Printf("[FAIL] %s: %s\n", it.Key, it.Detail)
-					}
-				}
-			}
-			if p.OK {
-				return 0
-			}
+			fmt.Fprintf(os.Stderr, "doctor failed: %s\n", formatGatewayUnavailable(gerr))
 			return 1
 		}
+		if !grpcRes.GetOk() && len(grpcRes.GetItems()) == 0 && strings.TrimSpace(grpcRes.GetError()) != "" {
+			if jsonOut {
+				printJSONActionError("doctor", "grpc_doctor_failed", grpcRes.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "doctor failed: %s\n", grpcRes.GetError())
+			return 1
+		}
+		p := HealthPayload{
+			OK:      grpcRes.GetOk(),
+			Action:  nonEmpty(strings.TrimSpace(grpcRes.GetAction()), "doctor"),
+			Status:  nonEmpty(strings.TrimSpace(grpcRes.GetStatus()), "unhealthy"),
+			Channel: strings.TrimSpace(grpcRes.GetChannel()),
+			Items:   make([]HealthItem, 0, len(grpcRes.GetItems())),
+		}
+		for _, it := range grpcRes.GetItems() {
+			p.Items = append(p.Items, HealthItem{
+				Key:        it.GetKey(),
+				OK:         it.GetOk(),
+				Detail:     it.GetDetail(),
+				Suggestion: it.GetSuggestion(),
+			})
+		}
+		if jsonOut {
+			printJSON(p)
+		} else {
+			for _, it := range p.Items {
+				if it.OK {
+					fmt.Printf("[OK] %s: %s\n", it.Key, it.Detail)
+				} else {
+					fmt.Printf("[FAIL] %s: %s\n", it.Key, it.Detail)
+				}
+			}
+		}
+		if p.OK {
+			return 0
+		}
+		return 1
 	}
 
 	p := buildHealthPayload(repoRoot, "doctor", true)

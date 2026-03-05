@@ -6,11 +6,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,9 +16,7 @@ import (
 	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
 )
 
 const defaultGatewaydAddr = "127.0.0.1:58473"
@@ -550,7 +546,7 @@ func tryDoctorViaGRPC(repoRoot string, includePaths bool) (*gatewayv1.HealthChec
 }
 
 func trySessionsViaGRPC(repoRoot string, limit int) (*gatewayv1.SessionsResponse, error) {
-	cli, conn, err := grpcGatewayClientAutoStart()
+	cli, conn, err := grpcGatewayClient()
 	if err != nil {
 		return nil, err
 	}
@@ -564,14 +560,14 @@ func trySessionsViaGRPC(repoRoot string, limit int) (*gatewayv1.SessionsResponse
 }
 
 func trySendToSessionViaGRPC(repoRoot, sessionKey, text, messageID, msgType string, dryRun bool, source string) (*gatewayv1.SendToSessionResponse, error) {
-	cli, conn, err := grpcGatewayClientAutoStart()
+	cli, conn, err := grpcGatewayClient()
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout())
 	defer cancel()
-	resp, callErr := cli.SendToSession(ctx, &gatewayv1.SendToSessionRequest{
+	return cli.SendToSession(ctx, &gatewayv1.SendToSessionRequest{
 		RepoRoot:   repoRoot,
 		SessionKey: sessionKey,
 		Text:       text,
@@ -580,37 +576,10 @@ func trySendToSessionViaGRPC(repoRoot, sessionKey, text, messageID, msgType stri
 		DryRun:     dryRun,
 		Source:     source,
 	})
-	if callErr == nil {
-		return resp, nil
-	}
-	if !isRetryableGatewayRPCError(callErr) {
-		return nil, callErr
-	}
-	time.Sleep(200 * time.Millisecond)
-	cli2, conn2, err2 := grpcGatewayClientAutoStart()
-	if err2 != nil {
-		return nil, callErr
-	}
-	defer conn2.Close()
-	ctx2, cancel2 := context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout())
-	defer cancel2()
-	resp2, callErr2 := cli2.SendToSession(ctx2, &gatewayv1.SendToSessionRequest{
-		RepoRoot:   repoRoot,
-		SessionKey: sessionKey,
-		Text:       text,
-		MessageId:  messageID,
-		MsgType:    msgType,
-		DryRun:     dryRun,
-		Source:     source,
-	})
-	if callErr2 == nil {
-		return resp2, nil
-	}
-	return nil, callErr2
 }
 
 func trySessionMessagesViaGRPC(repoRoot, sessionKey string) (*gatewayv1.SessionMessagesResponse, error) {
-	cli, conn, err := grpcGatewayClientAutoStart()
+	cli, conn, err := grpcGatewayClient()
 	if err != nil {
 		return nil, err
 	}
@@ -632,7 +601,7 @@ func tryDeleteSessionViaGRPC(repoRoot, sessionKey string) (*gatewayv1.SessionMut
 }
 
 func trySessionMutationViaGRPC(repoRoot, sessionKey, mode string) (*gatewayv1.SessionMutationResponse, error) {
-	cli, conn, err := grpcGatewayClientAutoStart()
+	cli, conn, err := grpcGatewayClient()
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +619,7 @@ func trySessionMutationViaGRPC(repoRoot, sessionKey, mode string) (*gatewayv1.Se
 }
 
 func tryDeleteAllSessionsViaGRPC(repoRoot string) (*gatewayv1.SessionMutationResponse, error) {
-	cli, conn, err := grpcGatewayClientAutoStart()
+	cli, conn, err := grpcGatewayClient()
 	if err != nil {
 		return nil, err
 	}
@@ -661,99 +630,15 @@ func tryDeleteAllSessionsViaGRPC(repoRoot string) (*gatewayv1.SessionMutationRes
 }
 
 func grpcGatewayClient() (gatewayv1.GatewayControlClient, *grpc.ClientConn, error) {
-	return grpcGatewayClientWithOptions(false)
-}
-
-func grpcGatewayClientAutoStart() (gatewayv1.GatewayControlClient, *grpc.ClientConn, error) {
-	return grpcGatewayClientWithOptions(true)
-}
-
-func grpcGatewayClientWithOptions(autoStart bool) (gatewayv1.GatewayControlClient, *grpc.ClientConn, error) {
 	if grpcDisabled() {
 		return nil, nil, fmt.Errorf("grpc disabled")
 	}
 	addr := gatewaydAddr()
-	conn, err := dialGateway(addr, 280*time.Millisecond)
-	if err == nil {
-		if autoStart {
-			if err := ensureGatewaydCompatible(conn); err != nil {
-				_ = conn.Close()
-				_ = killGatewaydByAddr(addr)
-				_ = startGatewaydDetached(addr)
-				conn, err = dialGateway(addr, 1800*time.Millisecond)
-				if err != nil {
-					return nil, nil, err
-				}
-			}
-		}
-		return gatewayv1.NewGatewayControlClient(conn), conn, nil
-	}
-	if !autoStart {
-		return nil, nil, err
-	}
-	startErr := startGatewaydDetached(addr)
-	if startErr != nil {
-		return nil, nil, fmt.Errorf("dial gatewayd failed: %v; auto-start failed: %v", err, startErr)
-	}
-	conn, err = dialGateway(addr, 1800*time.Millisecond)
+	conn, err := dialGateway(addr, 800*time.Millisecond)
 	if err != nil {
 		return nil, nil, err
 	}
 	return gatewayv1.NewGatewayControlClient(conn), conn, nil
-}
-
-func ensureGatewaydCompatible(conn *grpc.ClientConn) error {
-	cli := gatewayv1.NewGatewayControlClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	_, err := cli.Doctor(ctx, &gatewayv1.HealthCheckRequest{RepoRoot: "", IncludePaths: false})
-	if err == nil {
-		return nil
-	}
-	if status.Code(err) == codes.Unimplemented {
-		return err
-	}
-	// For non-version errors (timeouts/unavailable), keep current connection and let caller retry per-RPC.
-	return nil
-}
-
-func killGatewaydByAddr(addr string) error {
-	parts := strings.Split(strings.TrimSpace(addr), ":")
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid addr: %s", addr)
-	}
-	port := strings.TrimSpace(parts[len(parts)-1])
-	if port == "" {
-		return fmt.Errorf("invalid addr: %s", addr)
-	}
-	if _, err := strconv.Atoi(port); err != nil {
-		return fmt.Errorf("invalid port in addr %s: %w", addr, err)
-	}
-	out, err := exec.Command("lsof", "-ti", "tcp:"+port).Output()
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, line := range lines {
-		pidRaw := strings.TrimSpace(line)
-		if pidRaw == "" {
-			continue
-		}
-		pid, err := strconv.Atoi(pidRaw)
-		if err != nil || pid <= 0 {
-			continue
-		}
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			continue
-		}
-		_ = signalTerminate(proc)
-		time.Sleep(120 * time.Millisecond)
-		if processAlive(pid) {
-			_ = signalKill(proc)
-		}
-	}
-	return nil
 }
 
 func dialGateway(addr string, timeout time.Duration) (*grpc.ClientConn, error) {
@@ -803,35 +688,4 @@ func sendViaSessionGRPCTimeout() time.Duration {
 
 func formatGatewayUnavailable(err error) string {
 	return fmt.Sprintf("gatewayd unreachable at %s: %v (run: cag gatewayd --listen %s)", gatewaydAddr(), err, gatewaydAddr())
-}
-
-func isRetryableGatewayRPCError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(strings.TrimSpace(err.Error()))
-	if msg == "" {
-		return false
-	}
-	return strings.Contains(msg, "code = unavailable") ||
-		strings.Contains(msg, "error reading from server: eof") ||
-		strings.Contains(msg, "transport is closing") ||
-		strings.Contains(msg, "connection reset by peer")
-}
-
-func startGatewaydDetached(addr string) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	p := exec.Command(exe, "gatewayd", "--listen", addr)
-	p.Stdout = io.Discard
-	p.Stderr = io.Discard
-	configureDetachedProcess(p)
-	if err := p.Start(); err != nil {
-		return err
-	}
-	_ = p.Process.Release()
-	time.Sleep(250 * time.Millisecond)
-	return nil
 }
