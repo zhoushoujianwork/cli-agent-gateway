@@ -33,13 +33,15 @@ This file provides practical instructions for human and AI agents working in thi
 ## Common Commands
 
 - Run gateway:
-  - `make run`
+  - `PYTHONPATH=src python3 -m app.main <agent_workdir>`
 - Re-run setup wizard (even if `.env` exists):
   - `make config`
 - Check single-instance lock status:
   - `make status`
-- Run DingTalk callback server:
-  - `make run-dingtalk-callback`
+- Build macOS GUI app:
+  - `make build-macos-gui-app`
+- Clean runtime state/log artifacts:
+  - `make clean`
 
 ## Coding Guidelines
 
@@ -75,18 +77,9 @@ Run these checks before every commit:
 
 If any sensitive value is found, remove it from code/history before commit.
 
-## Worktree Rule for New Features
-
-- If the user asks for a new feature, start from a new git worktree.
-- Create the worktree from a base branch (normally `main`) before coding.
-- Use a `codex/*` branch name inside that worktree.
-- Recommended format: `codex/feat/<short-topic>` (example: `codex/feat/add-dingtalk-retry`).
-- Do not code new features directly in the primary workspace checkout.
-- Before opening PR, sync with latest base branch and resolve conflicts.
-
 ## Multi-Agent Collaboration Rules
 
-- One task, one worktree, one owner agent.
+- One task, one owner agent.
 - Split parallel work by module boundaries (`channels/`, `core/`, `agents/`, `infra/`, `docs/`) to reduce conflicts.
 - Do not edit the same file from multiple agents at the same time unless explicitly coordinated.
 - Each agent should publish a short plan before coding: scope, touched files, risks.
@@ -100,7 +93,7 @@ If any sensitive value is found, remove it from code/history before commit.
 Before finishing a change, run at least:
 
 1. `python3 -m compileall src`
-2. Relevant smoke run for touched flows (for example `make run`, channel scripts, or mock scripts in `scripts/testing/`).
+2. Relevant smoke run for touched flows (for example `PYTHONPATH=src python3 -m app.main <agent_workdir>`, channel scripts, or mock scripts in `scripts/testing/`).
 3. Verify docs/env examples if behavior or config changed.
 
 ## Documentation Expectations

@@ -136,6 +136,7 @@ make config
 - `ACP_SESSION_NEW_TIMEOUT_SEC`：`session/new` 超时（默认 `90`）
 - `ACP_SESSION_NEW_RETRIES`：`session/new` 超时重试次数（默认 `2`）
 - `ACP_SESSION_NEW_RETRY_BACKOFF_SEC`：重试退避秒数（默认 `1`，指数退避）
+- `ACP_PROMPT_RECOVER_RETRIES`：`session/prompt` 可恢复错误重试次数（默认 `2`）
 - DingTalk 用户侧失败提示默认不回传内部异常细节；详细错误仅写入服务端日志与交互日志。
 
 ## 全链路 Debug（问题排查）

@@ -32,6 +32,7 @@ class ACPStdioAgentAdapter:
         debug_acp_event_details: bool = False,
         debug_acp_log_chunks: bool = False,
         debug_payload_chars: int = 280,
+        prompt_recover_retries: int = 1,
     ):
         self.command = command
         self.cwd = cwd
@@ -41,7 +42,7 @@ class ACPStdioAgentAdapter:
         self.client = JsonRpcStdioClient(command=self.command, cwd=self.cwd)
         self._initialized = False
         self.idle_finish_sec = 12
-        self.prompt_recover_retries = 1
+        self.prompt_recover_retries = max(0, int(prompt_recover_retries))
         self.initialize_timeout_sec = max(1, int(initialize_timeout_sec))
         self.session_new_timeout_sec = max(1, int(session_new_timeout_sec))
         self.session_new_retries = max(0, int(session_new_retries))

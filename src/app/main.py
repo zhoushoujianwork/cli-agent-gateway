@@ -37,7 +37,7 @@ def _log_startup(cfg: AppConfig) -> None:
     print(
         f"[{now}] startup acp_timeouts init={cfg.acp_initialize_timeout_sec}s "
         f"session_new={cfg.acp_session_new_timeout_sec}s retries={cfg.acp_session_new_retries} "
-        f"backoff={cfg.acp_session_new_retry_backoff_sec}s"
+        f"backoff={cfg.acp_session_new_retry_backoff_sec}s prompt_recover={cfg.acp_prompt_recover_retries}"
     )
     print(f"[{now}] startup fetch_cmd={cfg.fetch_cmd}")
     print(f"[{now}] startup send_cmd={cfg.send_cmd}")
@@ -120,6 +120,7 @@ def main() -> None:
         debug_acp_event_details=cfg.debug_acp_events,
         debug_acp_log_chunks=cfg.debug_acp_log_chunks,
         debug_payload_chars=cfg.debug_acp_event_payload_chars,
+        prompt_recover_retries=cfg.acp_prompt_recover_retries,
     )
     state_store = JsonStateStore(cfg.state_file)
     interaction_log = InteractionLog(cfg.interaction_log_file)

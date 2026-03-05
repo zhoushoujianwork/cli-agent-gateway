@@ -57,12 +57,21 @@ struct SessionEntry: Identifiable {
     var id: String { sessionKey }
 }
 
+enum MessageDeliveryStatus: String {
+    case sending
+    case sent
+    case failed
+    case action
+}
+
 struct ChatMessage: Identifiable {
     let id: String
     let sourceMsgId: String
     let role: String
     let text: String
     let time: String
+    let deliveryStatus: MessageDeliveryStatus?
+    let statusDetail: String
 }
 
 struct ProcessEvent: Identifiable {
@@ -103,6 +112,7 @@ final class GatewayController: ObservableObject {
     private let channelDefaultsKey = "gateway.selected_channel"
     private let hiddenSessionsDefaultsPrefix = "gateway.hidden_sessions"
     private var hiddenSessionCutoffByKey: [String: String] = [:]
+    private var localOverlayMessagesBySession: [String: [ChatMessage]] = [:]
     private var didAutoStartOnLaunch = false
 
     init() throws {
@@ -684,7 +694,15 @@ final class GatewayController: ObservableObject {
                     let text = ((record["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     if !text.isEmpty {
                         let ts = (record["time"] as? String) ?? ""
-                        let msg = ChatMessage(id: "\(msgId)-u", sourceMsgId: msgId, role: "user", text: text, time: ts)
+                        let msg = ChatMessage(
+                            id: "\(msgId)-u",
+                            sourceMsgId: msgId,
+                            role: "user",
+                            text: text,
+                            time: ts,
+                            deliveryStatus: .sent,
+                            statusDetail: ""
+                        )
                         chatBySession[sessionKey, default: []].append(msg)
                         let e = ProcessEvent(
                             id: "\(msgId)-evt-in",
@@ -755,7 +773,15 @@ final class GatewayController: ObservableObject {
                     let text = ((record["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     if !text.isEmpty {
                         let ts = (record["time"] as? String) ?? ""
-                        let msg = ChatMessage(id: "\(msgId)-a", sourceMsgId: msgId, role: "assistant", text: text, time: ts)
+                        let msg = ChatMessage(
+                            id: "\(msgId)-a",
+                            sourceMsgId: msgId,
+                            role: "assistant",
+                            text: text,
+                            time: ts,
+                            deliveryStatus: .sent,
+                            statusDetail: ""
+                        )
                         chatBySession[sessionKey, default: []].append(msg)
                         let elapsed = String(describing: record["elapsed_sec"] ?? "")
                         let detail = elapsed.isEmpty ? "Completed." : "Completed in \(elapsed)s."
@@ -775,7 +801,15 @@ final class GatewayController: ObservableObject {
                     let text = ((record["error"] as? String) ?? "Execution error").trimmingCharacters(in: .whitespacesAndNewlines)
                     if !text.isEmpty {
                         let ts = (record["time"] as? String) ?? ""
-                        let msg = ChatMessage(id: "\(msgId)-e", sourceMsgId: msgId, role: "assistant", text: "Error: \(text)", time: ts)
+                        let msg = ChatMessage(
+                            id: "\(msgId)-e",
+                            sourceMsgId: msgId,
+                            role: "assistant",
+                            text: "Error: \(text)",
+                            time: ts,
+                            deliveryStatus: .failed,
+                            statusDetail: text
+                        )
                         chatBySession[sessionKey, default: []].append(msg)
                         let e = ProcessEvent(
                             id: "\(msgId)-evt-\(timelineByMsg[msgId, default: []].count)-err",
@@ -852,7 +886,7 @@ final class GatewayController: ObservableObject {
             selectedSessionKey = nil
         }
         if let selected = selectedSessionKey {
-            chatMessages = chatBySession[selected, default: []]
+            chatMessages = mergedMessages(for: selected, persisted: chatBySession[selected, default: []])
         } else {
             chatMessages = []
         }
@@ -869,13 +903,117 @@ final class GatewayController: ObservableObject {
         return sessions.first(where: { $0.sessionKey == key })
     }
 
+    private func mergedMessages(for sessionKey: String, persisted: [ChatMessage]) -> [ChatMessage] {
+        let overlay = localOverlayMessagesBySession[sessionKey, default: []]
+        var merged = persisted
+        merged.append(contentsOf: overlay)
+        return merged.sorted { $0.time < $1.time }
+    }
+
+    private func appendOverlayMessage(_ msg: ChatMessage, sessionKey: String) {
+        localOverlayMessagesBySession[sessionKey, default: []].append(msg)
+        if selectedSessionKey == sessionKey {
+            chatMessages.append(msg)
+        }
+    }
+
+    private func updateOverlayMessage(
+        sessionKey: String,
+        messageId: String,
+        deliveryStatus: MessageDeliveryStatus,
+        statusDetail: String
+    ) {
+        var overlay = localOverlayMessagesBySession[sessionKey, default: []]
+        if let idx = overlay.firstIndex(where: { $0.id == messageId }) {
+            let old = overlay[idx]
+            overlay[idx] = ChatMessage(
+                id: old.id,
+                sourceMsgId: old.sourceMsgId,
+                role: old.role,
+                text: old.text,
+                time: old.time,
+                deliveryStatus: deliveryStatus,
+                statusDetail: statusDetail
+            )
+            localOverlayMessagesBySession[sessionKey] = overlay
+        }
+        if let idx = chatMessages.firstIndex(where: { $0.id == messageId }) {
+            let old = chatMessages[idx]
+            chatMessages[idx] = ChatMessage(
+                id: old.id,
+                sourceMsgId: old.sourceMsgId,
+                role: old.role,
+                text: old.text,
+                time: old.time,
+                deliveryStatus: deliveryStatus,
+                statusDetail: statusDetail
+            )
+        }
+    }
+
+    private func localChatTimeoutSec() -> TimeInterval {
+        let raw = (envValue("AGENT_TIMEOUT_SEC") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = Int(raw), parsed > 0 else {
+            return 120
+        }
+        return TimeInterval(max(30, min(parsed, 3600)))
+    }
+
+    private func extractLastJSONLine(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("{"), trimmed.hasSuffix("}") {
+            return trimmed
+        }
+        for raw in text.split(separator: "\n").reversed() {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("{"), line.hasSuffix("}") {
+                return line
+            }
+        }
+        return nil
+    }
+
+    private func parseLocalCommand(_ text: String) -> (cmd: String, payload: String)? {
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard raw.hasPrefix("/") else { return nil }
+        let parts = raw.split(maxSplits: 1, omittingEmptySubsequences: true, whereSeparator: \.isWhitespace)
+        guard let cmdPart = parts.first else { return nil }
+        let cmd = String(cmdPart).lowercased()
+        guard cmd == "/clear" || cmd == "/new" else { return nil }
+        let payload = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        return (cmd, payload)
+    }
+
+    private func clearSessionMapping(baseSessionKey: String) -> Bool {
+        guard var node = loadStateJSON() else { return false }
+        var map = (node["session_map"] as? [String: Any]) ?? [:]
+        map.removeValue(forKey: baseSessionKey)
+        node["session_map"] = map
+        return saveStateJSON(node)
+    }
+
+    private func appendLocalActionMessage(_ text: String, sessionKey: String) {
+        let msgId = "local-sys-\(Int(Date().timeIntervalSince1970 * 1000))"
+        let msg = ChatMessage(
+            id: msgId,
+            sourceMsgId: msgId,
+            role: "system",
+            text: text,
+            time: ISO8601DateFormatter().string(from: Date()),
+            deliveryStatus: .action,
+            statusDetail: ""
+        )
+        appendOverlayMessage(msg, sessionKey: sessionKey)
+    }
+
     func sendLocalChat() {
-        let text = localDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = localDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         guard let session = selectedSessionEntry() else {
             detailText = "Select a session first."
             return
         }
+        let selectedSessionKey = session.sessionKey
         let channel = session.channel.trimmingCharacters(in: .whitespacesAndNewlines)
         let sender = session.senderId.trimmingCharacters(in: .whitespacesAndNewlines)
         let thread = session.threadId == "-" ? "" : session.threadId
@@ -887,15 +1025,49 @@ final class GatewayController: ObservableObject {
             return
         }
 
+        if let cmd = parseLocalCommand(text) {
+            let cleared = clearSessionMapping(baseSessionKey: baseSessionKey)
+            if cmd.cmd == "/clear" {
+                appendLocalActionMessage(
+                    cleared ? "Action /clear: session mapping reset." : "Action /clear failed: cannot update state file.",
+                    sessionKey: selectedSessionKey
+                )
+                detailText = cleared ? "Session mapping cleared." : "Failed to clear session mapping."
+                localDraftText = ""
+                refreshSessions()
+                return
+            }
+            appendLocalActionMessage(
+                cleared ? "Action /new: session reset." : "Action /new warning: reset failed, sending anyway.",
+                sessionKey: selectedSessionKey
+            )
+            detailText = cleared ? "New session started." : "Could not reset old session; continuing send."
+            if cmd.payload.isEmpty {
+                localDraftText = ""
+                refreshSessions()
+                return
+            }
+            text = cmd.payload
+        }
+
         localSending = true
 
         let userMsgId = "local-u-\(Int(Date().timeIntervalSince1970 * 1000))"
         let nowIso = ISO8601DateFormatter().string(from: Date())
-        let localUser = ChatMessage(id: userMsgId, sourceMsgId: userMsgId, role: "user", text: text, time: nowIso)
-        chatMessages.append(localUser)
+        let localUser = ChatMessage(
+            id: userMsgId,
+            sourceMsgId: userMsgId,
+            role: "user",
+            text: text,
+            time: nowIso,
+            deliveryStatus: .sending,
+            statusDetail: ""
+        )
+        appendOverlayMessage(localUser, sessionKey: selectedSessionKey)
         localDraftText = ""
 
         let cmd = "cd \(shellEscape(cfg.repoRoot)) && PYTHONPATH=src python3 -m app.local_chat --workdir \(shellEscape(cfg.workdir)) --channel \(shellEscape(channel)) --sender \(shellEscape(sender)) --thread-id \(shellEscape(thread)) --session-key \(shellEscape(baseSessionKey)) --session-id \(shellEscape(selectedSessionId)) --text \(shellEscape(text))"
+        let timeoutSec = localChatTimeoutSec()
         DispatchQueue.global(qos: .userInitiated).async {
             let token = UUID().uuidString
             let outFile = URL(fileURLWithPath: self.cfg.repoRoot).appendingPathComponent("tmp/local_chat_\(token).out").path
@@ -909,12 +1081,19 @@ final class GatewayController: ObservableObject {
             var output = ""
             do {
                 try proc.run()
-                let deadline = Date().addingTimeInterval(120)
+                let deadline = Date().addingTimeInterval(timeoutSec)
                 while proc.isRunning && Date() < deadline {
                     Thread.sleep(forTimeInterval: 0.05)
                 }
                 if proc.isRunning {
                     proc.terminate()
+                    let killDeadline = Date().addingTimeInterval(3)
+                    while proc.isRunning && Date() < killDeadline {
+                        Thread.sleep(forTimeInterval: 0.05)
+                    }
+                    if proc.isRunning {
+                        _ = kill(proc.processIdentifier, SIGKILL)
+                    }
                     code = 124
                 } else {
                     code = proc.terminationStatus
@@ -933,16 +1112,46 @@ final class GatewayController: ObservableObject {
             DispatchQueue.main.async {
                 defer { self.localSending = false }
                 guard code == 0 else {
-                    self.detailText = "Local chat failed: \(output.trimmingCharacters(in: .whitespacesAndNewlines))"
+                    let errText = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if code == 124 {
+                        self.detailText = "Local chat timeout after \(Int(timeoutSec))s."
+                        self.updateOverlayMessage(
+                            sessionKey: selectedSessionKey,
+                            messageId: userMsgId,
+                            deliveryStatus: .failed,
+                            statusDetail: "Timeout after \(Int(timeoutSec))s"
+                        )
+                    } else {
+                        self.detailText = "Local chat failed: \(errText)"
+                        self.updateOverlayMessage(
+                            sessionKey: selectedSessionKey,
+                            messageId: userMsgId,
+                            deliveryStatus: .failed,
+                            statusDetail: errText.isEmpty ? "Unknown error" : errText
+                        )
+                    }
                     return
                 }
                 guard
-                    let data = output.data(using: .utf8),
+                    let jsonText = self.extractLastJSONLine(output),
+                    let data = jsonText.data(using: .utf8),
                     let node = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                 else {
                     self.detailText = "Local chat failed: invalid response."
+                    self.updateOverlayMessage(
+                        sessionKey: selectedSessionKey,
+                        messageId: userMsgId,
+                        deliveryStatus: .failed,
+                        statusDetail: "Invalid response"
+                    )
                     return
                 }
+                self.updateOverlayMessage(
+                    sessionKey: selectedSessionKey,
+                    messageId: userMsgId,
+                    deliveryStatus: .sent,
+                    statusDetail: ""
+                )
                 let summary = ((node["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let answer = summary.isEmpty ? "..." : summary
                 let aiMsgId = "local-a-\(Int(Date().timeIntervalSince1970 * 1000))"
@@ -951,9 +1160,11 @@ final class GatewayController: ObservableObject {
                     sourceMsgId: aiMsgId,
                     role: "assistant",
                     text: answer,
-                    time: ISO8601DateFormatter().string(from: Date())
+                    time: ISO8601DateFormatter().string(from: Date()),
+                    deliveryStatus: .sent,
+                    statusDetail: ""
                 )
-                self.chatMessages.append(localAI)
+                self.appendOverlayMessage(localAI, sessionKey: selectedSessionKey)
                 self.refreshSessions()
                 self.detailText = "Local chat sent."
             }
@@ -1205,6 +1416,26 @@ struct ChatBubble: View {
     @State private var hovering = false
 
     private var isUser: Bool { message.role == "user" }
+    private var isSystem: Bool { message.role == "system" }
+
+    private var deliveryText: String {
+        switch message.deliveryStatus {
+        case .sending: return "Sending..."
+        case .sent: return "Sent"
+        case .failed: return "Failed"
+        case .action: return "Action"
+        case .none: return ""
+        }
+    }
+
+    private var deliveryColor: Color {
+        switch message.deliveryStatus {
+        case .sending: return .orange
+        case .failed: return .red
+        case .action: return .secondary
+        case .sent, .none: return .gray
+        }
+    }
 
     @ViewBuilder
     private var bubbleContent: some View {
@@ -1215,6 +1446,17 @@ struct ChatBubble: View {
             Text(message.text)
                 .font(.system(size: 12))
                 .textSelection(.enabled)
+            if isUser, !deliveryText.isEmpty {
+                Text(deliveryText)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(deliveryColor)
+            }
+            if isUser, message.deliveryStatus == .failed, !message.statusDetail.isEmpty {
+                Text(message.statusDetail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            }
             if !message.time.isEmpty {
                 Text(message.time)
                     .font(.system(size: 10))
@@ -1225,33 +1467,48 @@ struct ChatBubble: View {
     }
 
     var body: some View {
-        HStack {
-            if isUser { Spacer(minLength: 30) }
-            if isUser {
-                bubbleContent
-                    .background(Color.accentColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 10))
-            } else {
-                Button {
-                    onAssistantTap(message)
-                } label: {
-                    bubbleContent
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(hovering ? Color.accentColor.opacity(0.45) : Color.clear, lineWidth: 1)
-                        )
+        Group {
+            if isSystem {
+                HStack {
+                    Spacer()
+                    Text(message.text)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.gray.opacity(0.12), in: Capsule())
+                    Spacer()
                 }
-                .buttonStyle(.plain)
-                .background((hovering ? Color.gray.opacity(0.20) : Color.gray.opacity(0.14)), in: RoundedRectangle(cornerRadius: 10))
-                .onHover { inside in
-                    hovering = inside
-                    if inside {
-                        NSCursor.pointingHand.set()
+            } else {
+                HStack {
+                    if isUser { Spacer(minLength: 30) }
+                    if isUser {
+                        bubbleContent
+                            .background(Color.accentColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 10))
                     } else {
-                        NSCursor.arrow.set()
+                        Button {
+                            onAssistantTap(message)
+                        } label: {
+                            bubbleContent
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke(hovering ? Color.accentColor.opacity(0.45) : Color.clear, lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .background((hovering ? Color.gray.opacity(0.20) : Color.gray.opacity(0.14)), in: RoundedRectangle(cornerRadius: 10))
+                        .onHover { inside in
+                            hovering = inside
+                            if inside {
+                                NSCursor.pointingHand.set()
+                            } else {
+                                NSCursor.arrow.set()
+                            }
+                        }
                     }
+                    if !isUser { Spacer(minLength: 30) }
                 }
             }
-            if !isUser { Spacer(minLength: 30) }
         }
     }
 }

@@ -42,6 +42,7 @@ class AppConfig:
     acp_session_new_timeout_sec: int
     acp_session_new_retries: int
     acp_session_new_retry_backoff_sec: float
+    acp_prompt_recover_retries: int
     reply_style_enabled: bool
     reply_style_prompt: str
     debug_user_profile: bool
@@ -106,6 +107,7 @@ class AppConfig:
             acp_session_new_timeout_sec=int(os.getenv("ACP_SESSION_NEW_TIMEOUT_SEC", "90")),
             acp_session_new_retries=int(os.getenv("ACP_SESSION_NEW_RETRIES", "2")),
             acp_session_new_retry_backoff_sec=float(os.getenv("ACP_SESSION_NEW_RETRY_BACKOFF_SEC", "1")),
+            acp_prompt_recover_retries=int(os.getenv("ACP_PROMPT_RECOVER_RETRIES", "2")),
             reply_style_enabled=os.getenv("REPLY_STYLE_ENABLED", "1").strip() != "0",
             reply_style_prompt=os.getenv(
                 "REPLY_STYLE_PROMPT",

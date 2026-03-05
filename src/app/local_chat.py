@@ -75,6 +75,7 @@ def main() -> None:
         debug_acp_event_details=False,
         debug_acp_log_chunks=False,
         debug_payload_chars=cfg.debug_acp_event_payload_chars,
+        prompt_recover_retries=cfg.acp_prompt_recover_retries,
     )
     try:
         user_text = _human_mode_prompt(args.channel, text)
