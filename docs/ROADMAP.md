@@ -3,10 +3,8 @@
 ## R0: CLI Contract Freeze
 
 - 定义并冻结 CLI 命令与 JSON 输出协议：
-  - `start/stop/restart/status`
-  - `send`
-  - `config get/set/validate`
-  - `doctor`
+  - `run/start/stop/restart/status/health`
+  - `config`
 - 约定统一退出码与错误码（timeout/agent_error/channel_error/config_error）。
 - 明确日志与状态文件路径规范。
 
@@ -25,7 +23,7 @@
 ## R3: CLI-first Operations
 
 - CLI 作为唯一控制面入口：
-  - 进程控制、配置管理、健康检查、消息发送。
+  - 进程控制、配置管理、健康检查。
 - GUI 不再直接读写关键流程逻辑，只消费 CLI。
 
 ## R4: macOS GUI Integration
@@ -39,3 +37,10 @@
 - 发布 Go-first 新版本（不以 Python 兼容为发布门槛）。
 - 提供迁移说明（安装、命令、配置变化）。
 - 建立回归测试与 smoke 检查清单。
+
+## Branch Goal (codex/feat/init-go-cli-actions)
+
+- Step 1 complete: `gateway-cli run` now uses the Go-native gateway loop (legacy bridge removed).
+- Step 2 complete: `gateway-cli config` now writes `.env` via Go-native flow (no Python bridge).
+- Step 3 complete: `start/stop/restart/health` added with dashboard-friendly JSON output.
+- Next: complete iMessage adapter and wire GUI controls fully to CLI actions.

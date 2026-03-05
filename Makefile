@@ -1,6 +1,11 @@
 SHELL := /bin/zsh
 
-.PHONY: app
+.PHONY: run
+run:
+	@cd src && go run ./cmd/gateway-cli run
 
-app:
-	@./macos/CLIApp/scripts/build_macos_gui_app.sh
+.PHONY: build
+build:
+	@mkdir -p bin
+	@cd src && go build -o ../bin/cag ./cmd/gateway-cli
+	@echo "Built: ./bin/cag"
