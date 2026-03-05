@@ -20,7 +20,7 @@
 
 - `dingtalk`：已实现（Go 原生）。
 - `command`：已实现（Go 原生）。
-- `imessage`：TODO（占位，未实现）。
+- `imessage`：已实现最小 Go 通道（基于 `imsg` 命令）。
 
 ## 快速启动
 
@@ -55,6 +55,7 @@ cd src && go run ./cmd/gateway-cli status
 cd src && go run ./cmd/gateway-cli status --json
 cd src && go run ./cmd/gateway-cli health
 cd src && go run ./cmd/gateway-cli health --json
+cd src && go run ./cmd/gateway-cli doctor --json
 ```
 
 ## DingTalk（已实现）
@@ -83,6 +84,6 @@ cd src && go run ./cmd/gateway-cli health --json
 - `src/internal/agents/acp/`：ACP JSON-RPC stdio 适配
 - `src/internal/channels/dingtalk/`：DingTalk 通道
 - `src/internal/channels/command/`：command 通道
-- `src/internal/channels/imessage/`：iMessage TODO 占位
+- `src/internal/channels/imessage/`：iMessage 通道（命令适配）
 - `src/internal/storage/`：`localfile` / `sqlite` 后端
 - `docs/GO_BACKEND_ARCHITECTURE.md`：Go 后端架构方案

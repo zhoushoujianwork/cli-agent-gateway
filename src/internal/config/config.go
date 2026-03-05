@@ -10,52 +10,56 @@ import (
 )
 
 type AppConfig struct {
-	RepoRoot             string
-	ChannelType          string
-	Workdir              string
-	FetchCmd             string
-	SendCmd              string
-	RemoteUserID         string
-	AllowedFrom          map[string]struct{}
-	PollIntervalSec      int
-	TimeoutSec           int
-	ReportDir            string
-	StateFile            string
-	InteractionLogFile   string
-	LockFile             string
-	ProcessOnlyLatest    bool
-	ACPAgentCmd          string
-	PermissionPolicy     string
-	InitializeTimeoutSec int
-	SessionNewTimeoutSec int
-	SessionNewRetries    int
-	SessionNewBackoffSec float64
-	ReplyStyleEnabled    bool
-	ReplyStylePrompt     string
-	ShowToolTrace        bool
-	ToolProgressNotify   bool
-	StorageBackend       string
-	StorageSQLitePath    string
-	DingTalkQueueFile    string
-	DingTalkFetchMax     int
-	DingTalkDMPolicy     string
-	DingTalkGroupPolicy  string
-	DingTalkAllowedFrom  map[string]struct{}
-	DingTalkGroupAllowed map[string]struct{}
-	DingTalkRequireAt    bool
-	DingTalkSendMode     string
-	DingTalkSendMsgType  string
-	DingTalkSendTimeout  int
-	DingTalkTitle        string
-	DingTalkPrettyStatus bool
-	DingTalkBotWebhook   string
-	DingTalkBotSecret    string
-	DingTalkAppKey       string
-	DingTalkAppSecret    string
-	DingTalkAgentID      string
-	DingTalkDefaultTo    string
-	DingTalkTokenURL     string
-	DingTalkSendURL      string
+	RepoRoot                string
+	ChannelType             string
+	Workdir                 string
+	FetchCmd                string
+	SendCmd                 string
+	RemoteUserID            string
+	AllowedFrom             map[string]struct{}
+	PollIntervalSec         int
+	TimeoutSec              int
+	ReportDir               string
+	StateFile               string
+	InteractionLogFile      string
+	LockFile                string
+	ProcessOnlyLatest       bool
+	ACPAgentCmd             string
+	PermissionPolicy        string
+	InitializeTimeoutSec    int
+	SessionNewTimeoutSec    int
+	SessionNewRetries       int
+	SessionNewBackoffSec    float64
+	ReplyStyleEnabled       bool
+	ReplyStylePrompt        string
+	ShowToolTrace           bool
+	ToolProgressNotify      bool
+	StorageBackend          string
+	StorageSQLitePath       string
+	IMessageFetchCmd        string
+	IMessageSendCmd         string
+	IMessageFetchTimeoutSec int
+	IMessageSendTimeoutSec  int
+	DingTalkQueueFile       string
+	DingTalkFetchMax        int
+	DingTalkDMPolicy        string
+	DingTalkGroupPolicy     string
+	DingTalkAllowedFrom     map[string]struct{}
+	DingTalkGroupAllowed    map[string]struct{}
+	DingTalkRequireAt       bool
+	DingTalkSendMode        string
+	DingTalkSendMsgType     string
+	DingTalkSendTimeout     int
+	DingTalkTitle           string
+	DingTalkPrettyStatus    bool
+	DingTalkBotWebhook      string
+	DingTalkBotSecret       string
+	DingTalkAppKey          string
+	DingTalkAppSecret       string
+	DingTalkAgentID         string
+	DingTalkDefaultTo       string
+	DingTalkTokenURL        string
+	DingTalkSendURL         string
 }
 
 func Load(repoRoot, workdirArg string) (AppConfig, error) {
@@ -73,6 +77,10 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 	if channel == "dingtalk" {
 		defaultFetchCmd = "builtin:dingtalk-stream"
 		defaultSendCmd = "/bin/true"
+	}
+	if channel == "imessage" {
+		defaultFetchCmd = "imsg fetch --json"
+		defaultSendCmd = "imsg send"
 	}
 
 	workdir := workdirArg
@@ -114,30 +122,34 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 		ReplyStyleEnabled:    getEnvBool("REPLY_STYLE_ENABLED", true),
 		ReplyStylePrompt: strings.TrimSpace(getEnv("REPLY_STYLE_PROMPT",
 			"请用简洁聊天格式回复：短句优先；先结论后细节；尽量 3-6 行；避免长段落、复杂 Markdown、表格；代码只给最小必要片段；状态词清晰（进行中/阻塞/完成）。")),
-		ShowToolTrace:        getEnvBool("SHOW_TOOL_TRACE", false),
-		ToolProgressNotify:   getEnvBool("TOOL_PROGRESS_NOTIFY_ENABLED", true),
-		StorageBackend:       strings.TrimSpace(getEnv("STORAGE_BACKEND", "sqlite")),
-		StorageSQLitePath:    resolvePath(repoRoot, getEnv("STORAGE_SQLITE_PATH", filepath.Join(repoRoot, ".agent_gateway.db"))),
-		DingTalkQueueFile:    resolvePath(repoRoot, getEnv("DINGTALK_QUEUE_FILE", ".dingtalk_inbox.jsonl")),
-		DingTalkFetchMax:     getEnvInt("DINGTALK_FETCH_MAX_EVENTS", 30),
-		DingTalkDMPolicy:     strings.TrimSpace(getEnv("DINGTALK_DM_POLICY", "allowlist")),
-		DingTalkGroupPolicy:  strings.TrimSpace(getEnv("DINGTALK_GROUP_POLICY", "allowlist")),
-		DingTalkAllowedFrom:  csvSet(getEnv("DINGTALK_ALLOWED_FROM", "")),
-		DingTalkGroupAllowed: csvSet(getEnv("DINGTALK_GROUP_ALLOWLIST", "")),
-		DingTalkRequireAt:    getEnvBool("DINGTALK_REQUIRE_MENTION_IN_GROUP", true),
-		DingTalkSendMode:     strings.TrimSpace(getEnv("DINGTALK_SEND_MODE", "api")),
-		DingTalkSendMsgType:  strings.TrimSpace(getEnv("DINGTALK_SEND_MSGTYPE", "markdown")),
-		DingTalkSendTimeout:  getEnvInt("DINGTALK_SEND_TIMEOUT_SEC", 10),
-		DingTalkTitle:        strings.TrimSpace(getEnv("DINGTALK_MARKDOWN_TITLE", "CLI Agent Gateway")),
-		DingTalkPrettyStatus: getEnvBool("DINGTALK_PRETTY_STATUS", true),
-		DingTalkBotWebhook:   strings.TrimSpace(getEnv("DINGTALK_BOT_WEBHOOK", "")),
-		DingTalkBotSecret:    strings.TrimSpace(getEnv("DINGTALK_BOT_SECRET", "")),
-		DingTalkAppKey:       strings.TrimSpace(getEnv("DINGTALK_APP_KEY", "")),
-		DingTalkAppSecret:    strings.TrimSpace(getEnv("DINGTALK_APP_SECRET", "")),
-		DingTalkAgentID:      strings.TrimSpace(getEnv("DINGTALK_AGENT_ID", "")),
-		DingTalkDefaultTo:    strings.TrimSpace(getEnv("DINGTALK_DEFAULT_TO_USER", "")),
-		DingTalkTokenURL:     strings.TrimSpace(getEnv("DINGTALK_TOKEN_URL", "")),
-		DingTalkSendURL:      strings.TrimSpace(getEnv("DINGTALK_SEND_URL", "https://oapi.dingtalk.com/topapi/message/corpconversation/asyncsend_v2")),
+		ShowToolTrace:           getEnvBool("SHOW_TOOL_TRACE", false),
+		ToolProgressNotify:      getEnvBool("TOOL_PROGRESS_NOTIFY_ENABLED", true),
+		StorageBackend:          strings.TrimSpace(getEnv("STORAGE_BACKEND", "sqlite")),
+		StorageSQLitePath:       resolvePath(repoRoot, getEnv("STORAGE_SQLITE_PATH", filepath.Join(repoRoot, ".agent_gateway.db"))),
+		IMessageFetchCmd:        strings.TrimSpace(getEnv("IMESSAGE_FETCH_CMD", defaultFetchCmd)),
+		IMessageSendCmd:         strings.TrimSpace(getEnv("IMESSAGE_SEND_CMD", defaultSendCmd)),
+		IMessageFetchTimeoutSec: getEnvInt("IMESSAGE_FETCH_TIMEOUT_SEC", 30),
+		IMessageSendTimeoutSec:  getEnvInt("IMESSAGE_SEND_TIMEOUT_SEC", 30),
+		DingTalkQueueFile:       resolvePath(repoRoot, getEnv("DINGTALK_QUEUE_FILE", ".dingtalk_inbox.jsonl")),
+		DingTalkFetchMax:        getEnvInt("DINGTALK_FETCH_MAX_EVENTS", 30),
+		DingTalkDMPolicy:        strings.TrimSpace(getEnv("DINGTALK_DM_POLICY", "allowlist")),
+		DingTalkGroupPolicy:     strings.TrimSpace(getEnv("DINGTALK_GROUP_POLICY", "allowlist")),
+		DingTalkAllowedFrom:     csvSet(getEnv("DINGTALK_ALLOWED_FROM", "")),
+		DingTalkGroupAllowed:    csvSet(getEnv("DINGTALK_GROUP_ALLOWLIST", "")),
+		DingTalkRequireAt:       getEnvBool("DINGTALK_REQUIRE_MENTION_IN_GROUP", true),
+		DingTalkSendMode:        strings.TrimSpace(getEnv("DINGTALK_SEND_MODE", "api")),
+		DingTalkSendMsgType:     strings.TrimSpace(getEnv("DINGTALK_SEND_MSGTYPE", "markdown")),
+		DingTalkSendTimeout:     getEnvInt("DINGTALK_SEND_TIMEOUT_SEC", 10),
+		DingTalkTitle:           strings.TrimSpace(getEnv("DINGTALK_MARKDOWN_TITLE", "CLI Agent Gateway")),
+		DingTalkPrettyStatus:    getEnvBool("DINGTALK_PRETTY_STATUS", true),
+		DingTalkBotWebhook:      strings.TrimSpace(getEnv("DINGTALK_BOT_WEBHOOK", "")),
+		DingTalkBotSecret:       strings.TrimSpace(getEnv("DINGTALK_BOT_SECRET", "")),
+		DingTalkAppKey:          strings.TrimSpace(getEnv("DINGTALK_APP_KEY", "")),
+		DingTalkAppSecret:       strings.TrimSpace(getEnv("DINGTALK_APP_SECRET", "")),
+		DingTalkAgentID:         strings.TrimSpace(getEnv("DINGTALK_AGENT_ID", "")),
+		DingTalkDefaultTo:       strings.TrimSpace(getEnv("DINGTALK_DEFAULT_TO_USER", "")),
+		DingTalkTokenURL:        strings.TrimSpace(getEnv("DINGTALK_TOKEN_URL", "")),
+		DingTalkSendURL:         strings.TrimSpace(getEnv("DINGTALK_SEND_URL", "https://oapi.dingtalk.com/topapi/message/corpconversation/asyncsend_v2")),
 	}
 	if cfg.PollIntervalSec < 1 {
 		cfg.PollIntervalSec = 1

@@ -319,6 +319,26 @@ JSON：
 - `--key <name>` 必填
 - `--value <value>` 必填
 
+### 14) `gateway doctor`
+
+扩展诊断（`health` + 路径可写性检查，适合 GUI 启动页）。
+
+JSON：
+
+```json
+{
+  "ok": true,
+  "action": "doctor",
+  "status": "healthy",
+  "channel": "command",
+  "items": [
+    { "key": "env", "ok": true, "detail": ".env loaded" },
+    { "key": "acp", "ok": true, "detail": "acp command ready: codex-acp" },
+    { "key": "paths.lock_file", "ok": true, "detail": "writable: /abs/path" }
+  ]
+}
+```
+
 JSON：
 
 ```json

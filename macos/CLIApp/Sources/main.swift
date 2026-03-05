@@ -271,6 +271,33 @@ final class GatewayController: ObservableObject {
         return shellOutput("command -v '\(esc)' >/dev/null 2>&1").code == 0
     }
 
+    private func cagJSON(_ action: String, args: [String] = [], timeoutSec: TimeInterval? = nil) -> (code: Int32, json: [String: Any]?, raw: String) {
+        let cmdParts = ["go", "run", "./cmd/gateway-cli", action] + args + ["--json"]
+        let full = cmdParts.map { shellEscape($0) }.joined(separator: " ")
+        let cmd = "cd \(shellEscape(cfg.repoRoot))/src && \(full)"
+        let out = shellOutput(cmd, timeoutSec: timeoutSec)
+        guard let line = extractLastJSONLine(out.output),
+              let data = line.data(using: .utf8),
+              let node = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return (out.code, nil, out.output)
+        }
+        return (out.code, node, out.output)
+    }
+
+    private func repairActionForCheck(_ key: String) -> RepairAction? {
+        if key == "env" || key == "config" {
+            return .setupEnv
+        }
+        if key == "acp" {
+            return .installCodexACP
+        }
+        if key.hasPrefix("imessage") {
+            return .installIMsg
+        }
+        return nil
+    }
+
     private func hasHealthFailures() -> Bool {
         healthChecks.contains(where: { !$0.ok })
     }
@@ -280,46 +307,53 @@ final class GatewayController: ObservableObject {
     }
 
     func refreshHealthChecks() {
-        var checks: [HealthCheckItem] = []
+        let doctor = cagJSON("doctor")
+        let fallback = cagJSON("health")
+        let response = doctor.json ?? fallback.json
 
-        let envExists = FileManager.default.fileExists(atPath: envPath)
-        checks.append(
-            HealthCheckItem(
-                id: "env",
-                title: ".env configuration",
-                ok: envExists,
-                detail: envExists ? "Found: \(envPath)" : "Missing: \(envPath)",
-                repairAction: envExists ? nil : .setupEnv
-            )
-        )
-
-        let acpCmd = (envValue("ACP_AGENT_CMD")?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
-            ? envValue("ACP_AGENT_CMD")!.trimmingCharacters(in: .whitespacesAndNewlines)
-            : "codex-acp"
-        let acpOK = commandExists(acpCmd)
-        checks.append(
-            HealthCheckItem(
-                id: "acp",
-                title: "ACP agent command",
-                ok: acpOK,
-                detail: acpOK ? "\(acpCmd) is available." : "\(acpCmd) not found. Required by gateway.",
-                repairAction: acpOK ? nil : .installCodexACP
-            )
-        )
-
-        if selectedChannel == .imessage {
-            let imsgOK = commandExists("imsg")
-            checks.append(
+        guard let node = response else {
+            healthChecks = [
                 HealthCheckItem(
-                    id: "imsg",
-                    title: "iMessage CLI (imsg)",
-                    ok: imsgOK,
-                    detail: imsgOK ? "imsg is available." : "imsg not found. iMessage channel requires it.",
-                    repairAction: imsgOK ? nil : .installIMsg
+                    id: "doctor",
+                    title: "Gateway doctor",
+                    ok: false,
+                    detail: "Failed to parse CLI JSON output.",
+                    repairAction: nil
                 )
-            )
+            ]
+            return
         }
 
+        var checks: [HealthCheckItem] = []
+        if let items = node["items"] as? [[String: Any]] {
+            for item in items {
+                let key = (item["key"] as? String) ?? "check"
+                let ok = (item["ok"] as? Bool) ?? false
+                let detail = (item["detail"] as? String) ?? ""
+                let suggestion = (item["suggestion"] as? String) ?? ""
+                let fullDetail = suggestion.isEmpty ? detail : "\(detail)\nSuggestion: \(suggestion)"
+                checks.append(
+                    HealthCheckItem(
+                        id: key,
+                        title: key.replacingOccurrences(of: ".", with: " "),
+                        ok: ok,
+                        detail: fullDetail,
+                        repairAction: ok ? nil : repairActionForCheck(key)
+                    )
+                )
+            }
+        }
+        if checks.isEmpty {
+            checks = [
+                HealthCheckItem(
+                    id: "doctor",
+                    title: "Gateway doctor",
+                    ok: false,
+                    detail: "No checks returned by CLI.",
+                    repairAction: nil
+                )
+            ]
+        }
         healthChecks = checks
     }
 
@@ -435,17 +469,27 @@ final class GatewayController: ObservableObject {
     }
 
     func refreshStatus() {
-        let pids = gatewayPIDsByWorkdir()
-        if let pid = runningPID() {
-            let active = runningChannelType(pid: pid) ?? selectedChannel
-            activeChannelText = active.title
-            statusText = "Running"
-            let dupText = pids.count > 1 ? "\nDetected duplicate instances: \(pids.count)" : ""
-            detailText = "PID \(pid)\nChannel: \(active.title)\nLog: \(cfg.logFile)\(dupText)"
-        } else {
+        let res = cagJSON("status")
+        guard let node = res.json else {
+            statusText = "Unknown"
             activeChannelText = selectedChannel.title
+            detailText = "Status command failed.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
+            return
+        }
+        let status = (node["status"] as? String) ?? "unknown"
+        let channelRaw = (node["channel"] as? String) ?? selectedChannel.rawValue
+        let channel = ChannelType(rawValue: channelRaw) ?? selectedChannel
+        activeChannelText = channel.title
+        if status == "running" {
+            statusText = "Running"
+            let pidPart = (node["pid"] as? Int).map { "PID \($0)\n" } ?? ""
+            let lockPart = (node["lock_file"] as? String).map { "Lock: \($0)\n" } ?? ""
+            let logPart = (node["log_file"] as? String) ?? cfg.logFile
+            detailText = "\(pidPart)Channel: \(channel.title)\n\(lockPart)Log: \(logPart)"
+        } else {
             statusText = "Stopped"
-            detailText = "Channel: \(selectedChannel.title)\nLog: \(cfg.logFile)"
+            let lockPart = (node["lock_file"] as? String).map { "\nLock: \($0)" } ?? ""
+            detailText = "Channel: \(channel.title)\nLog: \(cfg.logFile)\(lockPart)"
         }
     }
 
@@ -460,7 +504,8 @@ final class GatewayController: ObservableObject {
             detailText = "Fix health issues first, then start gateway."
             return
         }
-        if runningPID() == nil {
+        refreshStatus()
+        if statusText != "Running" {
             start()
         }
     }
@@ -1096,82 +1141,62 @@ final class GatewayController: ObservableObject {
             detailText = "Cannot start: unresolved health issues."
             return
         }
-        let existing = gatewayPIDsByWorkdir()
-        if !existing.isEmpty {
-            statusText = "Running"
-            detailText = "Gateway is already running.\nPIDs: \(existing.map(String.init).joined(separator: ", "))\nChannel: \(selectedChannel.title)"
-            return
-        }
-        guard FileManager.default.fileExists(atPath: envPath) else {
-            statusText = "Start failed"
-            detailText = "Missing .env at \(envPath).\nRun build again or create .env first."
-            return
-        }
         writeEnvValue("CHANNEL_TYPE", value: selectedChannel.rawValue)
-
-        let logDir = URL(fileURLWithPath: cfg.logFile).deletingLastPathComponent().path
-        do {
-            try FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: cfg.logFile) {
-                FileManager.default.createFile(atPath: cfg.logFile, contents: nil)
-            }
-        } catch {
+        let res = cagJSON("start")
+        guard let node = res.json else {
             statusText = "Start failed"
-            detailText = "Cannot prepare log file: \(error.localizedDescription)"
+            detailText = "Invalid CLI response.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
             return
         }
-
-        let cmd = "cd \(shellEscape(cfg.repoRoot))/src && nohup env CHANNEL_TYPE=\(selectedChannel.rawValue) LOCK_FILE=\(shellEscape(cfg.lockFile)) STATE_FILE=\(shellEscape(cfg.stateFile)) INTERACTION_LOG_FILE=\(shellEscape(cfg.interactionLogFile)) go run ./cmd/gateway-cli run >>\(shellEscape(cfg.logFile)) 2>&1 &"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", cmd]
-        do {
-            try process.run()
-            process.waitUntilExit()
-            Thread.sleep(forTimeInterval: 0.8)
+        let ok = (node["ok"] as? Bool) ?? false
+        if ok {
             refreshStatus()
-            if statusText == "Running" {
-                detailText = "Gateway started.\nChannel: \(selectedChannel.title)\nLog: \(cfg.logFile)"
-            } else {
-                statusText = "Start failed"
-                detailText = "Process exited but lock file is not active.\nLog: \(cfg.logFile)"
-            }
-        } catch {
-            statusText = "Start failed"
-            detailText = error.localizedDescription
+            let pidText = (node["pid"] as? Int).map { "PID: \($0)\n" } ?? ""
+            let logPath = (node["log_file"] as? String) ?? cfg.logFile
+            detailText = "\(pidText)Channel: \(activeChannelText)\nLog: \(logPath)"
+            return
         }
+        statusText = "Start failed"
+        let errorText = ((node["error"] as? [String: Any])?["message"] as? String) ?? "Unknown error"
+        detailText = errorText
     }
 
     func stop() {
-        let pids = gatewayPIDsByWorkdir()
-        guard !pids.isEmpty else {
-            statusText = "Stopped"
-            detailText = "Gateway is not running."
+        let res = cagJSON("stop")
+        guard let node = res.json else {
+            statusText = "Stop failed"
+            detailText = "Invalid CLI response.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
             return
         }
-        for pid in pids {
-            _ = kill(pid, SIGTERM)
+        if ((node["ok"] as? Bool) ?? false) == false {
+            statusText = "Stop failed"
+            let errorText = ((node["error"] as? [String: Any])?["message"] as? String) ?? "Unknown error"
+            detailText = errorText
+            return
         }
-        Thread.sleep(forTimeInterval: 0.8)
         refreshStatus()
-        if statusText == "Stopped" {
-            detailText = "Stopped gateway process(es): \(pids.map(String.init).joined(separator: ", "))."
-        } else {
-            detailText = "Could not stop all gateway processes.\nExpected stopped: \(pids.map(String.init).joined(separator: ", "))."
-        }
+        detailText = "Gateway stopped."
     }
 
     func restart() {
         statusText = "Restarting"
         detailText = "Restarting gateway..."
-        if runningPID() != nil {
-            stop()
-            if runningPID() != nil {
-                detailText = "Restart failed: gateway is still running."
-                return
-            }
+        writeEnvValue("CHANNEL_TYPE", value: selectedChannel.rawValue)
+        let res = cagJSON("restart")
+        guard let node = res.json else {
+            statusText = "Restart failed"
+            detailText = "Invalid CLI response.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
+            return
         }
-        start()
+        if ((node["ok"] as? Bool) ?? false) == false {
+            statusText = "Restart failed"
+            let errorText = ((node["error"] as? [String: Any])?["message"] as? String) ?? "Unknown error"
+            detailText = errorText
+            return
+        }
+        refreshStatus()
+        let pidText = (node["pid"] as? Int).map { "PID: \($0)\n" } ?? ""
+        detailText = "\(pidText)Gateway restarted."
     }
 
     func openLogs() {

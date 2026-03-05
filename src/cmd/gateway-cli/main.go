@@ -21,15 +21,23 @@ import (
 )
 
 type HealthItem struct {
-	Key    string `json:"key"`
-	OK     bool   `json:"ok"`
-	Detail string `json:"detail"`
+	Key        string `json:"key"`
+	OK         bool   `json:"ok"`
+	Detail     string `json:"detail"`
+	Suggestion string `json:"suggestion,omitempty"`
 }
 
 type HealthPayload struct {
 	OK      bool         `json:"ok"`
-	Channel string       `json:"channel"`
+	Action  string       `json:"action"`
+	Status  string       `json:"status"`
+	Channel string       `json:"channel,omitempty"`
 	Items   []HealthItem `json:"items"`
+}
+
+type JSONError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type StatusPayload struct {
@@ -70,6 +78,8 @@ func main() {
 		os.Exit(runStatus(repoRoot, args))
 	case "health":
 		os.Exit(runHealth(repoRoot, args))
+	case "doctor":
+		os.Exit(runDoctor(repoRoot, args))
 	case "actions":
 		printActions(os.Stdout)
 	case "help", "-h", "--help":
@@ -89,6 +99,7 @@ func printActions(out *os.File) {
 	fmt.Fprintln(out, "config")
 	fmt.Fprintln(out, "status")
 	fmt.Fprintln(out, "health")
+	fmt.Fprintln(out, "doctor")
 	fmt.Fprintln(out, "actions")
 	fmt.Fprintln(out, "help")
 }
@@ -104,6 +115,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  config [workdir]    Generate/update .env using Go-native defaults")
 	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
+	fmt.Fprintln(out, "  doctor [--json]     Extended diagnostics (health + path writability)")
 	fmt.Fprintln(out, "  actions             Print supported action names")
 	fmt.Fprintln(out, "  help                Show this message")
 }
@@ -187,7 +199,12 @@ func runGoMain(repoRoot string, args []string) int {
 			SendURL:               cfg.DingTalkSendURL,
 		})
 	case "imessage":
-		channel = imessage.NewAdapter()
+		channel = imessage.NewAdapter(imessage.Options{
+			FetchCmd:        cfg.IMessageFetchCmd,
+			SendCmd:         cfg.IMessageSendCmd,
+			FetchTimeoutSec: cfg.IMessageFetchTimeoutSec,
+			SendTimeoutSec:  cfg.IMessageSendTimeoutSec,
+		})
 	default:
 		channel = &command.Adapter{
 			FetchCmd:        cfg.FetchCmd,
@@ -253,11 +270,16 @@ func runStatus(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
 	payload, err := getStatusPayload(repoRoot)
 	if err != nil {
+		if jsonOut {
+			printJSONActionError("status", "status_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "status failed: %v\n", err)
 		return 1
 	}
+	cfg, _ := config.Load(repoRoot, "")
 	if jsonOut {
-		printJSON(payload)
+		printJSON(statusJSON("status", payload, cfg, ""))
 		return 0
 	}
 	if payload.Running {
@@ -280,17 +302,26 @@ func runStart(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
 	envPath := filepath.Join(repoRoot, ".env")
 	if _, err := os.Stat(envPath); err != nil {
-		panic(fmt.Sprintf(".env not found: %s", envPath))
+		if jsonOut {
+			printJSONActionError("start", "env_missing", ".env not found")
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, ".env not found: %s\n", envPath)
+		return 1
 	}
 	cfg, err := config.Load(repoRoot, "")
 	if err != nil {
+		if jsonOut {
+			printJSONActionError("start", "config_load_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
 		return 1
 	}
 	current, err := getStatusPayload(repoRoot)
 	if err == nil && current.Running {
 		if jsonOut {
-			printJSON(current)
+			printJSON(statusJSON("start", current, cfg, ""))
 		} else {
 			fmt.Println("already running")
 		}
@@ -299,11 +330,19 @@ func runStart(repoRoot string, args []string) int {
 
 	logPath := resolveLogPath(repoRoot)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		if jsonOut {
+			printJSONActionError("start", "log_prepare_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "create log dir failed: %v\n", err)
 		return 1
 	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
+		if jsonOut {
+			printJSONActionError("start", "log_open_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "open log file failed: %v\n", err)
 		return 1
 	}
@@ -311,6 +350,10 @@ func runStart(repoRoot string, args []string) int {
 
 	exe, err := os.Executable()
 	if err != nil {
+		if jsonOut {
+			printJSONActionError("start", "executable_resolve_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "resolve executable failed: %v\n", err)
 		return 1
 	}
@@ -321,6 +364,10 @@ func runStart(repoRoot string, args []string) int {
 	configureDetachedProcess(proc)
 
 	if err := proc.Start(); err != nil {
+		if jsonOut {
+			printJSONActionError("start", "start_process_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "start process failed: %v\n", err)
 		return 1
 	}
@@ -329,16 +376,25 @@ func runStart(repoRoot string, args []string) int {
 	time.Sleep(800 * time.Millisecond)
 	payload, err := getStatusPayload(repoRoot)
 	if err != nil {
+		if jsonOut {
+			printJSONActionError("start", "status_after_start_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "status after start failed: %v\n", err)
 		return 1
 	}
-	if jsonOut {
-		printJSON(payload)
-	} else if payload.Running {
-		fmt.Printf("started lock=%s log=%s\n", payload.LockFile, logPath)
-	} else {
-		fmt.Printf("start requested but not running yet, check log=%s\n", logPath)
+	if !payload.Running {
+		if jsonOut {
+			printJSONActionError("start", "start_not_running", "start requested but process is not running yet")
+		} else {
+			fmt.Printf("start requested but not running yet, check log=%s\n", logPath)
+		}
 		return 1
+	}
+	if jsonOut {
+		printJSON(statusJSON("start", payload, cfg, logPath))
+	} else {
+		fmt.Printf("started lock=%s log=%s\n", payload.LockFile, logPath)
 	}
 	_ = cfg
 	return 0
@@ -346,29 +402,46 @@ func runStart(repoRoot string, args []string) int {
 
 func runStop(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
+	cfg, _ := config.Load(repoRoot, "")
 	payload, err := getStatusPayload(repoRoot)
 	if err != nil {
+		if jsonOut {
+			printJSONActionError("stop", "status_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "status failed: %v\n", err)
 		return 1
 	}
 	if !payload.Running {
 		if jsonOut {
-			printJSON(payload)
+			printJSON(statusJSON("stop", payload, cfg, ""))
 		} else {
 			fmt.Println("already stopped")
 		}
 		return 0
 	}
 	if payload.PID == nil || *payload.PID <= 0 {
+		if jsonOut {
+			printJSONActionError("stop", "pid_missing", "cannot stop: lock is held but pid missing")
+			return 1
+		}
 		fmt.Fprintln(os.Stderr, "cannot stop: lock is held but pid missing")
 		return 1
 	}
 	proc, err := os.FindProcess(*payload.PID)
 	if err != nil {
+		if jsonOut {
+			printJSONActionError("stop", "find_process_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "find process failed: %v\n", err)
 		return 1
 	}
 	if err := signalTerminate(proc); err != nil {
+		if jsonOut {
+			printJSONActionError("stop", "terminate_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "terminate failed: %v\n", err)
 		return 1
 	}
@@ -387,14 +460,22 @@ func runStop(repoRoot string, args []string) int {
 
 	after, err := getStatusPayload(repoRoot)
 	if err != nil {
+		if jsonOut {
+			printJSONActionError("stop", "status_after_stop_failed", err.Error())
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "status after stop failed: %v\n", err)
 		return 1
 	}
 	if jsonOut {
-		printJSON(after)
+		printJSON(statusJSON("stop", after, cfg, ""))
 	} else if !after.Running {
 		fmt.Printf("stopped pid=%d lock=%s\n", *payload.PID, after.LockFile)
 	} else {
+		if jsonOut {
+			printJSONActionError("stop", "stop_still_running", fmt.Sprintf("stop requested but still running pid=%d", *payload.PID))
+			return 1
+		}
 		fmt.Printf("stop requested but still running pid=%d\n", *payload.PID)
 		return 1
 	}
@@ -402,84 +483,116 @@ func runStop(repoRoot string, args []string) int {
 }
 
 func runRestart(repoRoot string, args []string) int {
-	if code := runStop(repoRoot, args); code != 0 {
-		return code
+	jsonOut := hasFlag(args, "--json")
+	if !jsonOut {
+		if code := runStop(repoRoot, args); code != 0 {
+			return code
+		}
+		return runStart(repoRoot, args)
 	}
-	return runStart(repoRoot, args)
+
+	cfg, err := config.Load(repoRoot, "")
+	if err != nil {
+		printJSONActionError("restart", "config_load_failed", err.Error())
+		return 1
+	}
+	current, err := getStatusPayload(repoRoot)
+	if err != nil {
+		printJSONActionError("restart", "status_failed", err.Error())
+		return 1
+	}
+	if current.Running {
+		if current.PID == nil || *current.PID <= 0 {
+			printJSONActionError("restart", "pid_missing", "cannot restart: lock is held but pid missing")
+			return 1
+		}
+		proc, err := os.FindProcess(*current.PID)
+		if err != nil {
+			printJSONActionError("restart", "find_process_failed", err.Error())
+			return 1
+		}
+		if err := signalTerminate(proc); err != nil {
+			printJSONActionError("restart", "terminate_failed", err.Error())
+			return 1
+		}
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			if !processAlive(*current.PID) {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if processAlive(*current.PID) {
+			_ = signalKill(proc)
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+
+	logPath := resolveLogPath(repoRoot)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		printJSONActionError("restart", "log_prepare_failed", err.Error())
+		return 1
+	}
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		printJSONActionError("restart", "log_open_failed", err.Error())
+		return 1
+	}
+	defer logFile.Close()
+
+	exe, err := os.Executable()
+	if err != nil {
+		printJSONActionError("restart", "executable_resolve_failed", err.Error())
+		return 1
+	}
+	p := exec.Command(exe, "run")
+	p.Dir = repoRoot
+	p.Stdout = logFile
+	p.Stderr = logFile
+	configureDetachedProcess(p)
+	if err := p.Start(); err != nil {
+		printJSONActionError("restart", "start_process_failed", err.Error())
+		return 1
+	}
+	_ = p.Process.Release()
+	time.Sleep(800 * time.Millisecond)
+
+	after, err := getStatusPayload(repoRoot)
+	if err != nil {
+		printJSONActionError("restart", "status_after_restart_failed", err.Error())
+		return 1
+	}
+	if !after.Running {
+		printJSONActionError("restart", "restart_not_running", "restart requested but process is not running yet")
+		return 1
+	}
+	printJSON(statusJSON("restart", after, cfg, logPath))
+	return 0
 }
 
 func runHealth(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
-	p := HealthPayload{Items: []HealthItem{}}
-	envPath := filepath.Join(repoRoot, ".env")
-	if _, err := os.Stat(envPath); err != nil {
-		p.Items = append(p.Items, HealthItem{Key: "env", OK: false, Detail: ".env missing"})
-		p.OK = false
-		if jsonOut {
-			printJSON(p)
-		} else {
-			fmt.Println("[FAIL] env: .env missing")
-		}
-		return 1
-	}
-	cfg, err := config.Load(repoRoot, "")
-	if err != nil {
-		p.Items = append(p.Items, HealthItem{Key: "config", OK: false, Detail: err.Error()})
-		p.OK = false
-		if jsonOut {
-			printJSON(p)
-		} else {
-			fmt.Printf("[FAIL] config: %v\n", err)
-		}
-		return 1
-	}
-	p.Channel = cfg.ChannelType
-	add := func(key string, ok bool, detail string) {
-		p.Items = append(p.Items, HealthItem{Key: key, OK: ok, Detail: detail})
-	}
-	add("env", true, ".env loaded")
-
-	acpCmd := strings.TrimSpace(cfg.ACPAgentCmd)
-	acpBin := acpCmd
-	if fields := strings.Fields(acpCmd); len(fields) > 0 {
-		acpBin = fields[0]
-	}
-	if _, err := exec.LookPath(acpBin); err != nil {
-		add("acp", false, fmt.Sprintf("acp command not found: %s", acpBin))
+	p := buildHealthPayload(repoRoot, "health", false)
+	if jsonOut {
+		printJSON(p)
 	} else {
-		add("acp", true, fmt.Sprintf("acp command ready: %s", acpBin))
+		for _, it := range p.Items {
+			if it.OK {
+				fmt.Printf("[OK] %s: %s\n", it.Key, it.Detail)
+			} else {
+				fmt.Printf("[FAIL] %s: %s\n", it.Key, it.Detail)
+			}
+		}
 	}
+	if p.OK {
+		return 0
+	}
+	return 1
+}
 
-	switch strings.ToLower(strings.TrimSpace(cfg.ChannelType)) {
-	case "imessage":
-		if _, err := exec.LookPath("imsg"); err != nil {
-			add("imessage", false, "imsg not found in PATH")
-		} else {
-			add("imessage", true, "imsg ready")
-		}
-	case "dingtalk":
-		mode := strings.ToLower(strings.TrimSpace(cfg.DingTalkSendMode))
-		if mode == "webhook" {
-			ok := strings.TrimSpace(cfg.DingTalkBotWebhook) != ""
-			add("dingtalk.webhook", ok, "requires DINGTALK_BOT_WEBHOOK")
-		} else {
-			k := strings.TrimSpace(cfg.DingTalkAppKey) != ""
-			s := strings.TrimSpace(cfg.DingTalkAppSecret) != ""
-			a := strings.TrimSpace(cfg.DingTalkAgentID) != ""
-			add("dingtalk.app_key", k, "requires DINGTALK_APP_KEY")
-			add("dingtalk.app_secret", s, "requires DINGTALK_APP_SECRET")
-			add("dingtalk.agent_id", a, "requires DINGTALK_AGENT_ID")
-		}
-	}
-
-	ok := true
-	for _, it := range p.Items {
-		if !it.OK {
-			ok = false
-			break
-		}
-	}
-	p.OK = ok
+func runDoctor(repoRoot string, args []string) int {
+	jsonOut := hasFlag(args, "--json")
+	p := buildHealthPayload(repoRoot, "doctor", true)
 	if jsonOut {
 		printJSON(p)
 	} else {
@@ -520,6 +633,198 @@ func getStatusPayload(repoRoot string) (StatusPayload, error) {
 		payload.StartedAt = *st.OwnerStartedAt
 	}
 	return payload, nil
+}
+
+func statusJSON(action string, p StatusPayload, cfg config.AppConfig, logPath string) map[string]any {
+	status := "stopped"
+	if p.Running {
+		status = "running"
+	}
+	lockFile := p.LockFile
+	if strings.TrimSpace(cfg.LockFile) != "" {
+		lockFile = cfg.LockFile
+	}
+	out := map[string]any{
+		"ok":        true,
+		"action":    action,
+		"status":    status,
+		"lock_file": lockFile,
+	}
+	if p.PID != nil && *p.PID > 0 {
+		out["pid"] = *p.PID
+	}
+	if strings.TrimSpace(p.StartedAt) != "" {
+		out["started_at"] = p.StartedAt
+	}
+	if strings.TrimSpace(cfg.ChannelType) != "" {
+		out["channel"] = cfg.ChannelType
+	}
+	if strings.TrimSpace(cfg.Workdir) != "" {
+		out["workdir"] = cfg.Workdir
+	}
+	if strings.TrimSpace(cfg.StateFile) != "" {
+		out["state_file"] = cfg.StateFile
+	}
+	if strings.TrimSpace(cfg.InteractionLogFile) != "" {
+		out["interaction_log_file"] = cfg.InteractionLogFile
+	}
+	if strings.TrimSpace(logPath) != "" {
+		out["log_file"] = logPath
+	}
+	if len(p.Metadata) > 0 {
+		out["metadata"] = p.Metadata
+	}
+	return out
+}
+
+func printJSONActionError(action, code, message string) {
+	printJSON(map[string]any{
+		"ok":     false,
+		"action": action,
+		"status": "failed",
+		"error": JSONError{
+			Code:    code,
+			Message: message,
+		},
+	})
+}
+
+func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayload {
+	p := HealthPayload{
+		OK:     false,
+		Action: action,
+		Status: "unhealthy",
+		Items:  []HealthItem{},
+	}
+	add := func(key string, ok bool, detail, suggestion string) {
+		p.Items = append(p.Items, HealthItem{
+			Key:        key,
+			OK:         ok,
+			Detail:     detail,
+			Suggestion: suggestion,
+		})
+	}
+
+	envPath := filepath.Join(repoRoot, ".env")
+	if _, err := os.Stat(envPath); err != nil {
+		add("env", false, ".env missing", "run `cag config <workdir>` first")
+		return p
+	}
+	add("env", true, ".env loaded", "")
+
+	cfg, err := config.Load(repoRoot, "")
+	if err != nil {
+		add("config", false, err.Error(), "fix .env values and re-run")
+		return p
+	}
+	p.Channel = cfg.ChannelType
+
+	if _, err := os.Stat(cfg.Workdir); err != nil {
+		add("workdir", false, fmt.Sprintf("workdir not accessible: %s", cfg.Workdir), "set CODEX_WORKDIR to an existing directory")
+	} else {
+		add("workdir", true, "workdir ready", "")
+	}
+
+	acpCmd := strings.TrimSpace(cfg.ACPAgentCmd)
+	acpBin := acpCmd
+	if fields := strings.Fields(acpCmd); len(fields) > 0 {
+		acpBin = fields[0]
+	}
+	if _, err := exec.LookPath(acpBin); err != nil {
+		add("acp", false, fmt.Sprintf("acp command not found: %s", acpBin), "install codex and ensure ACP_AGENT_CMD is in PATH")
+	} else {
+		add("acp", true, fmt.Sprintf("acp command ready: %s", acpBin), "")
+	}
+
+	switch strings.ToLower(strings.TrimSpace(cfg.ChannelType)) {
+	case "imessage":
+		if _, err := exec.LookPath("imsg"); err != nil {
+			add("imessage.binary", false, "imsg not found in PATH", "install imsg and relaunch terminal/app")
+		} else {
+			add("imessage.binary", true, "imsg ready", "")
+		}
+		if strings.TrimSpace(cfg.IMessageFetchCmd) == "" {
+			add("imessage.fetch_cmd", false, "IMESSAGE_FETCH_CMD is empty", "set IMESSAGE_FETCH_CMD in .env")
+		} else {
+			add("imessage.fetch_cmd", true, "IMESSAGE_FETCH_CMD configured", "")
+		}
+		if strings.TrimSpace(cfg.IMessageSendCmd) == "" {
+			add("imessage.send_cmd", false, "IMESSAGE_SEND_CMD is empty", "set IMESSAGE_SEND_CMD in .env")
+		} else {
+			add("imessage.send_cmd", true, "IMESSAGE_SEND_CMD configured", "")
+		}
+	case "dingtalk":
+		mode := strings.ToLower(strings.TrimSpace(cfg.DingTalkSendMode))
+		if mode == "webhook" {
+			ok := strings.TrimSpace(cfg.DingTalkBotWebhook) != ""
+			add("dingtalk.webhook", ok, "requires DINGTALK_BOT_WEBHOOK", "set DINGTALK_BOT_WEBHOOK for webhook mode")
+		} else {
+			k := strings.TrimSpace(cfg.DingTalkAppKey) != ""
+			s := strings.TrimSpace(cfg.DingTalkAppSecret) != ""
+			a := strings.TrimSpace(cfg.DingTalkAgentID) != ""
+			add("dingtalk.app_key", k, "requires DINGTALK_APP_KEY", "set DINGTALK_APP_KEY")
+			add("dingtalk.app_secret", s, "requires DINGTALK_APP_SECRET", "set DINGTALK_APP_SECRET")
+			add("dingtalk.agent_id", a, "requires DINGTALK_AGENT_ID", "set DINGTALK_AGENT_ID")
+		}
+	}
+
+	if includePaths {
+		addWritableCheck(&p.Items, "paths.lock_file", filepath.Dir(cfg.LockFile))
+		addWritableCheck(&p.Items, "paths.state_file", filepath.Dir(cfg.StateFile))
+		addWritableCheck(&p.Items, "paths.interaction_log", filepath.Dir(cfg.InteractionLogFile))
+		addWritableCheck(&p.Items, "paths.report_dir", cfg.ReportDir)
+		if strings.EqualFold(cfg.StorageBackend, "sqlite") {
+			addWritableCheck(&p.Items, "paths.sqlite", filepath.Dir(cfg.StorageSQLitePath))
+		}
+	}
+
+	p.OK = true
+	for _, it := range p.Items {
+		if !it.OK {
+			p.OK = false
+			break
+		}
+	}
+	if p.OK {
+		p.Status = "healthy"
+	}
+	return p
+}
+
+func addWritableCheck(items *[]HealthItem, key, dir string) {
+	d := strings.TrimSpace(dir)
+	if d == "" {
+		*items = append(*items, HealthItem{
+			Key:        key,
+			OK:         false,
+			Detail:     "empty path",
+			Suggestion: "set path in .env",
+		})
+		return
+	}
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		*items = append(*items, HealthItem{
+			Key:        key,
+			OK:         false,
+			Detail:     fmt.Sprintf("mkdir failed: %v", err),
+			Suggestion: "check directory permissions",
+		})
+		return
+	}
+	f, err := os.CreateTemp(d, ".cag-write-check-*")
+	if err != nil {
+		*items = append(*items, HealthItem{
+			Key:        key,
+			OK:         false,
+			Detail:     fmt.Sprintf("not writable: %v", err),
+			Suggestion: "check directory permissions",
+		})
+		return
+	}
+	path := f.Name()
+	_ = f.Close()
+	_ = os.Remove(path)
+	*items = append(*items, HealthItem{Key: key, OK: true, Detail: "writable: " + d})
 }
 
 func resolveWorkdir(repoRoot string, args []string) string {
