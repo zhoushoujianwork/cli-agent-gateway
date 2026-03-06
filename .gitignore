@@ -11,6 +11,7 @@ logs/
 .agent_gateway_interactions.jsonl
 .agent_gateway_reports/
 .cli_agent_gateway.lock
+.cli_agent_gatewayd.json
 .dingtalk_inbox.jsonl
 .agent_gateway.db*
 .agent_gateway.log*

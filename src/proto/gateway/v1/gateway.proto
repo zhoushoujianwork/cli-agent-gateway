@@ -1,0 +1,160 @@
+syntax = "proto3";
+
+package gateway.v1;
+
+option go_package = "cli-agent-gateway/internal/gen/gatewayv1;gatewayv1";
+
+message StatusRequest {
+  string repo_root = 1;
+  string log_file = 2;
+  bool quiet = 3;
+}
+
+message StatusResponse {
+  bool ok = 1;
+  string error = 2;
+  bool running = 3;
+  int64 pid = 4;
+  bool has_pid = 5;
+  string started_at = 6;
+  string lock_file = 7;
+  string channel = 8;
+  string interaction_log_file = 9;
+  string state_file = 10;
+  string log_file = 11;
+  string workdir = 12;
+  string status = 13;
+}
+
+message SessionsRequest {
+  string repo_root = 1;
+  int32 limit = 2;
+}
+
+message SessionItem {
+  string session_key = 1;
+  string session_id = 2;
+  string channel = 3;
+  string sender = 4;
+  string sender_name = 5;
+  string thread_id = 6;
+  string last_message = 7;
+  string last_time = 8;
+  bool latest = 9;
+}
+
+message SessionsResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated SessionItem items = 3;
+}
+
+message SendToSessionRequest {
+  string repo_root = 1;
+  string session_key = 2;
+  string text = 3;
+  string message_id = 4;
+  string msg_type = 5;
+  bool dry_run = 6;
+  string source = 7;
+}
+
+message SendToSessionResponse {
+  bool ok = 1;
+  string error = 2;
+  string channel = 3;
+  string to = 4;
+  string message_id = 5;
+  string msg_type = 6;
+  bool dry_run = 7;
+  string source = 8;
+  string session_key = 9;
+  string session_id = 10;
+  string result = 11;
+  int32 elapsed_sec = 12;
+}
+
+message SessionMessagesRequest {
+  string repo_root = 1;
+  string session_key = 2;
+}
+
+message ChatMessage {
+  string id = 1;
+  string source_msg_id = 2;
+  string role = 3;
+  string text = 4;
+  string time = 5;
+  string status = 6;
+  string status_detail = 7;
+}
+
+message ProcessEvent {
+  string id = 1;
+  string time = 2;
+  string title = 3;
+  string detail = 4;
+}
+
+message TimelineEntry {
+  string msg_id = 1;
+  repeated ProcessEvent events = 2;
+}
+
+message SessionMessagesResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated ChatMessage messages = 3;
+  repeated TimelineEntry timeline = 4;
+}
+
+message SessionKeyRequest {
+  string repo_root = 1;
+  string session_key = 2;
+}
+
+message SessionMutationResponse {
+  bool ok = 1;
+  string error = 2;
+  string session_key = 3;
+}
+
+message EmptyRepoRequest {
+  string repo_root = 1;
+}
+
+message HealthCheckRequest {
+  string repo_root = 1;
+  bool include_paths = 2;
+}
+
+message HealthCheckItem {
+  string key = 1;
+  bool ok = 2;
+  string detail = 3;
+  string suggestion = 4;
+}
+
+message HealthCheckResponse {
+  bool ok = 1;
+  string error = 2;
+  string action = 3;
+  string status = 4;
+  string channel = 5;
+  repeated HealthCheckItem items = 6;
+}
+
+service GatewayControl {
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Sessions(SessionsRequest) returns (SessionsResponse);
+  rpc Start(StatusRequest) returns (StatusResponse);
+  rpc Stop(StatusRequest) returns (StatusResponse);
+  rpc Restart(StatusRequest) returns (StatusResponse);
+  rpc Health(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Doctor(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc SendToSession(SendToSessionRequest) returns (SendToSessionResponse);
+  rpc SessionMessages(SessionMessagesRequest) returns (SessionMessagesResponse);
+  rpc ClearSession(SessionKeyRequest) returns (SessionMutationResponse);
+  rpc DeleteSession(SessionKeyRequest) returns (SessionMutationResponse);
+  rpc DeleteAllSessions(EmptyRepoRequest) returns (SessionMutationResponse);
+}

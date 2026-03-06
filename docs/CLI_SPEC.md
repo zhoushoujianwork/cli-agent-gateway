@@ -16,8 +16,16 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
 - `restart`
 - `config [workdir]`
 - `status [--json]`
+- `gatewayd [--listen <addr>]`
+- `gatewayd-up [--json]`
+- `gatewayd-down [--json]`
 - `health [--json]`
-- `send --to <id> (--text <msg> | --file <path>) [--msgtype text|markdown] [--channel <name>] [--message-id <id>] [--report-file <path>] [--dry-run] [--json]`
+- `send (--to <id> | --session-key <key>) (--text <msg> | --file <path>) [--msgtype text|markdown] [--channel <name>] [--message-id <id>] [--report-file <path>] [--dry-run] [--json]`
+- `sessions [--limit <n>] [--json]`
+- `messages --session-key <key> [--json]`
+- `session-clear --session-key <key> [--json]`
+- `session-delete --session-key <key> [--json]`
+- `sessions-delete-all [--json]`
 - `actions`
 - `help`
 
@@ -29,6 +37,8 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
   - Else fallback to parent when parent has `.env`.
 - Missing `.env` for runtime commands (`run`, `start`, `send`) is fatal.
 - `run` does not accept positional workdir arg.
+- `status/start/stop/restart/health/doctor/sessions/send(--session-key)/messages/session-*` 仅通过 gRPC 控制面访问 `gatewayd`。
+- CLI 会在 gRPC 调用前自动确保 `gatewayd` 在线（必要时自动拉起）；不做本地业务回退。
 
 ## Exit codes
 
@@ -127,6 +137,10 @@ Field rules:
 - `dry_run` (`bool`, required)
 - `source` (`string`, required; `text` or `file`)
 - `error` (`string`, optional; present on failure)
+- `session_key` (`string`, optional; present when using `--session-key`)
+- `session_id` (`string`, optional)
+- `result` (`string`, optional; agent summary for session-path send)
+- `elapsed_sec` (`number`, optional; session-path execution elapsed)
 
 Semantics:
 
@@ -155,7 +169,7 @@ Semantics:
 
 Required:
 
-- `--to`
+- `--to` 或 `--session-key`（二选一，`--session-key` 用于 GUI/会话内执行）
 - exactly one source: `--text` or `--file`
 
 Optional:
@@ -170,6 +184,68 @@ Optional:
 Defaulting:
 
 - For `dingtalk`, `--to` can fallback to `DINGTALK_DEFAULT_TO_USER`.
+
+### `gatewayd`
+
+- `--listen`: gRPC 监听地址（默认读取 `GATEWAYD_ADDR`，再回退 `127.0.0.1:58473`）。
+- 当前开放 RPC：
+  - `Status`
+  - `Start`
+  - `Stop`
+  - `Restart`
+  - `Health`
+  - `Doctor`
+  - `Sessions`
+  - `SendToSession`
+  - `SessionMessages`
+  - `ClearSession`
+  - `DeleteSession`
+  - `DeleteAllSessions`
+
+### 会话一致性约束
+
+- GUI 依赖的会话读写命令（`sessions/messages/send --session-key/session-*`）必须在 `gatewayd` 运行时执行。
+- 若 `gatewayd` 不可达，CLI 返回非 0，并在 JSON 中输出 `error.code=gateway_unreachable`。
+
+### `messages --json`
+
+Output object:
+
+```json
+{
+  "ok": true,
+  "action": "messages",
+  "session_key": "sess_xxx",
+  "messages": [],
+  "timeline": []
+}
+```
+
+Field rules:
+
+- `ok` (`bool`, required)
+- `action` (`string`, required, fixed `messages`)
+- `session_key` (`string`, required)
+- `messages` (`array`, required)
+- `timeline` (`array`, required)
+
+### `session-clear` / `session-delete` / `sessions-delete-all --json`
+
+Output object:
+
+```json
+{
+  "ok": true,
+  "action": "session-clear",
+  "session_key": "sess_xxx"
+}
+```
+
+Field rules:
+
+- `ok` (`bool`, required)
+- `action` (`string`, required)
+- `session_key` (`string`, optional for `sessions-delete-all`)
 
 ## Compatibility policy
 

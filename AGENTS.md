@@ -33,10 +33,19 @@ This file provides practical instructions for human and AI agents working in thi
 
 - Run gateway:
   - `make run`
+- Manage gateway lifecycle:
+  - `cd src && go run ./cmd/gateway-cli start`
+  - `cd src && go run ./cmd/gateway-cli stop`
+  - `cd src && go run ./cmd/gateway-cli restart`
 - Build CLI:
   - `make build`
+- Run health diagnostics:
+  - `cd src && go run ./cmd/gateway-cli health --json`
+  - `cd src && go run ./cmd/gateway-cli doctor --json`
 - Check single-instance lock status:
   - `cd src && go run ./cmd/gateway-cli status`
+- Build and open macOS GUI app:
+  - `make gui-open`
 
 ## Coding Guidelines
 
@@ -76,6 +85,8 @@ Before finishing a change, run at least:
 
 1. `cd src && go test ./...`
 2. Relevant smoke run for touched flows (for example `make run`, or channel mocks).
+   - For control-plane/lifecycle changes, also smoke-run:
+   - `cd src && go run ./cmd/gateway-cli start && go run ./cmd/gateway-cli status --json && go run ./cmd/gateway-cli stop`
 3. Verify docs/env examples if behavior or config changed.
 
 ## Documentation Expectations

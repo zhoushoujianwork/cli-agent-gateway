@@ -2,7 +2,8 @@ package main
 
 import (
 	"bufio"
-	"crypto/sha256"
+	"crypto/sha1"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -23,6 +24,8 @@ import (
 	"cli-agent-gateway/internal/infra/envfile"
 	"cli-agent-gateway/internal/infra/lockfile"
 	"cli-agent-gateway/internal/storage"
+
+	_ "modernc.org/sqlite"
 )
 
 type HealthItem struct {
@@ -54,14 +57,18 @@ type StatusPayload struct {
 }
 
 type SendPayload struct {
-	OK        bool   `json:"ok"`
-	Channel   string `json:"channel"`
-	To        string `json:"to"`
-	MessageID string `json:"message_id"`
-	MsgType   string `json:"msg_type"`
-	DryRun    bool   `json:"dry_run"`
-	Source    string `json:"source"`
-	Error     string `json:"error,omitempty"`
+	OK         bool   `json:"ok"`
+	Channel    string `json:"channel"`
+	To         string `json:"to"`
+	MessageID  string `json:"message_id"`
+	MsgType    string `json:"msg_type"`
+	DryRun     bool   `json:"dry_run"`
+	Source     string `json:"source"`
+	SessionKey string `json:"session_key,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	Result     string `json:"result,omitempty"`
+	ElapsedSec int    `json:"elapsed_sec,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 type SessionsItem struct {
@@ -73,6 +80,7 @@ type SessionsItem struct {
 	ThreadID    string `json:"thread_id"`
 	LastMessage string `json:"last_message"`
 	LastTime    string `json:"last_time"`
+	Latest      bool   `json:"latest,omitempty"`
 }
 
 type SessionsPayload struct {
@@ -117,6 +125,20 @@ func main() {
 		os.Exit(runSend(repoRoot, args))
 	case "sessions":
 		os.Exit(runSessions(repoRoot, args))
+	case "messages":
+		os.Exit(runMessages(repoRoot, args))
+	case "session-clear":
+		os.Exit(runSessionClear(repoRoot, args))
+	case "session-delete":
+		os.Exit(runSessionDelete(repoRoot, args))
+	case "sessions-delete-all":
+		os.Exit(runSessionsDeleteAll(repoRoot, args))
+	case "gatewayd":
+		os.Exit(runGatewayd(repoRoot, args))
+	case "gatewayd-up":
+		os.Exit(runGatewaydUp(repoRoot, args))
+	case "gatewayd-down":
+		os.Exit(runGatewaydDown(repoRoot, args))
 	case "actions":
 		printActions(os.Stdout)
 	case "help", "-h", "--help":
@@ -139,6 +161,13 @@ func printActions(out *os.File) {
 	fmt.Fprintln(out, "doctor")
 	fmt.Fprintln(out, "send")
 	fmt.Fprintln(out, "sessions")
+	fmt.Fprintln(out, "messages")
+	fmt.Fprintln(out, "session-clear")
+	fmt.Fprintln(out, "session-delete")
+	fmt.Fprintln(out, "sessions-delete-all")
+	fmt.Fprintln(out, "gatewayd")
+	fmt.Fprintln(out, "gatewayd-up")
+	fmt.Fprintln(out, "gatewayd-down")
 	fmt.Fprintln(out, "actions")
 	fmt.Fprintln(out, "help")
 }
@@ -157,6 +186,13 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
 	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run)")
 	fmt.Fprintln(out, "  sessions [--json]   List sessions for GUI")
+	fmt.Fprintln(out, "  messages [--json]   List messages for a session (--session-key)")
+	fmt.Fprintln(out, "  session-clear       Clear session map entry (--session-key)")
+	fmt.Fprintln(out, "  session-delete      Delete session map entry (--session-key)")
+	fmt.Fprintln(out, "  sessions-delete-all Delete all session map entries")
+	fmt.Fprintln(out, "  gatewayd [opts]     Run gRPC control plane server")
+	fmt.Fprintln(out, "  gatewayd-up         Ensure gRPC control plane is running")
+	fmt.Fprintln(out, "  gatewayd-down       Stop managed gRPC control plane process")
 	fmt.Fprintln(out, "  actions             Print supported action names")
 	fmt.Fprintln(out, "  help                Show this message")
 }
@@ -203,11 +239,15 @@ func runGoMain(repoRoot string, args []string) int {
 		return 2
 	}
 	defer lock.Close()
+	runtimeLogFile := strings.TrimSpace(os.Getenv("GATEWAY_LOG_FILE"))
+	if runtimeLogFile == "" {
+		runtimeLogFile = resolveLogPath(repoRoot, nil)
+	}
 	_ = lock.WriteMetadata(map[string]any{
 		"workdir":    cfg.Workdir,
 		"lock_file":  cfg.LockFile,
 		"channel":    cfg.ChannelType,
-		"log_file":   resolveLogPath(repoRoot, nil),
+		"log_file":   runtimeLogFile,
 		"started_at": time.Now().UTC().Format(time.RFC3339),
 	})
 
@@ -269,6 +309,65 @@ func runGoConfig(repoRoot string, args []string) int {
 
 func runStatus(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
+	if !grpcDisabled() {
+		grpc, err := tryStatusViaGRPC(repoRoot)
+		if err != nil {
+			if jsonOut {
+				printJSONActionError("status", "gateway_unreachable", formatGatewayUnavailable(err))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "status failed: %s\n", formatGatewayUnavailable(err))
+			return 1
+		}
+		if !grpc.GetOk() {
+			if jsonOut {
+				printJSONActionError("status", "grpc_status_failed", grpc.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "status failed: %s\n", grpc.GetError())
+			return 1
+		}
+		payload := StatusPayload{
+			Running:   grpc.GetRunning(),
+			StartedAt: grpc.GetStartedAt(),
+			LockFile:  grpc.GetLockFile(),
+			Metadata:  map[string]any{},
+		}
+		if grpc.GetHasPid() {
+			pid := int(grpc.GetPid())
+			payload.PID = &pid
+		}
+		payload.Metadata["channel"] = grpc.GetChannel()
+		payload.Metadata["workdir"] = grpc.GetWorkdir()
+		payload.Metadata["log_file"] = grpc.GetLogFile()
+		payload.Metadata["lock_file"] = grpc.GetLockFile()
+		if grpc.GetHasPid() {
+			payload.Metadata["pid"] = grpc.GetPid()
+		}
+		if strings.TrimSpace(grpc.GetStartedAt()) != "" {
+			payload.Metadata["started_at"] = grpc.GetStartedAt()
+		}
+		cfg, _ := config.Load(repoRoot, "")
+		if jsonOut {
+			printJSON(statusJSON("status", payload, cfg, grpc.GetLogFile()))
+			return 0
+		}
+		if payload.Running {
+			pid := "unknown"
+			if payload.PID != nil {
+				pid = fmt.Sprintf("%d", *payload.PID)
+			}
+			started := payload.StartedAt
+			if strings.TrimSpace(started) == "" {
+				started = "unknown"
+			}
+			fmt.Printf("RUNNING pid=%s started_at=%s lock=%s\n", pid, started, payload.LockFile)
+			return 0
+		}
+		fmt.Printf("NOT_RUNNING lock=%s\n", payload.LockFile)
+		return 0
+	}
+
 	payload, err := getStatusPayload(repoRoot)
 	if err != nil {
 		if jsonOut {
@@ -301,6 +400,48 @@ func runStatus(repoRoot string, args []string) int {
 
 func runStart(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
+	if !grpcDisabled() {
+		requestedLog := strings.TrimSpace(flagValue(args, "--log-file"))
+		grpcRes, gerr := tryStartViaGRPC(repoRoot, requestedLog)
+		if gerr != nil {
+			if jsonOut {
+				printJSONActionError("start", "gateway_unreachable", formatGatewayUnavailable(gerr))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "start failed: %s\n", formatGatewayUnavailable(gerr))
+			return 1
+		}
+		if !grpcRes.GetOk() {
+			if jsonOut {
+				printJSONActionError("start", "grpc_start_failed", grpcRes.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "start failed: %s\n", grpcRes.GetError())
+			return 1
+		}
+		payload := StatusPayload{
+			Running:   grpcRes.GetRunning(),
+			StartedAt: grpcRes.GetStartedAt(),
+			LockFile:  grpcRes.GetLockFile(),
+			Metadata:  map[string]any{},
+		}
+		if grpcRes.GetHasPid() {
+			pid := int(grpcRes.GetPid())
+			payload.PID = &pid
+		}
+		payload.Metadata["channel"] = grpcRes.GetChannel()
+		payload.Metadata["workdir"] = grpcRes.GetWorkdir()
+		payload.Metadata["log_file"] = grpcRes.GetLogFile()
+		payload.Metadata["lock_file"] = grpcRes.GetLockFile()
+		cfg, _ := config.Load(repoRoot, "")
+		if jsonOut {
+			printJSON(statusJSON("start", payload, cfg, grpcRes.GetLogFile()))
+		} else {
+			fmt.Printf("started lock=%s log=%s\n", payload.LockFile, nonEmpty(strings.TrimSpace(grpcRes.GetLogFile()), resolveLogPath(repoRoot, nil)))
+		}
+		return 0
+	}
+
 	envPath := filepath.Join(repoRoot, ".env")
 	if _, err := os.Stat(envPath); err != nil {
 		if jsonOut {
@@ -404,8 +545,62 @@ func runStart(repoRoot string, args []string) int {
 
 func runStop(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
-	cfg, _ := config.Load(repoRoot, "")
 	quiet := hasFlag(args, "--quiet")
+	cfg, _ := config.Load(repoRoot, "")
+	if !grpcDisabled() {
+		grpcRes, gerr := tryStopViaGRPC(repoRoot, quiet)
+		if gerr != nil {
+			if jsonOut {
+				printJSONActionError("stop", "gateway_unreachable", formatGatewayUnavailable(gerr))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "stop failed: %s\n", formatGatewayUnavailable(gerr))
+			return 1
+		}
+		if !grpcRes.GetOk() {
+			if jsonOut {
+				printJSONActionError("stop", "grpc_stop_failed", grpcRes.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "stop failed: %s\n", grpcRes.GetError())
+			return 1
+		}
+		if quiet {
+			return 0
+		}
+		payload := StatusPayload{
+			Running:   grpcRes.GetRunning(),
+			StartedAt: grpcRes.GetStartedAt(),
+			LockFile:  grpcRes.GetLockFile(),
+			Metadata:  map[string]any{},
+		}
+		if grpcRes.GetHasPid() {
+			pid := int(grpcRes.GetPid())
+			payload.PID = &pid
+		}
+		payload.Metadata["channel"] = grpcRes.GetChannel()
+		payload.Metadata["workdir"] = grpcRes.GetWorkdir()
+		payload.Metadata["log_file"] = grpcRes.GetLogFile()
+		payload.Metadata["lock_file"] = grpcRes.GetLockFile()
+		if jsonOut {
+			printJSON(statusJSON("stop", payload, cfg, grpcRes.GetLogFile()))
+		} else if !payload.Running {
+			if payload.PID != nil && *payload.PID > 0 {
+				fmt.Printf("stopped pid=%d lock=%s\n", *payload.PID, payload.LockFile)
+			} else {
+				fmt.Printf("stopped lock=%s\n", payload.LockFile)
+			}
+		} else {
+			if payload.PID != nil && *payload.PID > 0 {
+				fmt.Printf("stop requested but still running pid=%d\n", *payload.PID)
+			} else {
+				fmt.Printf("stop requested but still running lock=%s\n", payload.LockFile)
+			}
+			return 1
+		}
+		return 0
+	}
+
 	payload, err := getStatusPayload(repoRoot)
 	if err != nil {
 		if jsonOut {
@@ -493,6 +688,48 @@ func runStop(repoRoot string, args []string) int {
 
 func runRestart(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
+	if !grpcDisabled() {
+		requestedLog := strings.TrimSpace(flagValue(args, "--log-file"))
+		grpcRes, gerr := tryRestartViaGRPC(repoRoot, requestedLog)
+		if gerr != nil {
+			if jsonOut {
+				printJSONActionError("restart", "gateway_unreachable", formatGatewayUnavailable(gerr))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "restart failed: %s\n", formatGatewayUnavailable(gerr))
+			return 1
+		}
+		if !grpcRes.GetOk() {
+			if jsonOut {
+				printJSONActionError("restart", "grpc_restart_failed", grpcRes.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "restart failed: %s\n", grpcRes.GetError())
+			return 1
+		}
+		payload := StatusPayload{
+			Running:   grpcRes.GetRunning(),
+			StartedAt: grpcRes.GetStartedAt(),
+			LockFile:  grpcRes.GetLockFile(),
+			Metadata:  map[string]any{},
+		}
+		if grpcRes.GetHasPid() {
+			pid := int(grpcRes.GetPid())
+			payload.PID = &pid
+		}
+		payload.Metadata["channel"] = grpcRes.GetChannel()
+		payload.Metadata["workdir"] = grpcRes.GetWorkdir()
+		payload.Metadata["log_file"] = grpcRes.GetLogFile()
+		payload.Metadata["lock_file"] = grpcRes.GetLockFile()
+		cfg, _ := config.Load(repoRoot, "")
+		if jsonOut {
+			printJSON(statusJSON("restart", payload, cfg, grpcRes.GetLogFile()))
+		} else {
+			fmt.Printf("restarted lock=%s log=%s\n", payload.LockFile, nonEmpty(strings.TrimSpace(grpcRes.GetLogFile()), resolveLogPath(repoRoot, nil)))
+		}
+		return 0
+	}
+
 	if !jsonOut {
 		if code := runStop(repoRoot, args); code != 0 {
 			return code
@@ -582,6 +819,56 @@ func runRestart(repoRoot string, args []string) int {
 
 func runHealth(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
+	if !grpcDisabled() {
+		grpcRes, gerr := tryHealthViaGRPC(repoRoot, false)
+		if gerr != nil {
+			if jsonOut {
+				printJSONActionError("health", "gateway_unreachable", formatGatewayUnavailable(gerr))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "health failed: %s\n", formatGatewayUnavailable(gerr))
+			return 1
+		}
+		if !grpcRes.GetOk() && len(grpcRes.GetItems()) == 0 && strings.TrimSpace(grpcRes.GetError()) != "" {
+			if jsonOut {
+				printJSONActionError("health", "grpc_health_failed", grpcRes.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "health failed: %s\n", grpcRes.GetError())
+			return 1
+		}
+		p := HealthPayload{
+			OK:      grpcRes.GetOk(),
+			Action:  nonEmpty(strings.TrimSpace(grpcRes.GetAction()), "health"),
+			Status:  nonEmpty(strings.TrimSpace(grpcRes.GetStatus()), "unhealthy"),
+			Channel: strings.TrimSpace(grpcRes.GetChannel()),
+			Items:   make([]HealthItem, 0, len(grpcRes.GetItems())),
+		}
+		for _, it := range grpcRes.GetItems() {
+			p.Items = append(p.Items, HealthItem{
+				Key:        it.GetKey(),
+				OK:         it.GetOk(),
+				Detail:     it.GetDetail(),
+				Suggestion: it.GetSuggestion(),
+			})
+		}
+		if jsonOut {
+			printJSON(p)
+		} else {
+			for _, it := range p.Items {
+				if it.OK {
+					fmt.Printf("[OK] %s: %s\n", it.Key, it.Detail)
+				} else {
+					fmt.Printf("[FAIL] %s: %s\n", it.Key, it.Detail)
+				}
+			}
+		}
+		if p.OK {
+			return 0
+		}
+		return 1
+	}
+
 	p := buildHealthPayload(repoRoot, "health", false)
 	if jsonOut {
 		printJSON(p)
@@ -602,6 +889,56 @@ func runHealth(repoRoot string, args []string) int {
 
 func runDoctor(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
+	if !grpcDisabled() {
+		grpcRes, gerr := tryDoctorViaGRPC(repoRoot, true)
+		if gerr != nil {
+			if jsonOut {
+				printJSONActionError("doctor", "gateway_unreachable", formatGatewayUnavailable(gerr))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "doctor failed: %s\n", formatGatewayUnavailable(gerr))
+			return 1
+		}
+		if !grpcRes.GetOk() && len(grpcRes.GetItems()) == 0 && strings.TrimSpace(grpcRes.GetError()) != "" {
+			if jsonOut {
+				printJSONActionError("doctor", "grpc_doctor_failed", grpcRes.GetError())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "doctor failed: %s\n", grpcRes.GetError())
+			return 1
+		}
+		p := HealthPayload{
+			OK:      grpcRes.GetOk(),
+			Action:  nonEmpty(strings.TrimSpace(grpcRes.GetAction()), "doctor"),
+			Status:  nonEmpty(strings.TrimSpace(grpcRes.GetStatus()), "unhealthy"),
+			Channel: strings.TrimSpace(grpcRes.GetChannel()),
+			Items:   make([]HealthItem, 0, len(grpcRes.GetItems())),
+		}
+		for _, it := range grpcRes.GetItems() {
+			p.Items = append(p.Items, HealthItem{
+				Key:        it.GetKey(),
+				OK:         it.GetOk(),
+				Detail:     it.GetDetail(),
+				Suggestion: it.GetSuggestion(),
+			})
+		}
+		if jsonOut {
+			printJSON(p)
+		} else {
+			for _, it := range p.Items {
+				if it.OK {
+					fmt.Printf("[OK] %s: %s\n", it.Key, it.Detail)
+				} else {
+					fmt.Printf("[FAIL] %s: %s\n", it.Key, it.Detail)
+				}
+			}
+		}
+		if p.OK {
+			return 0
+		}
+		return 1
+	}
+
 	p := buildHealthPayload(repoRoot, "doctor", true)
 	if jsonOut {
 		printJSON(p)
@@ -631,6 +968,7 @@ func runSend(repoRoot string, args []string) int {
 	text := fs.String("text", "", "message text")
 	fileInput := fs.String("file", "", "read message body from file")
 	to := fs.String("to", "", "target receiver/user")
+	sessionKey := fs.String("session-key", "", "execute in an existing session key (GUI)")
 	sessionWebhook := fs.String("session-webhook", "", "dingtalk session webhook URL for in-thread reply")
 	channelOverride := fs.String("channel", "", "channel override: command|dingtalk|imessage")
 	msgType := fs.String("msgtype", "text", "message type: text|markdown")
@@ -715,11 +1053,55 @@ func runSend(repoRoot string, args []string) int {
 		}()
 	}
 
+	key := strings.TrimSpace(*sessionKey)
+	if key != "" {
+		key = normalizeSessionKey(key)
+		msgID := strings.TrimSpace(*messageID)
+		if msgID == "" {
+			msgID = fmt.Sprintf("manual-%d", time.Now().UnixMilli())
+		}
+		grpcRes, gerr := trySendToSessionViaGRPC(repoRoot, key, body, msgID, mt, *dryRun, source)
+		if gerr != nil {
+			if *jsonOut {
+				printJSONActionError("send", "gateway_unreachable", formatGatewayUnavailable(gerr))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "send failed: %s\n", formatGatewayUnavailable(gerr))
+			return 1
+		}
+		payload := SendPayload{
+			OK:         grpcRes.GetOk(),
+			Channel:    grpcRes.GetChannel(),
+			To:         grpcRes.GetTo(),
+			MessageID:  grpcRes.GetMessageId(),
+			MsgType:    grpcRes.GetMsgType(),
+			DryRun:     grpcRes.GetDryRun(),
+			Source:     grpcRes.GetSource(),
+			SessionKey: grpcRes.GetSessionKey(),
+			SessionID:  grpcRes.GetSessionId(),
+			Result:     grpcRes.GetResult(),
+			ElapsedSec: int(grpcRes.GetElapsedSec()),
+			Error:      grpcRes.GetError(),
+		}
+		if *jsonOut {
+			printJSON(payload)
+		} else if payload.OK {
+			fmt.Printf("session-sent key=%s message_id=%s status=%s elapsed=%ds\n", payload.SessionKey, payload.MessageID, nonEmpty(payload.Result, "ok"), payload.ElapsedSec)
+		} else {
+			fmt.Fprintf(os.Stderr, "send failed: %s\n", payload.Error)
+		}
+		if payload.OK {
+			return 0
+		}
+		return 1
+	}
+
 	cfg, err := config.Load(repoRoot, "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
 		return 1
 	}
+
 	channel := buildChannelAdapter(cfg)
 
 	target := strings.TrimSpace(*to)
@@ -775,6 +1157,291 @@ func runSend(repoRoot string, args []string) int {
 	return 0
 }
 
+func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string, dryRun bool) (SendPayload, error) {
+	items, err := collectSessions(cfg)
+	if err != nil {
+		return SendPayload{
+			OK:         false,
+			Channel:    cfg.ChannelType,
+			To:         "-",
+			MessageID:  msgID,
+			MsgType:    mt,
+			DryRun:     dryRun,
+			Source:     source,
+			SessionKey: key,
+			Error:      err.Error(),
+		}, err
+	}
+	var sess *SessionsItem
+	for i := range items {
+		if items[i].SessionKey == key {
+			sess = &items[i]
+			break
+		}
+	}
+	if sess == nil {
+		err := fmt.Errorf("session not found for key=%s", key)
+		return SendPayload{
+			OK:         false,
+			Channel:    cfg.ChannelType,
+			To:         "-",
+			MessageID:  msgID,
+			MsgType:    mt,
+			DryRun:     dryRun,
+			Source:     source,
+			SessionKey: key,
+			Error:      err.Error(),
+		}, err
+	}
+
+	store, err := storage.NewBackend(
+		cfg.StorageBackend,
+		cfg.StateFile,
+		cfg.InteractionLogFile,
+		cfg.ReportDir,
+		cfg.StorageSQLitePath,
+	)
+	if err != nil {
+		return SendPayload{
+			OK:         false,
+			Channel:    nonEmpty(sess.Channel, cfg.ChannelType),
+			To:         nonEmpty(sess.Sender, "-"),
+			MessageID:  msgID,
+			MsgType:    mt,
+			DryRun:     dryRun,
+			Source:     source,
+			SessionKey: key,
+			Error:      err.Error(),
+		}, err
+	}
+	st, err := store.LoadState()
+	if err != nil {
+		return SendPayload{
+			OK:         false,
+			Channel:    nonEmpty(sess.Channel, cfg.ChannelType),
+			To:         nonEmpty(sess.Sender, "-"),
+			MessageID:  msgID,
+			MsgType:    mt,
+			DryRun:     dryRun,
+			Source:     source,
+			SessionKey: key,
+			Error:      err.Error(),
+		}, err
+	}
+	sessionID := strings.TrimSpace(st.SessionMap[key])
+	if sessionID == "" {
+		cached := strings.TrimSpace(sess.SessionID)
+		if cached != "-" {
+			sessionID = cached
+		}
+	}
+
+	payload := SendPayload{
+		OK:         true,
+		Channel:    nonEmpty(sess.Channel, cfg.ChannelType),
+		To:         nonEmpty(sess.Sender, "-"),
+		MessageID:  msgID,
+		MsgType:    mt,
+		DryRun:     dryRun,
+		Source:     source,
+		SessionKey: key,
+		SessionID:  sessionID,
+	}
+	if dryRun {
+		return payload, nil
+	}
+
+	agentWorkdir := strings.TrimSpace(cfg.Workdir)
+	if agentWorkdir == "" {
+		agentWorkdir = cfg.RepoRoot
+	}
+	if _, err := os.Stat(agentWorkdir); err != nil {
+		fallback := strings.TrimSpace(cfg.RepoRoot)
+		if fallback != "" {
+			if _, fbErr := os.Stat(fallback); fbErr == nil {
+				agentWorkdir = fallback
+			}
+		}
+	}
+	if _, err := os.Stat(agentWorkdir); err != nil {
+		payload.OK = false
+		payload.Error = fmt.Sprintf("invalid workdir: %s", agentWorkdir)
+		return payload, err
+	}
+
+	agent := acp.NewAdapter(
+		cfg.ACPAgentCmd,
+		agentWorkdir,
+		cfg.PermissionPolicy,
+		cfg.TimeoutSec,
+		cfg.InitializeTimeoutSec,
+		cfg.SessionNewTimeoutSec,
+		cfg.SessionNewRetries,
+		cfg.SessionNewBackoffSec,
+	)
+	defer agent.Close()
+
+	threadID := strings.TrimSpace(sess.ThreadID)
+	if threadID == "-" {
+		threadID = ""
+	}
+	senderName := strings.TrimSpace(sess.SenderName)
+	if senderName == "" || senderName == "-" {
+		senderName = strings.TrimSpace(sess.Sender)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	userProfile := map[string]any{
+		"channel":     nonEmpty(sess.Channel, cfg.ChannelType),
+		"sender":      nonEmpty(sess.Sender, "-"),
+		"sender_name": nonEmpty(senderName, nonEmpty(sess.Sender, "-")),
+		"thread_id":   threadID,
+	}
+	_ = store.AppendInteraction(map[string]any{
+		"kind":         "inbound_received",
+		"msg_id":       msgID,
+		"sender":       nonEmpty(sess.Sender, "-"),
+		"text":         body,
+		"time":         now,
+		"user_profile": userProfile,
+		"message_metadata": map[string]any{
+			"source": "gui",
+		},
+	})
+	_ = store.AppendInteraction(map[string]any{
+		"kind":        "trace",
+		"stage":       "session_resolved",
+		"msg_id":      msgID,
+		"session_key": key,
+		"session_id":  sessionID,
+		"ts":          now,
+	})
+
+	req := core.TaskRequest{
+		TraceID:    traceIDForSend(msgID),
+		SessionKey: key,
+		UserText:   body,
+		Sender:     nonEmpty(sess.Sender, "-"),
+		Channel:    nonEmpty(sess.Channel, cfg.ChannelType),
+		ThreadID:   threadID,
+		SessionID:  sessionID,
+		Metadata: map[string]any{
+			"received_ts": now,
+			"message_id":  msgID,
+			"workdir":     agentWorkdir,
+			"source":      "gui",
+			"sender_name": senderName,
+		},
+	}
+	_ = store.AppendInteraction(map[string]any{
+		"kind":       "trace",
+		"stage":      "execute_start",
+		"msg_id":     msgID,
+		"session_id": req.SessionID,
+		"trace_id":   req.TraceID,
+		"ts":         time.Now().UTC().Format(time.RFC3339),
+	})
+	result, execErr := agent.Execute(req)
+	if execErr != nil {
+		errText := fmt.Sprintf("执行失败: %v", execErr)
+		_ = store.AppendInteraction(map[string]any{
+			"msg_id":       msgID,
+			"error":        errText,
+			"ts":           time.Now().UTC().Format(time.RFC3339),
+			"user_profile": userProfile,
+		})
+		payload.OK = false
+		payload.Error = errText
+		return payload, execErr
+	}
+
+	_ = store.AppendInteraction(map[string]any{
+		"kind":       "trace",
+		"stage":      "execute_done",
+		"msg_id":     msgID,
+		"session_id": result.SessionID,
+		"status":     result.Status,
+		"elapsed_s":  result.ElapsedSec,
+		"ts":         time.Now().UTC().Format(time.RFC3339),
+	})
+	for i, ev := range result.RawEvents {
+		method := strings.TrimSpace(fmt.Sprint(ev["method"]))
+		event := "-"
+		if params, ok := ev["params"].(map[string]any); ok {
+			if su, ok := params["sessionUpdate"].(string); ok && strings.TrimSpace(su) != "" {
+				event = strings.TrimSpace(su)
+			}
+		}
+		_ = store.AppendInteraction(map[string]any{
+			"kind":   "trace",
+			"stage":  "acp_event",
+			"msg_id": msgID,
+			"index":  i + 1,
+			"method": nonEmpty(method, "-"),
+			"event":  event,
+			"ts":     time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+
+	if strings.TrimSpace(result.SessionID) != "" {
+		st.SessionMap[key] = strings.TrimSpace(result.SessionID)
+		if err := store.SaveState(st); err != nil {
+			payload.OK = false
+			payload.Error = err.Error()
+			return payload, err
+		}
+	}
+	reportPath, _ := store.WriteReport(map[string]any{
+		"message": core.InboundMessage{
+			ID:       msgID,
+			Sender:   req.Sender,
+			Text:     body,
+			TS:       now,
+			Channel:  req.Channel,
+			ThreadID: req.ThreadID,
+			Metadata: req.Metadata,
+		},
+		"request": req,
+		"result":  result,
+		"ts":      time.Now().UTC().Format(time.RFC3339),
+	}, msgID)
+	_ = store.AppendInteraction(map[string]any{
+		"kind":   "trace",
+		"stage":  "send_final_ok",
+		"msg_id": msgID,
+		"to":     nonEmpty(sess.Sender, "-"),
+		"ts":     time.Now().UTC().Format(time.RFC3339),
+	})
+	_ = store.AppendInteraction(map[string]any{
+		"msg_id":       msgID,
+		"sender":       nonEmpty(sess.Sender, "-"),
+		"text":         body,
+		"trace_id":     req.TraceID,
+		"session_id":   result.SessionID,
+		"result":       result.Summary,
+		"status":       result.Status,
+		"elapsed_sec":  result.ElapsedSec,
+		"report_file":  reportPath,
+		"ts":           time.Now().UTC().Format(time.RFC3339),
+		"user_profile": userProfile,
+	})
+
+	payload.SessionID = nonEmpty(strings.TrimSpace(result.SessionID), payload.SessionID)
+	payload.Result = strings.TrimSpace(result.Summary)
+	payload.ElapsedSec = result.ElapsedSec
+	return payload, nil
+}
+
+func traceIDForSend(msgID string) string {
+	m := strings.TrimSpace(msgID)
+	if m == "" {
+		m = fmt.Sprintf("msg-%d", time.Now().UnixNano())
+	}
+	if len(m) <= 8 {
+		return m
+	}
+	return m[:8]
+}
+
 func runSessions(repoRoot string, args []string) int {
 	fs := flag.NewFlagSet("sessions", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -783,26 +1450,36 @@ func runSessions(repoRoot string, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := config.Load(repoRoot, "")
+	grpc, err := trySessionsViaGRPC(repoRoot, *limit)
 	if err != nil {
 		if *jsonOut {
-			printJSONActionError("sessions", "config_load_failed", err.Error())
+			printJSONActionError("sessions", "gateway_unreachable", formatGatewayUnavailable(err))
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sessions failed: %s\n", formatGatewayUnavailable(err))
 		return 1
 	}
-	items, err := collectSessions(cfg)
-	if err != nil {
+	if !grpc.GetOk() {
 		if *jsonOut {
-			printJSONActionError("sessions", "collect_failed", err.Error())
+			printJSONActionError("sessions", "grpc_sessions_failed", grpc.GetError())
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "sessions failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sessions failed: %s\n", grpc.GetError())
 		return 1
 	}
-	if *limit > 0 && len(items) > *limit {
-		items = items[:*limit]
+	items := make([]SessionsItem, 0, len(grpc.GetItems()))
+	for _, it := range grpc.GetItems() {
+		items = append(items, SessionsItem{
+			SessionKey:  it.GetSessionKey(),
+			SessionID:   it.GetSessionId(),
+			Channel:     it.GetChannel(),
+			Sender:      it.GetSender(),
+			SenderName:  it.GetSenderName(),
+			ThreadID:    it.GetThreadId(),
+			LastMessage: it.GetLastMessage(),
+			LastTime:    it.GetLastTime(),
+			Latest:      it.GetLatest(),
+		})
 	}
 	if *jsonOut {
 		printJSON(SessionsPayload{OK: true, Action: "sessions", Items: items})
@@ -829,36 +1506,16 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 	sessionIDByKey := map[string]string{}
 	lastByKey := map[string]SessionsItem{}
 
-	sessionMap := map[string]string{}
-	if raw, err := os.ReadFile(cfg.StateFile); err == nil && len(raw) > 0 {
-		var node map[string]any
-		if json.Unmarshal(raw, &node) == nil {
-			if m, ok := node["session_map"].(map[string]any); ok {
-				for k, v := range m {
-					sessionMap[k] = strings.TrimSpace(fmt.Sprint(v))
-				}
-			}
-		}
-	}
-
-	f, err := os.Open(cfg.InteractionLogFile)
+	sessionMap, err := loadSessionMap(cfg)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return []SessionsItem{}, nil
-		}
 		return nil, err
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
-		}
+
+	records, err := loadInteractionRecords(cfg)
+	if err != nil {
+		return nil, err
+	}
+	for _, rec := range records {
 		kind := strings.TrimSpace(fmt.Sprint(rec["kind"]))
 		switch kind {
 		case "inbound_received":
@@ -914,10 +1571,6 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 			}
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return nil, err
-	}
-
 	for msgID, in := range inboundByMsg {
 		key := sessionKeyByMsg[msgID]
 		if key == "" {
@@ -927,7 +1580,7 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 		if !ok || in.ts >= prev.LastTime {
 			lastByKey[key] = SessionsItem{
 				SessionKey:  key,
-				SessionID:   nonEmpty(sessionIDByKey[key], sessionMap[key]),
+				SessionID:   nonEmpty(sessionMap[key], sessionIDByKey[key]),
 				Channel:     nonEmpty(in.channel, "-"),
 				Sender:      nonEmpty(in.sender, "-"),
 				SenderName:  nonEmpty(in.senderName, nonEmpty(in.sender, "-")),
@@ -952,12 +1605,142 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].LastTime > items[j].LastTime
 	})
+	if len(items) > 0 {
+		items[0].Latest = true
+	}
 	return items, nil
+}
+
+func loadInteractionRecords(cfg config.AppConfig) ([]map[string]any, error) {
+	if strings.EqualFold(strings.TrimSpace(cfg.StorageBackend), "sqlite") {
+		return loadInteractionRecordsFromSQLite(cfg.StorageSQLitePath)
+	}
+	return loadInteractionRecordsFromFile(cfg.InteractionLogFile)
+}
+
+func loadInteractionRecordsFromFile(path string) ([]map[string]any, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []map[string]any{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	out := make([]map[string]any, 0, 512)
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func loadInteractionRecordsFromSQLite(dbPath string) ([]map[string]any, error) {
+	if strings.TrimSpace(dbPath) == "" {
+		return []map[string]any{}, nil
+	}
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT payload_json FROM interactions ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]map[string]any, 0, 1024)
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			continue
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func loadSessionMap(cfg config.AppConfig) (map[string]string, error) {
+	if strings.EqualFold(strings.TrimSpace(cfg.StorageBackend), "sqlite") {
+		store, err := storage.NewBackend(
+			cfg.StorageBackend,
+			cfg.StateFile,
+			cfg.InteractionLogFile,
+			cfg.ReportDir,
+			cfg.StorageSQLitePath,
+		)
+		if err != nil {
+			return nil, err
+		}
+		st, err := store.LoadState()
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]string{}
+		for k, v := range st.SessionMap {
+			k = strings.TrimSpace(k)
+			v = strings.TrimSpace(v)
+			if k == "" || v == "" {
+				continue
+			}
+			out[k] = v
+		}
+		return out, nil
+	}
+
+	out := map[string]string{}
+	raw, err := os.ReadFile(cfg.StateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return out, nil
+		}
+		return nil, err
+	}
+	var node map[string]any
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return nil, err
+	}
+	if m, ok := node["session_map"].(map[string]any); ok {
+		for k, v := range m {
+			key := strings.TrimSpace(k)
+			val := strings.TrimSpace(fmt.Sprint(v))
+			if key == "" || val == "" {
+				continue
+			}
+			out[key] = val
+		}
+	}
+	return out, nil
 }
 
 func buildSessionKey(channel, sender, threadID string) string {
 	raw := channel + "|" + sender + "|" + nonEmpty(threadID, "-")
-	sum := sha256.Sum256([]byte(raw))
+	sum := sha1.Sum([]byte(raw))
 	return "sess_" + hex.EncodeToString(sum[:])[:24]
 }
 
