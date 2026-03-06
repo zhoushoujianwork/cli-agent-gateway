@@ -57,18 +57,21 @@ type StatusPayload struct {
 }
 
 type SendPayload struct {
-	OK         bool   `json:"ok"`
-	Channel    string `json:"channel"`
-	To         string `json:"to"`
-	MessageID  string `json:"message_id"`
-	MsgType    string `json:"msg_type"`
-	DryRun     bool   `json:"dry_run"`
-	Source     string `json:"source"`
-	SessionKey string `json:"session_key,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
-	Result     string `json:"result,omitempty"`
-	ElapsedSec int    `json:"elapsed_sec,omitempty"`
-	Error      string `json:"error,omitempty"`
+	OK             bool   `json:"ok"`
+	Channel        string `json:"channel"`
+	To             string `json:"to"`
+	MessageID      string `json:"message_id"`
+	MsgType        string `json:"msg_type"`
+	DryRun         bool   `json:"dry_run"`
+	Source         string `json:"source"`
+	SessionKey     string `json:"session_key,omitempty"`
+	SessionID      string `json:"session_id"`
+	Result         string `json:"result,omitempty"`
+	RawOutput      string `json:"raw_output,omitempty"`
+	ResultJSON     any    `json:"result_json,omitempty"`
+	TerminalReason string `json:"terminal_reason"`
+	ElapsedSec     int    `json:"elapsed_sec"`
+	Error          string `json:"error,omitempty"`
 }
 
 type SessionsItem struct {
@@ -80,6 +83,9 @@ type SessionsItem struct {
 	ThreadID    string `json:"thread_id"`
 	LastMessage string `json:"last_message"`
 	LastTime    string `json:"last_time"`
+	Workdir     string `json:"workdir,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
+	Status      string `json:"status,omitempty"`
 	Latest      bool   `json:"latest,omitempty"`
 }
 
@@ -129,6 +135,8 @@ func main() {
 		os.Exit(runMessages(repoRoot, args))
 	case "session-clear":
 		os.Exit(runSessionClear(repoRoot, args))
+	case "session-new":
+		os.Exit(runSessionNew(repoRoot, args))
 	case "session-delete":
 		os.Exit(runSessionDelete(repoRoot, args))
 	case "sessions-delete-all":
@@ -162,6 +170,7 @@ func printActions(out *os.File) {
 	fmt.Fprintln(out, "send")
 	fmt.Fprintln(out, "sessions")
 	fmt.Fprintln(out, "messages")
+	fmt.Fprintln(out, "session-new")
 	fmt.Fprintln(out, "session-clear")
 	fmt.Fprintln(out, "session-delete")
 	fmt.Fprintln(out, "sessions-delete-all")
@@ -181,12 +190,14 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  stop                Stop running gateway process by lock owner pid")
 	fmt.Fprintln(out, "  restart             Stop then start")
 	fmt.Fprintln(out, "  start --log-file    Optional server log path for background runtime")
-	fmt.Fprintln(out, "  config [workdir]    Generate/update .env using Go-native defaults")
+	fmt.Fprintln(out, "  config [workdir]    Generate/update repo .env using Go-native defaults")
+	fmt.Fprintln(out, "  config --global     Generate/update ~/.cag/.env (gateway defaults)")
 	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
-	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run)")
+	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run, --workdir required for --session-key)")
 	fmt.Fprintln(out, "  sessions [--json]   List sessions for GUI")
 	fmt.Fprintln(out, "  messages [--json]   List messages for a session (--session-key)")
+	fmt.Fprintln(out, "  session-new         Create/update session metadata (--session-key --workdir)")
 	fmt.Fprintln(out, "  session-clear       Clear session map entry (--session-key)")
 	fmt.Fprintln(out, "  session-delete      Delete session map entry (--session-key)")
 	fmt.Fprintln(out, "  sessions-delete-all Delete all session map entries")
@@ -202,11 +213,6 @@ func runGoMain(repoRoot string, args []string) int {
 		fmt.Fprintln(os.Stderr, "run does not accept workdir arg; configure CODEX_WORKDIR in .env (use `cag config`)")
 		return 2
 	}
-	envPath := filepath.Join(repoRoot, ".env")
-	if _, err := os.Stat(envPath); err != nil {
-		panic(fmt.Sprintf(".env not found: %s", envPath))
-	}
-
 	workdir := ""
 	cfg, err := config.Load(repoRoot, workdir)
 	if err != nil {
@@ -297,7 +303,27 @@ func runGoMain(repoRoot string, args []string) int {
 }
 
 func runGoConfig(repoRoot string, args []string) int {
-	workdir := resolveWorkdir(repoRoot, args)
+	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	global := fs.Bool("global", false, "write user-level config to ~/.cag/.env")
+	gatewayAddr := fs.String("gatewayd-addr", "", "gatewayd address for ~/.cag/.env (used with --global)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *global {
+		if len(fs.Args()) > 0 {
+			fmt.Fprintln(os.Stderr, "config --global does not accept workdir argument")
+			return 2
+		}
+		path, err := config.WriteUserEnv(strings.TrimSpace(*gatewayAddr))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "write ~/.cag/.env failed: %v\n", err)
+			return 1
+		}
+		fmt.Printf("configured user env file: %s\n", path)
+		return 0
+	}
+	workdir := resolveWorkdir(repoRoot, fs.Args())
 	path, err := config.WriteDefaultEnv(repoRoot, workdir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "write .env failed: %v\n", err)
@@ -442,15 +468,6 @@ func runStart(repoRoot string, args []string) int {
 		return 0
 	}
 
-	envPath := filepath.Join(repoRoot, ".env")
-	if _, err := os.Stat(envPath); err != nil {
-		if jsonOut {
-			printJSONActionError("start", "env_missing", ".env not found")
-			return 1
-		}
-		fmt.Fprintf(os.Stderr, ".env not found: %s\n", envPath)
-		return 1
-	}
 	cfg, err := config.Load(repoRoot, "")
 	if err != nil {
 		if jsonOut {
@@ -958,17 +975,13 @@ func runDoctor(repoRoot string, args []string) int {
 }
 
 func runSend(repoRoot string, args []string) int {
-	envPath := filepath.Join(repoRoot, ".env")
-	if _, err := os.Stat(envPath); err != nil {
-		panic(fmt.Sprintf(".env not found: %s", envPath))
-	}
-
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	text := fs.String("text", "", "message text")
 	fileInput := fs.String("file", "", "read message body from file")
 	to := fs.String("to", "", "target receiver/user")
 	sessionKey := fs.String("session-key", "", "execute in an existing session key (GUI)")
+	workdirArg := fs.String("workdir", "", "workdir override for session execution")
 	sessionWebhook := fs.String("session-webhook", "", "dingtalk session webhook URL for in-thread reply")
 	channelOverride := fs.String("channel", "", "channel override: command|dingtalk|imessage")
 	msgType := fs.String("msgtype", "text", "message type: text|markdown")
@@ -1054,13 +1067,17 @@ func runSend(repoRoot string, args []string) int {
 	}
 
 	key := strings.TrimSpace(*sessionKey)
+	if key == "" && strings.TrimSpace(*workdirArg) != "" {
+		fmt.Fprintln(os.Stderr, "send --workdir requires --session-key")
+		return 2
+	}
 	if key != "" {
 		key = normalizeSessionKey(key)
 		msgID := strings.TrimSpace(*messageID)
 		if msgID == "" {
 			msgID = fmt.Sprintf("manual-%d", time.Now().UnixMilli())
 		}
-		grpcRes, gerr := trySendToSessionViaGRPC(repoRoot, key, body, msgID, mt, *dryRun, source)
+		grpcRes, gerr := trySendToSessionViaGRPC(repoRoot, key, body, msgID, mt, *dryRun, source, strings.TrimSpace(*workdirArg))
 		if gerr != nil {
 			if *jsonOut {
 				printJSONActionError("send", "gateway_unreachable", formatGatewayUnavailable(gerr))
@@ -1070,18 +1087,23 @@ func runSend(repoRoot string, args []string) int {
 			return 1
 		}
 		payload := SendPayload{
-			OK:         grpcRes.GetOk(),
-			Channel:    grpcRes.GetChannel(),
-			To:         grpcRes.GetTo(),
-			MessageID:  grpcRes.GetMessageId(),
-			MsgType:    grpcRes.GetMsgType(),
-			DryRun:     grpcRes.GetDryRun(),
-			Source:     grpcRes.GetSource(),
-			SessionKey: grpcRes.GetSessionKey(),
-			SessionID:  grpcRes.GetSessionId(),
-			Result:     grpcRes.GetResult(),
-			ElapsedSec: int(grpcRes.GetElapsedSec()),
-			Error:      grpcRes.GetError(),
+			OK:             grpcRes.GetOk(),
+			Channel:        grpcRes.GetChannel(),
+			To:             grpcRes.GetTo(),
+			MessageID:      grpcRes.GetMessageId(),
+			MsgType:        grpcRes.GetMsgType(),
+			DryRun:         grpcRes.GetDryRun(),
+			Source:         grpcRes.GetSource(),
+			SessionKey:     grpcRes.GetSessionKey(),
+			SessionID:      grpcRes.GetSessionId(),
+			Result:         grpcRes.GetResult(),
+			RawOutput:      grpcRes.GetRawOutput(),
+			TerminalReason: grpcRes.GetTerminalReason(),
+			ElapsedSec:     int(grpcRes.GetElapsedSec()),
+			Error:          grpcRes.GetError(),
+		}
+		if node, ok := parseResultJSON(grpcRes.GetResultJson()); ok {
+			payload.ResultJSON = node
 		}
 		if *jsonOut {
 			printJSON(payload)
@@ -1157,7 +1179,7 @@ func runSend(repoRoot string, args []string) int {
 	return 0
 }
 
-func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string, dryRun bool) (SendPayload, error) {
+func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string, dryRun bool, workdirOverride string) (SendPayload, error) {
 	items, err := collectSessions(cfg)
 	if err != nil {
 		return SendPayload{
@@ -1228,12 +1250,24 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 			Error:      err.Error(),
 		}, err
 	}
+	if st.SessionMap == nil {
+		st.SessionMap = map[string]string{}
+	}
+	if st.SessionMeta == nil {
+		st.SessionMeta = map[string]storage.SessionMetaRecord{}
+	}
+	if st.SessionDeleted == nil {
+		st.SessionDeleted = map[string]string{}
+	}
 	sessionID := strings.TrimSpace(st.SessionMap[key])
 	if sessionID == "" {
 		cached := strings.TrimSpace(sess.SessionID)
 		if cached != "-" {
 			sessionID = cached
 		}
+	}
+	if sessionID == "" {
+		sessionID = "-"
 	}
 
 	payload := SendPayload{
@@ -1247,31 +1281,59 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		SessionKey: key,
 		SessionID:  sessionID,
 	}
-	if dryRun {
-		return payload, nil
-	}
-
-	agentWorkdir := strings.TrimSpace(cfg.Workdir)
-	if agentWorkdir == "" {
-		agentWorkdir = cfg.RepoRoot
-	}
-	if _, err := os.Stat(agentWorkdir); err != nil {
-		fallback := strings.TrimSpace(cfg.RepoRoot)
-		if fallback != "" {
-			if _, fbErr := os.Stat(fallback); fbErr == nil {
-				agentWorkdir = fallback
-			}
-		}
-	}
-	if _, err := os.Stat(agentWorkdir); err != nil {
+	meta := st.SessionMeta[key]
+	resolvedWorkdir := ""
+	if wd, err := normalizeWorkdirPath(cfg.RepoRoot, workdirOverride); err != nil {
 		payload.OK = false
-		payload.Error = fmt.Sprintf("invalid workdir: %s", agentWorkdir)
+		payload.Error = err.Error()
 		return payload, err
+	} else if strings.TrimSpace(wd) != "" {
+		resolvedWorkdir = wd
+	}
+	if resolvedWorkdir == "" {
+		resolvedWorkdir = strings.TrimSpace(meta.Workdir)
+	}
+	if resolvedWorkdir == "" {
+		resolvedWorkdir = strings.TrimSpace(sess.Workdir)
+	}
+	if resolvedWorkdir == "" {
+		err := fmt.Errorf("send --session-key requires --workdir or existing session metadata.workdir")
+		payload.OK = false
+		payload.Error = err.Error()
+		return payload, err
+	}
+	stInfo, err := os.Stat(resolvedWorkdir)
+	if err != nil {
+		payload.OK = false
+		payload.Error = fmt.Sprintf("invalid workdir: %s", resolvedWorkdir)
+		return payload, err
+	}
+	if !stInfo.IsDir() {
+		err := fmt.Errorf("invalid workdir (not a directory): %s", resolvedWorkdir)
+		payload.OK = false
+		payload.Error = err.Error()
+		return payload, err
+	}
+	meta.Workdir = resolvedWorkdir
+	if strings.TrimSpace(meta.Status) == "" {
+		meta.Status = "ready"
+	}
+	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	st.SessionMeta[key] = meta
+	delete(st.SessionDeleted, key)
+	if err := store.SaveState(st); err != nil {
+		payload.OK = false
+		payload.Error = err.Error()
+		return payload, err
+	}
+	if dryRun {
+		payload.TerminalReason = "dry_run"
+		return payload, nil
 	}
 
 	agent := acp.NewAdapter(
 		cfg.ACPAgentCmd,
-		agentWorkdir,
+		resolvedWorkdir,
 		cfg.PermissionPolicy,
 		cfg.TimeoutSec,
 		cfg.InitializeTimeoutSec,
@@ -1327,7 +1389,7 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		Metadata: map[string]any{
 			"received_ts": now,
 			"message_id":  msgID,
-			"workdir":     agentWorkdir,
+			"workdir":     resolvedWorkdir,
 			"source":      "gui",
 			"sender_name": senderName,
 		},
@@ -1351,6 +1413,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		})
 		payload.OK = false
 		payload.Error = errText
+		payload.TerminalReason = "error"
+		meta.Status = "error"
+		meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		st.SessionMeta[key] = meta
+		_ = store.SaveState(st)
 		return payload, execErr
 	}
 
@@ -1384,11 +1451,15 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 
 	if strings.TrimSpace(result.SessionID) != "" {
 		st.SessionMap[key] = strings.TrimSpace(result.SessionID)
-		if err := store.SaveState(st); err != nil {
-			payload.OK = false
-			payload.Error = err.Error()
-			return payload, err
-		}
+	}
+	meta.Workdir = resolvedWorkdir
+	meta.Status = statusForSession(result.Status, result.TerminalReason)
+	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	st.SessionMeta[key] = meta
+	if err := store.SaveState(st); err != nil {
+		payload.OK = false
+		payload.Error = err.Error()
+		return payload, err
 	}
 	reportPath, _ := store.WriteReport(map[string]any{
 		"message": core.InboundMessage{
@@ -1427,6 +1498,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 
 	payload.SessionID = nonEmpty(strings.TrimSpace(result.SessionID), payload.SessionID)
 	payload.Result = strings.TrimSpace(result.Summary)
+	payload.RawOutput = result.OutputText
+	if resultNode, ok := parseResultJSON(payload.RawOutput); ok {
+		payload.ResultJSON = resultNode
+	}
+	payload.TerminalReason = nonEmpty(strings.TrimSpace(result.TerminalReason), terminalReasonForStatus(result.Status))
 	payload.ElapsedSec = result.ElapsedSec
 	return payload, nil
 }
@@ -1478,6 +1554,9 @@ func runSessions(repoRoot string, args []string) int {
 			ThreadID:    it.GetThreadId(),
 			LastMessage: it.GetLastMessage(),
 			LastTime:    it.GetLastTime(),
+			Workdir:     it.GetWorkdir(),
+			UpdatedAt:   it.GetUpdatedAt(),
+			Status:      it.GetStatus(),
 			Latest:      it.GetLatest(),
 		})
 	}
@@ -1507,6 +1586,14 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 	lastByKey := map[string]SessionsItem{}
 
 	sessionMap, err := loadSessionMap(cfg)
+	if err != nil {
+		return nil, err
+	}
+	sessionMeta, err := loadSessionMeta(cfg)
+	if err != nil {
+		return nil, err
+	}
+	sessionDeleted, err := loadDeletedSessionSet(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1541,6 +1628,9 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 			}
 			inboundByMsg[msgID] = in
 			key := buildSessionKey(channel, sender, threadID)
+			if _, deleted := sessionDeleted[key]; deleted {
+				continue
+			}
 			sessionKeyByMsg[msgID] = key
 			prev, ok := lastByKey[key]
 			if !ok || ts >= prev.LastTime {
@@ -1563,6 +1653,9 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 			msgID := strings.TrimSpace(fmt.Sprint(rec["msg_id"]))
 			key := strings.TrimSpace(fmt.Sprint(rec["session_key"]))
 			if msgID != "" && key != "" {
+				if _, deleted := sessionDeleted[key]; deleted {
+					continue
+				}
 				sessionKeyByMsg[msgID] = key
 			}
 			sid := strings.TrimSpace(fmt.Sprint(rec["session_id"]))
@@ -1575,6 +1668,9 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 		key := sessionKeyByMsg[msgID]
 		if key == "" {
 			key = buildSessionKey(in.channel, in.sender, in.threadID)
+		}
+		if _, deleted := sessionDeleted[key]; deleted {
+			continue
 		}
 		prev, ok := lastByKey[key]
 		if !ok || in.ts >= prev.LastTime {
@@ -1590,8 +1686,60 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 			}
 		}
 	}
+	for key, sid := range sessionMap {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, deleted := sessionDeleted[key]; deleted {
+			continue
+		}
+		if _, ok := lastByKey[key]; ok {
+			continue
+		}
+		meta := sessionMeta[key]
+		lastByKey[key] = SessionsItem{
+			SessionKey:  key,
+			SessionID:   strings.TrimSpace(sid),
+			Channel:     "-",
+			Sender:      "-",
+			SenderName:  "-",
+			ThreadID:    "-",
+			LastMessage: "(no messages)",
+			LastTime:    strings.TrimSpace(meta.UpdatedAt),
+			Workdir:     strings.TrimSpace(meta.Workdir),
+			UpdatedAt:   strings.TrimSpace(meta.UpdatedAt),
+			Status:      strings.TrimSpace(meta.Status),
+		}
+	}
+	for key, meta := range sessionMeta {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, deleted := sessionDeleted[key]; deleted {
+			continue
+		}
+		if _, ok := lastByKey[key]; ok {
+			continue
+		}
+		lastByKey[key] = SessionsItem{
+			SessionKey:  key,
+			SessionID:   strings.TrimSpace(sessionMap[key]),
+			Channel:     "-",
+			Sender:      "-",
+			SenderName:  "-",
+			ThreadID:    "-",
+			LastMessage: "(no messages)",
+			LastTime:    strings.TrimSpace(meta.UpdatedAt),
+			Workdir:     strings.TrimSpace(meta.Workdir),
+			UpdatedAt:   strings.TrimSpace(meta.UpdatedAt),
+			Status:      strings.TrimSpace(meta.Status),
+		}
+	}
 	items := make([]SessionsItem, 0, len(lastByKey))
 	for _, it := range lastByKey {
+		meta := sessionMeta[it.SessionKey]
 		if strings.TrimSpace(it.SessionID) == "" {
 			if sid, ok := sessionMap[it.SessionKey]; ok {
 				it.SessionID = sid
@@ -1599,6 +1747,25 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 		}
 		if strings.TrimSpace(it.SessionID) == "" {
 			it.SessionID = "-"
+		}
+		if strings.TrimSpace(it.Workdir) == "" {
+			it.Workdir = strings.TrimSpace(meta.Workdir)
+		}
+		if strings.TrimSpace(it.UpdatedAt) == "" {
+			it.UpdatedAt = strings.TrimSpace(meta.UpdatedAt)
+		}
+		if strings.TrimSpace(it.Status) == "" {
+			it.Status = strings.TrimSpace(meta.Status)
+		}
+		if strings.TrimSpace(it.UpdatedAt) == "" {
+			it.UpdatedAt = strings.TrimSpace(it.LastTime)
+		}
+		if strings.TrimSpace(it.Status) == "" {
+			if strings.TrimSpace(it.SessionID) != "" && strings.TrimSpace(it.SessionID) != "-" {
+				it.Status = "ready"
+			} else {
+				it.Status = "discovered"
+			}
 		}
 		items = append(items, it)
 	}
@@ -1686,56 +1853,163 @@ func loadInteractionRecordsFromSQLite(dbPath string) ([]map[string]any, error) {
 }
 
 func loadSessionMap(cfg config.AppConfig) (map[string]string, error) {
-	if strings.EqualFold(strings.TrimSpace(cfg.StorageBackend), "sqlite") {
-		store, err := storage.NewBackend(
-			cfg.StorageBackend,
-			cfg.StateFile,
-			cfg.InteractionLogFile,
-			cfg.ReportDir,
-			cfg.StorageSQLitePath,
-		)
-		if err != nil {
-			return nil, err
-		}
-		st, err := store.LoadState()
-		if err != nil {
-			return nil, err
-		}
-		out := map[string]string{}
-		for k, v := range st.SessionMap {
-			k = strings.TrimSpace(k)
-			v = strings.TrimSpace(v)
-			if k == "" || v == "" {
-				continue
-			}
-			out[k] = v
-		}
-		return out, nil
-	}
-
-	out := map[string]string{}
-	raw, err := os.ReadFile(cfg.StateFile)
+	store, err := storage.NewBackend(
+		cfg.StorageBackend,
+		cfg.StateFile,
+		cfg.InteractionLogFile,
+		cfg.ReportDir,
+		cfg.StorageSQLitePath,
+	)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return out, nil
+		return nil, err
+	}
+	st, err := store.LoadState()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for k, v := range st.SessionMap {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k == "" || v == "" {
+			continue
 		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+func loadSessionMeta(cfg config.AppConfig) (map[string]storage.SessionMetaRecord, error) {
+	store, err := storage.NewBackend(
+		cfg.StorageBackend,
+		cfg.StateFile,
+		cfg.InteractionLogFile,
+		cfg.ReportDir,
+		cfg.StorageSQLitePath,
+	)
+	if err != nil {
 		return nil, err
 	}
-	var node map[string]any
-	if err := json.Unmarshal(raw, &node); err != nil {
+	st, err := store.LoadState()
+	if err != nil {
 		return nil, err
 	}
-	if m, ok := node["session_map"].(map[string]any); ok {
-		for k, v := range m {
-			key := strings.TrimSpace(k)
-			val := strings.TrimSpace(fmt.Sprint(v))
-			if key == "" || val == "" {
-				continue
-			}
-			out[key] = val
+	out := map[string]storage.SessionMetaRecord{}
+	for k, v := range st.SessionMeta {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		out[key] = storage.SessionMetaRecord{
+			Workdir:   strings.TrimSpace(v.Workdir),
+			UpdatedAt: strings.TrimSpace(v.UpdatedAt),
+			Status:    strings.TrimSpace(v.Status),
 		}
 	}
 	return out, nil
+}
+
+func loadDeletedSessionSet(cfg config.AppConfig) (map[string]struct{}, error) {
+	store, err := storage.NewBackend(
+		cfg.StorageBackend,
+		cfg.StateFile,
+		cfg.InteractionLogFile,
+		cfg.ReportDir,
+		cfg.StorageSQLitePath,
+	)
+	if err != nil {
+		return nil, err
+	}
+	st, err := store.LoadState()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]struct{}{}
+	for k := range st.SessionDeleted {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		out[key] = struct{}{}
+	}
+	return out, nil
+}
+
+func normalizeWorkdirPath(repoRoot, workdir string) (string, error) {
+	raw := strings.TrimSpace(workdir)
+	if raw == "" {
+		return "", nil
+	}
+	abs := raw
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(repoRoot, abs)
+	}
+	resolved, err := filepath.Abs(abs)
+	if err != nil {
+		return "", fmt.Errorf("invalid workdir path: %w", err)
+	}
+	return resolved, nil
+}
+
+func parseResultJSON(raw string) (any, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, false
+	}
+	var node any
+	if err := json.Unmarshal([]byte(trimmed), &node); err != nil {
+		return nil, false
+	}
+	return node, true
+}
+
+func terminalReasonForStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "ok":
+		return "completed"
+	case "timeout":
+		return "timeout"
+	case "cancelled":
+		return "cancelled"
+	case "error":
+		return "error"
+	default:
+		return ""
+	}
+}
+
+func statusForSession(status, terminalReason string) string {
+	t := strings.ToLower(strings.TrimSpace(terminalReason))
+	if t != "" {
+		switch t {
+		case "completed", "idle_after_chunk":
+			return "ready"
+		case "timeout":
+			return "timeout"
+		case "error":
+			return "error"
+		case "cancelled":
+			return "cancelled"
+		default:
+			return t
+		}
+	}
+	s := strings.ToLower(strings.TrimSpace(status))
+	switch s {
+	case "ok":
+		return "ready"
+	case "timeout":
+		return "timeout"
+	case "error":
+		return "error"
+	case "cancelled":
+		return "cancelled"
+	default:
+		if s == "" {
+			return "ready"
+		}
+		return s
+	}
 }
 
 func buildSessionKey(channel, sender, threadID string) string {
@@ -1795,7 +2069,7 @@ func buildChannelAdapter(cfg config.AppConfig) core.ChannelAdapter {
 }
 
 func getStatusPayload(repoRoot string) (StatusPayload, error) {
-	_ = envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env"))
+	loadEnvDefaults(repoRoot)
 	lockPath := strings.TrimSpace(os.Getenv("LOCK_FILE"))
 	if lockPath == "" {
 		lockPath = filepath.Join(repoRoot, ".cli_agent_gateway.lock")
@@ -1817,6 +2091,15 @@ func getStatusPayload(repoRoot string) (StatusPayload, error) {
 		payload.StartedAt = *st.OwnerStartedAt
 	}
 	return payload, nil
+}
+
+func loadEnvDefaults(repoRoot string) {
+	_ = envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env"))
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return
+	}
+	_ = envfile.LoadDotEnvSetDefault(filepath.Join(home, ".cag", ".env"))
 }
 
 func statusJSON(action string, p StatusPayload, cfg config.AppConfig, logPath string) map[string]any {
@@ -1941,17 +2224,21 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 			add("imessage.send_cmd", true, "IMESSAGE_SEND_CMD configured", "")
 		}
 	case "dingtalk":
+		streamKey := strings.TrimSpace(cfg.DingTalkAppKey) != ""
+		streamSecret := strings.TrimSpace(cfg.DingTalkAppSecret) != ""
+		add("dingtalk.stream_app_key", streamKey, "stream ingress requires DINGTALK_APP_KEY", "set DINGTALK_APP_KEY")
+		add("dingtalk.stream_app_secret", streamSecret, "stream ingress requires DINGTALK_APP_SECRET", "set DINGTALK_APP_SECRET")
+
 		sendMode := strings.ToLower(strings.TrimSpace(cfg.DingTalkSendMode))
-		if sendMode == "webhook" {
-			ok := strings.TrimSpace(cfg.DingTalkBotWebhook) != ""
-			add("dingtalk.webhook", ok, "requires DINGTALK_BOT_WEBHOOK", "set DINGTALK_BOT_WEBHOOK for webhook mode")
-		} else {
-			k := strings.TrimSpace(cfg.DingTalkAppKey) != ""
-			s := strings.TrimSpace(cfg.DingTalkAppSecret) != ""
+		switch sendMode {
+		case "", "api":
 			a := strings.TrimSpace(cfg.DingTalkAgentID) != ""
-			add("dingtalk.app_key", k, "requires DINGTALK_APP_KEY", "set DINGTALK_APP_KEY")
-			add("dingtalk.app_secret", s, "requires DINGTALK_APP_SECRET", "set DINGTALK_APP_SECRET")
-			add("dingtalk.agent_id", a, "requires DINGTALK_AGENT_ID", "set DINGTALK_AGENT_ID")
+			add("dingtalk.send_agent_id", a, "api send requires DINGTALK_AGENT_ID", "set DINGTALK_AGENT_ID or switch DINGTALK_SEND_MODE=webhook")
+		case "webhook":
+			ok := strings.TrimSpace(cfg.DingTalkBotWebhook) != ""
+			add("dingtalk.send_webhook", ok, "webhook send requires DINGTALK_BOT_WEBHOOK", "set DINGTALK_BOT_WEBHOOK")
+		default:
+			add("dingtalk.send_mode", false, fmt.Sprintf("invalid DINGTALK_SEND_MODE: %s", cfg.DingTalkSendMode), "use DINGTALK_SEND_MODE=api or webhook")
 		}
 	}
 
@@ -2096,7 +2383,7 @@ func resolveLogPath(repoRoot string, args []string) string {
 		}
 		return fv
 	}
-	_ = envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env"))
+	loadEnvDefaults(repoRoot)
 	v := strings.TrimSpace(os.Getenv("GATEWAY_LOG_FILE"))
 	if v == "" {
 		v = filepath.Join(repoRoot, "logs", ".agent_gateway.log")

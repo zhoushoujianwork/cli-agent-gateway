@@ -15,14 +15,16 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
 - `stop`
 - `restart`
 - `config [workdir]`
+- `config --global [--gatewayd-addr <addr>]`
 - `status [--json]`
 - `gatewayd [--listen <addr>]`
 - `gatewayd-up [--json]`
 - `gatewayd-down [--json]`
 - `health [--json]`
-- `send (--to <id> | --session-key <key>) (--text <msg> | --file <path>) [--msgtype text|markdown] [--channel <name>] [--message-id <id>] [--report-file <path>] [--dry-run] [--json]`
+- `send (--to <id> | --session-key <key>) (--text <msg> | --file <path>) [--msgtype text|markdown] [--channel <name>] [--message-id <id>] [--report-file <path>] [--dry-run] [--workdir <path>] [--json]`
 - `sessions [--limit <n>] [--json]`
 - `messages --session-key <key> [--json]`
+- `session-new --session-key <key> --workdir <path> [--json]`
 - `session-clear --session-key <key> [--json]`
 - `session-delete --session-key <key> [--json]`
 - `sessions-delete-all [--json]`
@@ -35,7 +37,12 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
   - If current dir is `src/`, use parent as repo root.
   - Else prefer current dir when `.env` exists.
   - Else fallback to parent when parent has `.env`.
-- Missing `.env` for runtime commands (`run`, `start`, `send`) is fatal.
+- Config source precedence:
+  - 1) process env
+  - 2) repo `.env`
+  - 3) user global `~/.cag/.env`
+  - 4) built-in defaults
+- Missing repo `.env` is not fatal; CLI falls back to `~/.cag/.env` and built-in defaults.
 - `run` does not accept positional workdir arg.
 - `status/start/stop/restart/health/doctor/sessions/send(--session-key)/messages/session-*` 仅通过 gRPC 控制面访问 `gatewayd`。
 - CLI 会在 gRPC 调用前自动确保 `gatewayd` 在线（必要时自动拉起）；不做本地业务回退。
@@ -107,8 +114,9 @@ Channel-specific checks:
 - `imessage`: checks `imsg` in `PATH`
 - `dingtalk`:
   - ingress is fixed to DingTalk Stream
-  - `webhook` mode requires `DINGTALK_BOT_WEBHOOK`
-  - `api` mode checks `DINGTALK_APP_KEY/APP_SECRET/AGENT_ID`
+  - stream ingress always requires `DINGTALK_APP_KEY` and `DINGTALK_APP_SECRET`
+  - `webhook` send mode requires `DINGTALK_BOT_WEBHOOK`
+  - `api` send mode additionally requires `DINGTALK_AGENT_ID`
 
 ### `send --json`
 
@@ -140,6 +148,9 @@ Field rules:
 - `session_key` (`string`, optional; present when using `--session-key`)
 - `session_id` (`string`, optional)
 - `result` (`string`, optional; agent summary for session-path send)
+- `raw_output` (`string`, optional; agent raw output, 不做空格/格式重写)
+- `result_json` (`object|array|scalar`, optional; `raw_output` 可解析 JSON 时返回)
+- `terminal_reason` (`string`, optional; `completed|timeout|idle_after_chunk|error|cancelled|dry_run|...`)
 - `elapsed_sec` (`number`, optional; session-path execution elapsed)
 
 Semantics:
@@ -148,6 +159,12 @@ Semantics:
 - `message_id` is auto-generated when `--message-id` is absent.
 
 ## Command-specific flags
+
+### `config`
+
+- `config [workdir]`: 写仓库级 `.env`（兼容现有行为）。
+- `config --global`: 写用户级 `~/.cag/.env`（默认写入 `GATEWAYD_ADDR=127.0.0.1:58473`）。
+- `config --global --gatewayd-addr <addr>`: 覆盖用户级 `GATEWAYD_ADDR`。
 
 ### `start`
 
@@ -184,6 +201,10 @@ Optional:
 Defaulting:
 
 - For `dingtalk`, `--to` can fallback to `DINGTALK_DEFAULT_TO_USER`.
+- `send --session-key` 的 `workdir` 优先级：
+  1) 显式 `--workdir`
+  2) 已保存的 `session metadata.workdir`（由 `session-new` 或历史执行写入）
+  3) 若仍为空：返回 `workdir_required`
 
 ### `gatewayd`
 
@@ -196,6 +217,7 @@ Defaulting:
   - `Health`
   - `Doctor`
   - `Sessions`
+  - `SessionNew`
   - `SendToSession`
   - `SessionMessages`
   - `ClearSession`
@@ -228,6 +250,35 @@ Field rules:
 - `session_key` (`string`, required)
 - `messages` (`array`, required)
 - `timeline` (`array`, required)
+
+### `sessions --json`
+
+`items[]` 在原字段基础上新增：
+
+- `workdir` (`string`, optional)
+- `updated_at` (`string`, optional, RFC3339 UTC)
+- `status` (`string`, optional)
+
+### `session-new --json`
+
+Output object:
+
+```json
+{
+  "ok": true,
+  "action": "session-new",
+  "session_key": "sess_xxx",
+  "session_id": "optional",
+  "workdir": "/abs/path",
+  "updated_at": "2026-03-06T03:26:39Z",
+  "status": "ready"
+}
+```
+
+Semantics:
+
+- 幂等：同一 `session_key` 重复执行不会创建重复记录。
+- `--workdir` 必填；缺失时返回 `error.code=workdir_required`。
 
 ### `session-clear` / `session-delete` / `sessions-delete-all --json`
 

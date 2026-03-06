@@ -28,6 +28,7 @@
 
 ```bash
 cd src && go run ./cmd/gateway-cli config /path/to/your/workdir
+cd src && go run ./cmd/gateway-cli config --global
 ```
 
 2. 启动网关：
@@ -51,6 +52,7 @@ cd src && go run ./cmd/gateway-cli start
 cd src && go run ./cmd/gateway-cli stop
 cd src && go run ./cmd/gateway-cli restart
 cd src && go run ./cmd/gateway-cli config /path/to/your/workdir
+cd src && go run ./cmd/gateway-cli config --global --gatewayd-addr 127.0.0.1:58473
 cd src && go run ./cmd/gateway-cli status
 cd src && go run ./cmd/gateway-cli status --json
 cd src && go run ./cmd/gateway-cli health
@@ -82,7 +84,7 @@ cd src && go run ./cmd/gateway-cli send --to tester --file ./message.md --msgtyp
 `CHANNEL_TYPE=dingtalk` 时：
 - 入站：Go 内置 DingTalk Stream（仅此模式）
 - 出站：
-  - `DINGTALK_SEND_MODE=api`：走企业应用 API（`DINGTALK_APP_KEY/SECRET/AGENT_ID`）
+  - `DINGTALK_SEND_MODE=api`：走企业应用 API（`DINGTALK_AGENT_ID`；同时 stream 本身要求 `DINGTALK_APP_KEY/SECRET`）
   - `DINGTALK_SEND_MODE=webhook`：走机器人 webhook（`DINGTALK_BOT_WEBHOOK`）
 
 ## 处理链路与职责
