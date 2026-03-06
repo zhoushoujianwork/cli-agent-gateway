@@ -297,6 +297,6 @@ echo "[INFO] log_file=$LOG_FILE"
 echo "[INFO] state_file=$STATE_FILE"
 echo "[INFO] interaction_log_file=$INTERACTION_LOG_FILE"
 if [[ "$OPEN_AFTER_BUILD" == "1" ]]; then
-  open -n "$APP_PATH"
+  open -a "$APP_PATH"
   echo "[INFO] opened_app=1"
 fi
