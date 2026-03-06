@@ -141,6 +141,8 @@ final class GUILogger {
 }
 
 final class GatewayController: ObservableObject {
+    typealias CAGJSONResult = (code: Int32, json: [String: Any]?, raw: String)
+
     @Published var statusText: String = "Checking status..."
     @Published var activeChannelText: String = "Unknown"
     @Published var detailText: String = ""
@@ -468,7 +470,7 @@ final class GatewayController: ObservableObject {
         return (srcPath, ["go", "run", "./cmd/gateway-cli"])
     }
 
-    private func cagJSON(_ action: String, args: [String] = [], timeoutSec: TimeInterval? = nil) -> (code: Int32, json: [String: Any]?, raw: String) {
+    private func cagJSON(_ action: String, args: [String] = [], timeoutSec: TimeInterval? = nil) -> CAGJSONResult {
         let t0 = Date()
         let runner = cagRunner()
         let cmdParts = runner.prefix + [action] + args + ["--json"]
@@ -486,6 +488,16 @@ final class GatewayController: ObservableObject {
         }
         log("cag json ok action=\(action) code=\(out.code) elapsed_ms=\(ms)")
         return (out.code, node, out.output)
+    }
+
+    private func cagJSONAsync(_ action: String, args: [String] = [], timeoutSec: TimeInterval? = nil, completion: @escaping (CAGJSONResult) -> Void) {
+        runInBackground { [weak self] in
+            guard let self else { return }
+            let result = self.cagJSON(action, args: args, timeoutSec: timeoutSec)
+            self.onMain {
+                completion(result)
+            }
+        }
     }
 
     private func repairActionForCheck(_ key: String) -> RepairAction? {
@@ -1109,12 +1121,6 @@ final class GatewayController: ObservableObject {
         return (cmd, payload)
     }
 
-    private func clearSessionMapping(baseSessionKey: String) -> Bool {
-        let res = cagJSON("session-clear", args: ["--session-key", baseSessionKey])
-        guard let node = res.json else { return false }
-        return (node["ok"] as? Bool) ?? false
-    }
-
     private func appendLocalActionMessage(_ text: String, sessionKey: String) {
         let msgId = "local-sys-\(Int(Date().timeIntervalSince1970 * 1000))"
         let msg = ChatMessage(
@@ -1127,6 +1133,65 @@ final class GatewayController: ObservableObject {
             statusDetail: ""
         )
         appendOverlayMessage(msg, sessionKey: sessionKey)
+    }
+
+    private func sendToSessionAsync(
+        selectedSessionKey: String,
+        baseSessionKey: String,
+        text: String,
+        sessionWorkdir: String,
+        userMsgId: String,
+        timeout: TimeInterval
+    ) {
+        var sendArgs = ["--session-key", baseSessionKey, "--message-id", userMsgId, "--text", text]
+        sendArgs.append(contentsOf: ["--workdir", sessionWorkdir])
+        cagJSONAsync("send", args: sendArgs, timeoutSec: timeout) { [weak self] result in
+            guard let self else { return }
+            self.localSending = false
+            guard let node = result.json else {
+                self.updateOverlayMessage(
+                    sessionKey: selectedSessionKey,
+                    messageId: userMsgId,
+                    deliveryStatus: .failed,
+                    statusDetail: "invalid CLI response"
+                )
+                self.detailText = "Send failed: invalid CLI response."
+                return
+            }
+            let ok = (node["ok"] as? Bool) ?? false
+            if ok {
+                self.updateOverlayMessage(
+                    sessionKey: selectedSessionKey,
+                    messageId: userMsgId,
+                    deliveryStatus: .sent,
+                    statusDetail: ""
+                )
+                self.removeOverlayMessage(sessionKey: selectedSessionKey, messageId: userMsgId)
+                let elapsed = (node["elapsed_sec"] as? Int) ?? 0
+                let wdSuffix = sessionWorkdir.isEmpty ? "" : " [workdir]"
+                self.detailText = elapsed > 0 ? "Session processed (\(elapsed)s).\(wdSuffix)" : "Session processed.\(wdSuffix)"
+                self.refreshSessionsAsync()
+                self.refreshSelectedSessionChat()
+                return
+            }
+            let nestedErr = ((node["error"] as? [String: Any])?["message"] as? String) ?? ""
+            let plainErr = (node["error"] as? String) ?? ""
+            let errText = nestedErr.isEmpty ? (plainErr.isEmpty ? "send failed" : plainErr) : nestedErr
+            self.updateOverlayMessage(
+                sessionKey: selectedSessionKey,
+                messageId: userMsgId,
+                deliveryStatus: .failed,
+                statusDetail: errText
+            )
+            self.detailText = "Send failed: \(errText)"
+        }
+    }
+
+    private func clearSessionMappingAsync(baseSessionKey: String, completion: @escaping (Bool) -> Void) {
+        cagJSONAsync("session-clear", args: ["--session-key", baseSessionKey]) { result in
+            let ok = (result.json?["ok"] as? Bool) ?? false
+            completion(ok)
+        }
     }
 
     func sendLocalChat() {
@@ -1147,27 +1212,37 @@ final class GatewayController: ObservableObject {
         lastLocalSendFingerprint = sendFingerprint
         lastLocalSendAt = now
         let baseSessionKey = session.sessionKey.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? session.sessionKey
+        let command = parseLocalCommand(text)
 
-        if let cmd = parseLocalCommand(text) {
-            let cleared = clearSessionMapping(baseSessionKey: baseSessionKey)
+        if let cmd = command {
             if cmd.cmd == "/clear" {
-                appendLocalActionMessage(
-                    cleared ? "Action /clear: session mapping reset." : "Action /clear failed: cannot update state file.",
-                    sessionKey: selectedSessionKey
-                )
-                detailText = cleared ? "Session mapping cleared." : "Failed to clear session mapping."
+                localSending = true
                 localDraftText = ""
-                refreshSessionsAsync()
+                clearSessionMappingAsync(baseSessionKey: baseSessionKey) { [weak self] cleared in
+                    guard let self else { return }
+                    self.localSending = false
+                    self.appendLocalActionMessage(
+                        cleared ? "Action /clear: session mapping reset." : "Action /clear failed: cannot update state file.",
+                        sessionKey: selectedSessionKey
+                    )
+                    self.detailText = cleared ? "Session mapping cleared." : "Failed to clear session mapping."
+                    self.refreshSessionsAsync()
+                }
                 return
             }
-            appendLocalActionMessage(
-                cleared ? "Action /new: session reset." : "Action /new warning: reset failed, sending anyway.",
-                sessionKey: selectedSessionKey
-            )
-            detailText = cleared ? "New session started." : "Could not reset old session; continuing send."
             if cmd.payload.isEmpty {
+                localSending = true
                 localDraftText = ""
-                refreshSessionsAsync()
+                clearSessionMappingAsync(baseSessionKey: baseSessionKey) { [weak self] cleared in
+                    guard let self else { return }
+                    self.localSending = false
+                    self.appendLocalActionMessage(
+                        cleared ? "Action /new: session reset." : "Action /new warning: reset failed.",
+                        sessionKey: selectedSessionKey
+                    )
+                    self.detailText = cleared ? "New session started." : "Could not reset old session."
+                    self.refreshSessionsAsync()
+                }
                 return
             }
             text = cmd.payload
@@ -1178,8 +1253,6 @@ final class GatewayController: ObservableObject {
             detailText = "Send failed: this session requires workdir. Click Add Session and pick a directory first."
             return
         }
-
-        localSending = true
 
         let userMsgId = "local-u-\(Int(Date().timeIntervalSince1970 * 1000))"
         let nowIso = ISO8601DateFormatter().string(from: Date())
@@ -1194,6 +1267,7 @@ final class GatewayController: ObservableObject {
         )
         appendOverlayMessage(localUser, sessionKey: selectedSessionKey)
         localDraftText = ""
+        localSending = true
         if baseSessionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             localSending = false
             detailText = "Send failed: missing session key."
@@ -1206,56 +1280,33 @@ final class GatewayController: ObservableObject {
             return
         }
         let timeout = localChatTimeoutSec()
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            var sendArgs = ["--session-key", baseSessionKey, "--message-id", userMsgId, "--text", text]
-            sendArgs.append(contentsOf: ["--workdir", sessionWorkdir])
-            let result = self.cagJSON("send", args: sendArgs, timeoutSec: timeout)
-            DispatchQueue.main.async {
-                self.localSending = false
-                guard let node = result.json else {
-                    self.updateOverlayMessage(
-                        sessionKey: selectedSessionKey,
-                        messageId: userMsgId,
-                        deliveryStatus: .failed,
-                        statusDetail: "invalid CLI response"
-                    )
-                    self.detailText = "Send failed: invalid CLI response."
-                    return
-                }
-                let ok = (node["ok"] as? Bool) ?? false
-                if ok {
-                    self.updateOverlayMessage(
-                        sessionKey: selectedSessionKey,
-                        messageId: userMsgId,
-                        deliveryStatus: .sent,
-                        statusDetail: ""
-                    )
-                    self.removeOverlayMessage(sessionKey: selectedSessionKey, messageId: userMsgId)
-                    let elapsed = (node["elapsed_sec"] as? Int) ?? 0
-                    let wdSuffix = sessionWorkdir.isEmpty ? "" : " [workdir]"
-                    self.detailText = elapsed > 0 ? "Session processed (\(elapsed)s).\(wdSuffix)" : "Session processed.\(wdSuffix)"
-                    self.refreshSessionsAsync()
-                    self.refreshSelectedSessionChat()
-                    return
-                }
-                let nestedErr = ((node["error"] as? [String: Any])?["message"] as? String) ?? ""
-                let plainErr = (node["error"] as? String) ?? ""
-                let errText = nestedErr.isEmpty ? (plainErr.isEmpty ? "send failed" : plainErr) : nestedErr
-                self.updateOverlayMessage(
-                    sessionKey: selectedSessionKey,
-                    messageId: userMsgId,
-                    deliveryStatus: .failed,
-                    statusDetail: errText
+        if let cmd = command, cmd.cmd == "/new" {
+            clearSessionMappingAsync(baseSessionKey: baseSessionKey) { [weak self] cleared in
+                guard let self else { return }
+                self.appendLocalActionMessage(
+                    cleared ? "Action /new: session reset." : "Action /new warning: reset failed, sending anyway.",
+                    sessionKey: selectedSessionKey
                 )
-                self.detailText = "Send failed: \(errText)"
+                self.detailText = cleared ? "New session started." : "Could not reset old session; continuing send."
+                self.sendToSessionAsync(
+                    selectedSessionKey: selectedSessionKey,
+                    baseSessionKey: baseSessionKey,
+                    text: text,
+                    sessionWorkdir: sessionWorkdir,
+                    userMsgId: userMsgId,
+                    timeout: timeout
+                )
             }
+            return
         }
-    }
-
-    func deleteSelectedSession() {
-        guard let key = selectedSessionKey else { return }
-        deleteSession(key: key)
+        sendToSessionAsync(
+            selectedSessionKey: selectedSessionKey,
+            baseSessionKey: baseSessionKey,
+            text: text,
+            sessionWorkdir: sessionWorkdir,
+            userMsgId: userMsgId,
+            timeout: timeout
+        )
     }
 
     func deleteAllSessions() {
@@ -1761,8 +1812,6 @@ struct ContentView: View {
                             .font(.title3.weight(.semibold))
                         Spacer()
                         Button("Add Session") { controller.addSessionByPickingWorkdir() }
-                        Button("Delete Selected") { controller.deleteSelectedSession() }
-                            .disabled(controller.selectedSessionKey == nil)
                         Button("Delete All") { controller.deleteAllSessions() }
                             .foregroundStyle(.red)
                     }
