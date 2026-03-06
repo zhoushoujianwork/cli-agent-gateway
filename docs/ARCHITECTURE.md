@@ -57,12 +57,14 @@ flowchart TD
 - `gatewayd`（Go 服务进程）
   - 核心编排与 ACP 执行
   - 通道接入与回复发送
-  - 状态与日志持久化
+  - 状态与日志持久化（唯一写入者）
+  - gRPC 控制面（Status/Sessions 等）
 - `gateway`（Go CLI）
   - `start/stop/restart/status`
   - `send`（本地会话发消息）
   - `config get/set/validate`
   - `doctor`（依赖与环境检查）
+  - 优先通过 gRPC 与 `gatewayd` 通信，失败回退本地
 - `macOS GUI`
   - 只通过 CLI 做管理与发送
   - 不直接实现网关业务逻辑
@@ -72,4 +74,5 @@ flowchart TD
 - 单一后端实现：Go-first，不维护双栈兼容。
 - 协议边界稳定：ACP 是唯一 agent 执行边界。
 - 控制面与数据面分离：GUI 走 CLI，CLI 控制 gatewayd。
+- 数据一致性优先：状态与交互数据操作收口到 gatewayd，CLI/GUI 仅走控制面读取。
 - 可观测优先：状态/日志/报告保持机器可读。

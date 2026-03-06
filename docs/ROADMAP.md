@@ -48,6 +48,29 @@
 - GUI 改为优先调用 gRPC，避免文件锁元数据轮询。
 - 数据面仍保留 ACP stdio，后续评估统一传输层。
 
+### R6 当前进度（Phase 1）
+
+- 已落地：
+  - `gatewayd` 命令与 gRPC 服务骨架
+  - RPC: `Status`, `Sessions`
+  - `cag status` / `cag sessions` 优先走 gRPC（不可达回退本地）
+- 下一步：
+  - `send --session-key`、session 管理操作（clear/new/delete）迁移到 gRPC
+  - GUI 读写统一切到 gRPC 路径并移除文件直读
+
+### R6 当前进度（Phase 2）
+
+- 已落地：
+  - RPC 扩展：`SendToSession`、`SessionMessages`、`ClearSession`、`DeleteSession`、`DeleteAllSessions`
+  - CLI 新增命令：`messages`、`session-clear`、`session-delete`、`sessions-delete-all`
+  - CLI `sessions/messages/send --session-key/session-*` 改为 gRPC 必达（移除本地回退、移除自动拉起重试）
+  - RPC 扩展：`Start`、`Stop`、`Restart`、`Health`、`Doctor`
+  - CLI `status/start/stop/restart/health/doctor` 改为 gRPC 必达（不可达直接报错）
+  - GUI 聊天读取改为 `cag messages`，会话清理/删除改为 `cag session-*`
+- 下一步：
+  - 启停与健康检查也统一迁移到 `gatewayd` 常驻模式（减少本地 fallback）
+  - GUI 端移除遗留未使用的数据文件访问代码
+
 ## Branch Goal (codex/feat/init-go-cli-actions)
 
 - Step 1 complete: `gateway-cli run` now uses the Go-native gateway loop (legacy bridge removed).

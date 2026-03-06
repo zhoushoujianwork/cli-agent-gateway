@@ -4,14 +4,21 @@
 
 macOS GUI 不直接读写网关内部文件，只通过 `gateway` CLI 获取数据与执行动作。
 
+> 注：GUI 相关命令仅经 `gatewayd` gRPC；CLI 不走本地业务回退，但会自动确保 `gatewayd` 在线（必要时自动拉起）。
+
 ## 读模型（Read）
 
 GUI 周期轮询：
 
 1. `gateway status --json`
-2. `gateway view sessions --json`
-3. `gateway view messages --session-key <key> --json`（选中会话时）
+2. `gateway sessions --json`
+3. `gateway messages --session-key <key> --json`（选中会话时）
 4. `gateway view tasks --json`（可选）
+
+GUI 生命周期：
+
+1. 启动时执行 `gatewayd-up --json`
+2. 退出时执行 `gatewayd-down --json`
 
 ## 动作模型（Write）
 
@@ -20,18 +27,21 @@ GUI 用户操作映射：
 - 点击 Send：
   - `gateway send --session-key <key> --text "<text>" --json`
 - 输入 `/clear`：
-  - `gateway session clear --session-key <key> --json`
+  - `gateway session-clear --session-key <key> --json`
 - 输入 `/new`：
-  - `gateway session new --session-key <key> --json`
+  - `gateway session-clear --session-key <key> --json`
 - 输入 `/new hello`：
-  - `gateway session new --session-key <key> --text "hello" --json`
+  - `gateway session-clear --session-key <key> --json`
+  - `gateway send --session-key <key> --text "hello" --json`
 - 删除会话：
-  - `gateway session delete --session-key <key> --json`
+  - `gateway session-delete --session-key <key> --json`
 
 ## 消息状态映射
 
 - GUI 发送前：本地显示 `sending`
-- CLI 返回 `ok=true`：更新为 `sent`
+- 消息写入系统（`messages` 可见 `status=sent`）：更新为 `sent`
+- 服务端处理中（`messages` 可见 `status=processing`）：更新为 `processing`
+- CLI 闭环完成且 `ok=true`：保留 `sent`，并刷新会话/消息
 - CLI 返回 `ok=false` 或非 0 退出码：更新为 `failed`
 - `failed` 时展示 `error.code` 与 `error.message`
 
