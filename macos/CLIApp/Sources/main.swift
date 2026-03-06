@@ -1229,6 +1229,30 @@ final class GatewayController: ObservableObject {
         detailText = "\(pidText)Gateway restarted.\nLog: \(shownLog)"
     }
 
+    func ensureGatewaydForGUI() {
+        runInBackground { [weak self] in
+            guard let self else { return }
+            let res = self.cagJSON("gatewayd-up", timeoutSec: 5)
+            if res.code != 0 {
+                self.log("gatewayd-up failed code=\(res.code) raw=\(res.raw)")
+            } else {
+                self.log("gatewayd-up ok")
+            }
+        }
+    }
+
+    func shutdownGatewaydForGUI() {
+        runInBackground { [weak self] in
+            guard let self else { return }
+            let res = self.cagJSON("gatewayd-down", timeoutSec: 5)
+            if res.code != 0 {
+                self.log("gatewayd-down failed code=\(res.code) raw=\(res.raw)")
+            } else {
+                self.log("gatewayd-down ok")
+            }
+        }
+    }
+
     func latestLogTail(lines: Int = 120) -> String {
         let target = currentLogFile.isEmpty ? cfg.logFile : currentLogFile
         guard FileManager.default.fileExists(atPath: target),
@@ -1677,6 +1701,7 @@ struct ContentView: View {
         .frame(width: 1140, height: 700)
         .onAppear {
             GUILogger.shared.log("view onAppear bootstrap refresh")
+            controller.ensureGatewaydForGUI()
             controller.refreshHealthChecksAsync()
             controller.refreshStatusAsync()
             controller.refreshSessionsAsync()
@@ -1696,6 +1721,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showLogTail) {
             LogTailView(content: logTailText)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            controller.shutdownGatewaydForGUI()
         }
     }
 }

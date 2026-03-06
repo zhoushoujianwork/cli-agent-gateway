@@ -15,6 +15,11 @@ GUI 周期轮询：
 3. `gateway messages --session-key <key> --json`（选中会话时）
 4. `gateway view tasks --json`（可选）
 
+GUI 生命周期：
+
+1. 启动时执行 `gatewayd-up --json`
+2. 退出时执行 `gatewayd-down --json`
+
 ## 动作模型（Write）
 
 GUI 用户操作映射：
