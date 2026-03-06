@@ -239,11 +239,15 @@ func runGoMain(repoRoot string, args []string) int {
 		return 2
 	}
 	defer lock.Close()
+	runtimeLogFile := strings.TrimSpace(os.Getenv("GATEWAY_LOG_FILE"))
+	if runtimeLogFile == "" {
+		runtimeLogFile = resolveLogPath(repoRoot, nil)
+	}
 	_ = lock.WriteMetadata(map[string]any{
 		"workdir":    cfg.Workdir,
 		"lock_file":  cfg.LockFile,
 		"channel":    cfg.ChannelType,
-		"log_file":   resolveLogPath(repoRoot, nil),
+		"log_file":   runtimeLogFile,
 		"started_at": time.Now().UTC().Format(time.RFC3339),
 	})
 

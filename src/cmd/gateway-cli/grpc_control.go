@@ -46,6 +46,10 @@ func (s *gatewayControlServer) Status(_ context.Context, req *gatewayv1.StatusRe
 	if err != nil {
 		return &gatewayv1.StatusResponse{Ok: false, Error: err.Error()}, nil
 	}
+	logFile := strings.TrimSpace(resolveLogPath(root, nil))
+	if v, ok := payload.Metadata["log_file"].(string); ok && strings.TrimSpace(v) != "" {
+		logFile = strings.TrimSpace(v)
+	}
 	out := &gatewayv1.StatusResponse{
 		Ok:                 true,
 		Running:            payload.Running,
@@ -54,7 +58,7 @@ func (s *gatewayControlServer) Status(_ context.Context, req *gatewayv1.StatusRe
 		Channel:            strings.TrimSpace(cfg.ChannelType),
 		InteractionLogFile: strings.TrimSpace(cfg.InteractionLogFile),
 		StateFile:          strings.TrimSpace(cfg.StateFile),
-		LogFile:            strings.TrimSpace(resolveLogPath(root, nil)),
+		LogFile:            logFile,
 		Workdir:            strings.TrimSpace(cfg.Workdir),
 		Status:             "stopped",
 	}
