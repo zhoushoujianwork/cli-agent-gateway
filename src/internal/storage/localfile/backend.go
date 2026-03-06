@@ -96,7 +96,13 @@ func (b *Backend) WriteReport(report map[string]any, messageID string) (string, 
 }
 
 func emptyState() storageapi.StateData {
-	return storageapi.StateData{ProcessedIDs: []string{}, SessionMap: map[string]string{}, Inflight: map[string]any{}}
+	return storageapi.StateData{
+		ProcessedIDs:   []string{},
+		SessionMap:     map[string]string{},
+		SessionMeta:    map[string]storageapi.SessionMetaRecord{},
+		SessionDeleted: map[string]string{},
+		Inflight:       map[string]any{},
+	}
 }
 
 func normalizeState(d *storageapi.StateData) {
@@ -105,6 +111,12 @@ func normalizeState(d *storageapi.StateData) {
 	}
 	if d.SessionMap == nil {
 		d.SessionMap = map[string]string{}
+	}
+	if d.SessionMeta == nil {
+		d.SessionMeta = map[string]storageapi.SessionMetaRecord{}
+	}
+	if d.SessionDeleted == nil {
+		d.SessionDeleted = map[string]string{}
 	}
 	if d.Inflight == nil {
 		d.Inflight = map[string]any{}

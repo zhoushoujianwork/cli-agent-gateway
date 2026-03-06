@@ -247,6 +247,26 @@ func TestGatewaydAddrReadsGlobalCagEnv(t *testing.T) {
 	}
 }
 
+func TestGatewaydStatePathForHomeScopedByRepo(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	repoA := filepath.Join(t.TempDir(), "repo-a")
+	repoB := filepath.Join(t.TempDir(), "repo-b")
+	pathA := gatewaydStatePathForHome(home, repoA)
+	pathB := gatewaydStatePathForHome(home, repoB)
+	base := filepath.Join(home, ".cag", "gatewayd") + string(os.PathSeparator)
+	if !strings.HasPrefix(pathA, base) {
+		t.Fatalf("state path should be under ~/.cag/gatewayd, path=%s", pathA)
+	}
+	if !strings.HasPrefix(pathB, base) {
+		t.Fatalf("state path should be under ~/.cag/gatewayd, path=%s", pathB)
+	}
+	if pathA == pathB {
+		t.Fatalf("state paths should differ per repo, path=%s", pathA)
+	}
+}
+
 func TestCLISessionDeleteAndRecreateClosedLoop(t *testing.T) {
 	t.Parallel()
 

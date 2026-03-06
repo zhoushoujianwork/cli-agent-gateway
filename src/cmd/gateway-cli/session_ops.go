@@ -48,6 +48,10 @@ type SessionMutationPayload struct {
 	OK         bool   `json:"ok"`
 	Action     string `json:"action"`
 	SessionKey string `json:"session_key,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	Workdir    string `json:"workdir,omitempty"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
+	Status     string `json:"status,omitempty"`
 }
 
 func runMessages(repoRoot string, args []string) int {
@@ -134,6 +138,94 @@ func runSessionClear(repoRoot string, args []string) int {
 
 func runSessionDelete(repoRoot string, args []string) int {
 	return runSessionMutation(repoRoot, args, "session-delete")
+}
+
+func runSessionNew(repoRoot string, args []string) int {
+	fs := flag.NewFlagSet("session-new", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	sessionKey := fs.String("session-key", "", "session key")
+	workdir := fs.String("workdir", "", "session workdir")
+	jsonOut := fs.Bool("json", false, "json output")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	key := normalizeSessionKey(*sessionKey)
+	if key == "" {
+		if *jsonOut {
+			printJSONActionError("session-new", "session_key_required", "--session-key is required")
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, "session-new requires --session-key")
+		return 2
+	}
+	workdirPath, err := normalizeWorkdirPath(repoRoot, *workdir)
+	if err != nil {
+		if *jsonOut {
+			printJSONActionError("session-new", "invalid_workdir", err.Error())
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "session-new failed: %v\n", err)
+		return 1
+	}
+	if strings.TrimSpace(workdirPath) == "" {
+		if *jsonOut {
+			printJSONActionError("session-new", "workdir_required", "--workdir is required")
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, "session-new requires --workdir")
+		return 2
+	}
+	info, err := os.Stat(workdirPath)
+	if err != nil {
+		if *jsonOut {
+			printJSONActionError("session-new", "invalid_workdir", fmt.Sprintf("invalid workdir: %s", workdirPath))
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "session-new failed: invalid workdir: %s\n", workdirPath)
+		return 1
+	}
+	if !info.IsDir() {
+		msg := fmt.Sprintf("invalid workdir (not a directory): %s", workdirPath)
+		if *jsonOut {
+			printJSONActionError("session-new", "invalid_workdir", msg)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "session-new failed: %s\n", msg)
+		return 1
+	}
+
+	grpcRes, grpcErr := trySessionNewViaGRPC(repoRoot, key, workdirPath)
+	if grpcErr != nil {
+		if *jsonOut {
+			printJSONActionError("session-new", "gateway_unreachable", formatGatewayUnavailable(grpcErr))
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "session-new failed: %s\n", formatGatewayUnavailable(grpcErr))
+		return 1
+	}
+	if !grpcRes.GetOk() {
+		if *jsonOut {
+			printJSONActionError("session-new", "grpc_session_new_failed", grpcRes.GetError())
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "session-new failed: %s\n", grpcRes.GetError())
+		return 1
+	}
+	payload := SessionMutationPayload{
+		OK:         true,
+		Action:     "session-new",
+		SessionKey: key,
+		SessionID:  strings.TrimSpace(grpcRes.GetSessionId()),
+		Workdir:    strings.TrimSpace(grpcRes.GetWorkdir()),
+		UpdatedAt:  strings.TrimSpace(grpcRes.GetUpdatedAt()),
+		Status:     strings.TrimSpace(grpcRes.GetStatus()),
+	}
+	if *jsonOut {
+		printJSON(payload)
+	} else {
+		fmt.Printf("session-new ok: %s %s\n", key, payload.Workdir)
+	}
+	return 0
 }
 
 func runSessionsDeleteAll(repoRoot string, args []string) int {
@@ -399,20 +491,83 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 }
 
 func clearSessionMapping(cfg config.AppConfig, key string) error {
-	return mutateSessionMap(cfg, func(m map[string]string) {
-		delete(m, key)
+	return mutateSessionState(cfg, func(st *storage.StateData) {
+		delete(st.SessionMap, key)
+		delete(st.SessionMeta, key)
+		delete(st.SessionDeleted, key)
+	})
+}
+
+func deleteSessionMapping(cfg config.AppConfig, key string) error {
+	return mutateSessionState(cfg, func(st *storage.StateData) {
+		delete(st.SessionMap, key)
+		delete(st.SessionMeta, key)
+		st.SessionDeleted[key] = time.Now().UTC().Format(time.RFC3339)
 	})
 }
 
 func deleteAllSessionMappings(cfg config.AppConfig) error {
-	return mutateSessionMap(cfg, func(m map[string]string) {
-		for k := range m {
-			delete(m, k)
+	return mutateSessionState(cfg, func(st *storage.StateData) {
+		for k := range st.SessionMap {
+			delete(st.SessionMap, k)
+		}
+		for k := range st.SessionMeta {
+			delete(st.SessionMeta, k)
+		}
+		for k := range st.SessionDeleted {
+			delete(st.SessionDeleted, k)
 		}
 	})
 }
 
-func mutateSessionMap(cfg config.AppConfig, mutator func(map[string]string)) error {
+func upsertSessionMetadata(cfg config.AppConfig, key, workdir string) (SessionMutationPayload, error) {
+	store, err := storage.NewBackend(
+		cfg.StorageBackend,
+		cfg.StateFile,
+		cfg.InteractionLogFile,
+		cfg.ReportDir,
+		cfg.StorageSQLitePath,
+	)
+	if err != nil {
+		return SessionMutationPayload{}, err
+	}
+	st, err := store.LoadState()
+	if err != nil {
+		return SessionMutationPayload{}, err
+	}
+	if st.SessionMap == nil {
+		st.SessionMap = map[string]string{}
+	}
+	if st.SessionMeta == nil {
+		st.SessionMeta = map[string]storage.SessionMetaRecord{}
+	}
+	if st.SessionDeleted == nil {
+		st.SessionDeleted = map[string]string{}
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	meta := st.SessionMeta[key]
+	meta.Workdir = strings.TrimSpace(workdir)
+	meta.UpdatedAt = now
+	if strings.TrimSpace(meta.Status) == "" {
+		meta.Status = "ready"
+	}
+	st.SessionMeta[key] = meta
+	delete(st.SessionDeleted, key)
+	if err := store.SaveState(st); err != nil {
+		return SessionMutationPayload{}, err
+	}
+	return SessionMutationPayload{
+		OK:         true,
+		Action:     "session-new",
+		SessionKey: key,
+		SessionID:  strings.TrimSpace(st.SessionMap[key]),
+		Workdir:    meta.Workdir,
+		UpdatedAt:  meta.UpdatedAt,
+		Status:     meta.Status,
+	}, nil
+}
+
+func mutateSessionState(cfg config.AppConfig, mutator func(*storage.StateData)) error {
 	store, err := storage.NewBackend(
 		cfg.StorageBackend,
 		cfg.StateFile,
@@ -430,7 +585,13 @@ func mutateSessionMap(cfg config.AppConfig, mutator func(map[string]string)) err
 	if st.SessionMap == nil {
 		st.SessionMap = map[string]string{}
 	}
-	mutator(st.SessionMap)
+	if st.SessionMeta == nil {
+		st.SessionMeta = map[string]storage.SessionMetaRecord{}
+	}
+	if st.SessionDeleted == nil {
+		st.SessionDeleted = map[string]string{}
+	}
+	mutator(&st)
 	return store.SaveState(st)
 }
 

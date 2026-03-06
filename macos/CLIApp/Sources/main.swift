@@ -153,11 +153,14 @@ final class GatewayController: ObservableObject {
     @Published var localDraftText: String = ""
     @Published var localSending: Bool = false
     @Published var currentLogFile: String = ""
+    @Published var selectedSessionWorkdir: String = ""
 
     private let cfg: GatewayConfig
     private let channelDefaultsKey = "gateway.selected_channel"
     private let hiddenSessionsDefaultsPrefix = "gateway.hidden_sessions"
+    private let sessionWorkdirDefaultsPrefix = "gateway.session_workdir"
     private var hiddenSessionCutoffByKey: [String: String] = [:]
+    private var sessionWorkdirByKey: [String: String] = [:]
     private var localOverlayMessagesBySession: [String: [ChatMessage]] = [:]
     private var lastLocalSendFingerprint: String = ""
     private var lastLocalSendAt: Date = .distantPast
@@ -172,7 +175,9 @@ final class GatewayController: ObservableObject {
         cfg = try GatewayController.loadConfig()
         selectedChannel = GatewayController.detectEnvChannel(repoRoot: cfg.repoRoot)
         hiddenSessionCutoffByKey = loadHiddenSessionCutoffByKey()
+        sessionWorkdirByKey = loadSessionWorkdirByKey()
         currentLogFile = cfg.logFile
+        selectedSessionWorkdir = ""
         let guiLogPath = URL(fileURLWithPath: cfg.logFile).deletingLastPathComponent().appendingPathComponent("gui.log").path
         GUILogger.shared.setLogPath(guiLogPath)
         log("controller init repo=\(cfg.repoRoot) workdir=\(cfg.workdir)")
@@ -180,6 +185,10 @@ final class GatewayController: ObservableObject {
 
     private var hiddenSessionsDefaultsKey: String {
         "\(hiddenSessionsDefaultsPrefix).\(cfg.repoRoot)"
+    }
+
+    private var sessionWorkdirDefaultsKey: String {
+        "\(sessionWorkdirDefaultsPrefix).\(cfg.repoRoot)"
     }
 
     private func nowISO8601() -> String {
@@ -204,6 +213,42 @@ final class GatewayController: ObservableObject {
 
     private func saveHiddenSessionCutoffByKey() {
         UserDefaults.standard.set(hiddenSessionCutoffByKey, forKey: hiddenSessionsDefaultsKey)
+    }
+
+    private func loadSessionWorkdirByKey() -> [String: String] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: sessionWorkdirDefaultsKey) else {
+            return [:]
+        }
+        var out: [String: String] = [:]
+        for (k, v) in raw {
+            guard let path = v as? String else { continue }
+            let key = k.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            if key.isEmpty || cleanedPath.isEmpty { continue }
+            out[key] = cleanedPath
+        }
+        return out
+    }
+
+    private func saveSessionWorkdirByKey() {
+        UserDefaults.standard.set(sessionWorkdirByKey, forKey: sessionWorkdirDefaultsKey)
+    }
+
+    private func baseSessionKey(_ key: String) -> String {
+        key.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? key
+    }
+
+    private func workdirForSessionKey(_ key: String) -> String {
+        let base = baseSessionKey(key)
+        return (sessionWorkdirByKey[base] ?? sessionWorkdirByKey[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func refreshSelectedSessionWorkdir() {
+        guard let key = selectedSessionKey, !key.isEmpty else {
+            selectedSessionWorkdir = ""
+            return
+        }
+        selectedSessionWorkdir = workdirForSessionKey(key)
     }
 
     private func hideSessionKey(_ key: String) {
@@ -294,6 +339,50 @@ final class GatewayController: ObservableObject {
         }
         let finalText = lines.joined(separator: "\n") + "\n"
         try? finalText.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    func addSessionByPickingWorkdir() {
+        guard let key = selectedSessionKey, !key.isEmpty else {
+            detailText = "Select a session first."
+            return
+        }
+        let targetSessionKey = baseSessionKey(key)
+
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Use Workdir"
+        panel.message = "Select a local working directory for this session's CLI runs."
+
+        let fallbackDir = workdirForSessionKey(targetSessionKey).isEmpty
+            ? (cfg.workdir.isEmpty ? cfg.repoRoot : cfg.workdir)
+            : workdirForSessionKey(targetSessionKey)
+        panel.directoryURL = URL(fileURLWithPath: fallbackDir)
+
+        let response = panel.runModal()
+        guard response == .OK, let dirURL = panel.url else {
+            detailText = "Add Session cancelled."
+            return
+        }
+
+        let selectedPath = dirURL.path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selectedPath.isEmpty else {
+            detailText = "Invalid workdir path."
+            return
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: selectedPath, isDirectory: &isDir), isDir.boolValue else {
+            detailText = "Workdir not found: \(selectedPath)"
+            return
+        }
+
+        sessionWorkdirByKey[targetSessionKey] = selectedPath
+        saveSessionWorkdirByKey()
+        refreshSelectedSessionWorkdir()
+        detailText = "Session workdir updated: \(selectedPath)"
+        log("session workdir updated session_key=\(targetSessionKey) path=\(selectedPath)")
     }
 
     private func shellOutput(_ command: String, timeoutSec: TimeInterval? = nil) -> (code: Int32, stdout: String, stderr: String, output: String) {
@@ -845,6 +934,7 @@ final class GatewayController: ObservableObject {
                 if self.selectedSessionKey == nil {
                     self.selectedSessionKey = self.sessions.first(where: { $0.latest })?.sessionKey ?? self.sessions.first?.sessionKey
                 }
+                self.refreshSelectedSessionWorkdir()
                 self.refreshSelectedSessionChat()
             }
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
@@ -856,6 +946,7 @@ final class GatewayController: ObservableObject {
         onMain { [weak self] in
             self?.sessions = []
             self?.selectedSessionKey = nil
+            self?.selectedSessionWorkdir = ""
             self?.chatMessages = []
             self?.timelineByMsgId = [:]
         }
@@ -866,6 +957,7 @@ final class GatewayController: ObservableObject {
 
     func selectSession(_ key: String?) {
         selectedSessionKey = key
+        refreshSelectedSessionWorkdir()
         refreshSelectedSessionChat()
     }
 
@@ -1081,6 +1173,12 @@ final class GatewayController: ObservableObject {
             text = cmd.payload
         }
 
+        let sessionWorkdir = workdirForSessionKey(baseSessionKey)
+        if sessionWorkdir.isEmpty {
+            detailText = "Send failed: this session requires workdir. Click Add Session and pick a directory first."
+            return
+        }
+
         localSending = true
 
         let userMsgId = "local-u-\(Int(Date().timeIntervalSince1970 * 1000))"
@@ -1110,7 +1208,8 @@ final class GatewayController: ObservableObject {
         let timeout = localChatTimeoutSec()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let sendArgs = ["--session-key", baseSessionKey, "--message-id", userMsgId, "--text", text]
+            var sendArgs = ["--session-key", baseSessionKey, "--message-id", userMsgId, "--text", text]
+            sendArgs.append(contentsOf: ["--workdir", sessionWorkdir])
             let result = self.cagJSON("send", args: sendArgs, timeoutSec: timeout)
             DispatchQueue.main.async {
                 self.localSending = false
@@ -1134,7 +1233,8 @@ final class GatewayController: ObservableObject {
                     )
                     self.removeOverlayMessage(sessionKey: selectedSessionKey, messageId: userMsgId)
                     let elapsed = (node["elapsed_sec"] as? Int) ?? 0
-                    self.detailText = elapsed > 0 ? "Session processed (\(elapsed)s)." : "Session processed."
+                    let wdSuffix = sessionWorkdir.isEmpty ? "" : " [workdir]"
+                    self.detailText = elapsed > 0 ? "Session processed (\(elapsed)s).\(wdSuffix)" : "Session processed.\(wdSuffix)"
                     self.refreshSessionsAsync()
                     self.refreshSelectedSessionChat()
                     return
@@ -1165,7 +1265,10 @@ final class GatewayController: ObservableObject {
                 hideSessionKey(s.sessionKey)
             }
             saveHiddenSessionCutoffByKey()
+            sessionWorkdirByKey.removeAll()
+            saveSessionWorkdirByKey()
             selectedSessionKey = nil
+            selectedSessionWorkdir = ""
             refreshSessionsAsync()
             detailText = "Deleted all sessions."
         } else {
@@ -1177,9 +1280,12 @@ final class GatewayController: ObservableObject {
         if key.contains("#") {
             hideSessionKey(key)
             saveHiddenSessionCutoffByKey()
+            sessionWorkdirByKey.removeValue(forKey: baseSessionKey(key))
+            saveSessionWorkdirByKey()
             if selectedSessionKey == key {
                 selectedSessionKey = nil
             }
+            refreshSelectedSessionWorkdir()
             refreshSessionsAsync()
             detailText = "Deleted archived session segment from app list."
             return
@@ -1195,6 +1301,9 @@ final class GatewayController: ObservableObject {
             if selectedSessionKey == key {
                 selectedSessionKey = nil
             }
+            sessionWorkdirByKey.removeValue(forKey: baseSessionKey(key))
+            saveSessionWorkdirByKey()
+            refreshSelectedSessionWorkdir()
             refreshSessionsAsync()
             detailText = "Deleted session: \(key)"
         } else {
@@ -1651,11 +1760,16 @@ struct ContentView: View {
                         Text("Sessions")
                             .font(.title3.weight(.semibold))
                         Spacer()
+                        Button("Add Session") { controller.addSessionByPickingWorkdir() }
                         Button("Delete Selected") { controller.deleteSelectedSession() }
                             .disabled(controller.selectedSessionKey == nil)
                         Button("Delete All") { controller.deleteAllSessions() }
                             .foregroundStyle(.red)
                     }
+                    Text("Session Workdir: \(controller.selectedSessionWorkdir.isEmpty ? "(not set)" : controller.selectedSessionWorkdir)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                     ScrollView {
                         LazyVStack(spacing: 8) {
                             ForEach(controller.sessions) { session in

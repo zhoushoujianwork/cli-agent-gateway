@@ -58,6 +58,7 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 	summary := ""
 	status := "timeout"
 	output := ""
+	terminalReason := "timeout"
 	rawEvents := make([]map[string]any, 0)
 	lastHeartbeat := time.Now()
 	sawChunk := false
@@ -97,13 +98,14 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 					summary = "任务已处理完成。"
 				}
 				return core.TaskResult{
-					TraceID:    req.TraceID,
-					Status:     "ok",
-					Summary:    summary,
-					ElapsedSec: int(time.Since(start).Seconds()),
-					SessionID:  sessionID,
-					OutputText: output,
-					RawEvents:  rawEvents,
+					TraceID:        req.TraceID,
+					Status:         "ok",
+					Summary:        summary,
+					TerminalReason: "idle_after_chunk",
+					ElapsedSec:     int(time.Since(start).Seconds()),
+					SessionID:      sessionID,
+					OutputText:     output,
+					RawEvents:      rawEvents,
 				}, nil
 			}
 
@@ -146,30 +148,37 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 				}
 				if result, ok := resp.Result.(map[string]any); ok {
 					text := extractText(result)
-					if text != "" {
+					rawText, hasRawText := extractRawText(result)
+					if text != "" || hasRawText {
 						if isChunkUpdate(sessionUpdateType(result)) {
-							output = appendChunk(output, text)
-							summary = strings.TrimSpace(output)
+							output = appendRawChunk(output, rawText)
+							if text != "" {
+								summary = appendChunk(summary, text)
+							}
 							sawChunk = true
 						} else {
-							summary = text
-							output = text
+							if text != "" {
+								summary = text
+							}
+							output = rawText
 						}
 						lastContentAt = time.Now()
 					}
 					if isTerminal(result) {
 						status = statusFrom(result)
+						terminalReason = terminalReasonFrom(result)
 						if summary == "" {
 							summary = "任务已处理完成。"
 						}
 						return core.TaskResult{
-							TraceID:    req.TraceID,
-							Status:     status,
-							Summary:    summary,
-							ElapsedSec: int(time.Since(start).Seconds()),
-							SessionID:  sessionID,
-							OutputText: output,
-							RawEvents:  rawEvents,
+							TraceID:        req.TraceID,
+							Status:         status,
+							Summary:        summary,
+							TerminalReason: terminalReason,
+							ElapsedSec:     int(time.Since(start).Seconds()),
+							SessionID:      sessionID,
+							OutputText:     output,
+							RawEvents:      rawEvents,
 						}, nil
 					}
 				}
@@ -201,30 +210,38 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 			if n != nil {
 				a.debugf("notification method=%s params=%v", n.Method, n.Params)
 				rawEvents = append(rawEvents, map[string]any{"method": n.Method, "params": n.Params})
-				if text := extractText(n.Params); text != "" {
+				text := extractText(n.Params)
+				rawText, hasRawText := extractRawText(n.Params)
+				if text != "" || hasRawText {
 					if isChunkUpdate(sessionUpdateType(n.Params)) {
-						output = appendChunk(output, text)
-						summary = strings.TrimSpace(output)
+						output = appendRawChunk(output, rawText)
+						if text != "" {
+							summary = appendChunk(summary, text)
+						}
 						sawChunk = true
 					} else {
-						summary = text
-						output = text
+						if text != "" {
+							summary = text
+						}
+						output = rawText
 					}
 					lastContentAt = time.Now()
 				}
 				if isTerminal(n.Params) {
 					status = statusFrom(n.Params)
+					terminalReason = terminalReasonFrom(n.Params)
 					if summary == "" {
 						summary = "任务已处理完成。"
 					}
 					return core.TaskResult{
-						TraceID:    req.TraceID,
-						Status:     status,
-						Summary:    summary,
-						ElapsedSec: int(time.Since(start).Seconds()),
-						SessionID:  sessionID,
-						OutputText: output,
-						RawEvents:  rawEvents,
+						TraceID:        req.TraceID,
+						Status:         status,
+						Summary:        summary,
+						TerminalReason: terminalReason,
+						ElapsedSec:     int(time.Since(start).Seconds()),
+						SessionID:      sessionID,
+						OutputText:     output,
+						RawEvents:      rawEvents,
 					}, nil
 				}
 			}
@@ -238,13 +255,14 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 		summary = "任务超时，未收到终态事件。"
 	}
 	return core.TaskResult{
-		TraceID:    req.TraceID,
-		Status:     status,
-		Summary:    summary,
-		ElapsedSec: int(time.Since(start).Seconds()),
-		SessionID:  sessionID,
-		OutputText: output,
-		RawEvents:  rawEvents,
+		TraceID:        req.TraceID,
+		Status:         status,
+		Summary:        summary,
+		TerminalReason: terminalReason,
+		ElapsedSec:     int(time.Since(start).Seconds()),
+		SessionID:      sessionID,
+		OutputText:     output,
+		RawEvents:      rawEvents,
 	}, nil
 }
 
@@ -341,6 +359,27 @@ func extractText(payload map[string]any) string {
 	return ""
 }
 
+func extractRawText(payload map[string]any) (string, bool) {
+	if u, ok := payload["update"].(map[string]any); ok {
+		if c, ok := u["content"].(map[string]any); ok {
+			if t, ok := c["text"].(string); ok {
+				return t, true
+			}
+		}
+		for _, key := range []string{"summary", "message", "text", "output"} {
+			if t, ok := u[key].(string); ok {
+				return t, true
+			}
+		}
+	}
+	for _, key := range []string{"summary", "message", "text", "output", "content"} {
+		if t, ok := payload[key].(string); ok {
+			return t, true
+		}
+	}
+	return "", false
+}
+
 func isTerminal(payload map[string]any) bool {
 	if u, ok := payload["update"].(map[string]any); ok {
 		su := strings.ToLower(strings.TrimSpace(anyString(u["sessionUpdate"])))
@@ -375,6 +414,41 @@ func statusFrom(payload map[string]any) string {
 		return "cancelled"
 	default:
 		return "ok"
+	}
+}
+
+func terminalReasonFrom(payload map[string]any) string {
+	if u, ok := payload["update"].(map[string]any); ok {
+		su := strings.ToLower(strings.TrimSpace(anyString(u["sessionUpdate"])))
+		switch su {
+		case "turn_complete", "agent_turn_complete", "task_complete", "completed":
+			return "completed"
+		case "":
+			// continue below
+		default:
+			return su
+		}
+	}
+	st := strings.ToLower(strings.TrimSpace(anyString(payload["status"])))
+	if st == "" {
+		st = strings.ToLower(strings.TrimSpace(anyString(payload["state"])))
+	}
+	switch st {
+	case "completed", "done", "success":
+		return "completed"
+	case "failed", "error":
+		return "error"
+	case "cancelled":
+		return "cancelled"
+	case "timeout":
+		return "timeout"
+	case "":
+		if b, ok := payload["is_terminal"].(bool); ok && b {
+			return "terminal"
+		}
+		return ""
+	default:
+		return st
 	}
 }
 
@@ -472,6 +546,13 @@ func appendChunk(base, chunk string) string {
 		return base + next
 	}
 	return base + " " + next
+}
+
+func appendRawChunk(base, chunk string) string {
+	if chunk == "" {
+		return base
+	}
+	return base + chunk
 }
 
 func punctuationOnly(s string) bool {

@@ -22,14 +22,15 @@ type TaskRequest struct {
 }
 
 type TaskResult struct {
-	TraceID    string
-	Status     string
-	Summary    string
-	ElapsedSec int
-	SessionID  string
-	OutputText string
-	ErrorText  string
-	RawEvents  []map[string]any
+	TraceID        string
+	Status         string
+	Summary        string
+	TerminalReason string
+	ElapsedSec     int
+	SessionID      string
+	OutputText     string
+	ErrorText      string
+	RawEvents      []map[string]any
 }
 
 // ChannelAdapter handles ingress/egress for a channel.

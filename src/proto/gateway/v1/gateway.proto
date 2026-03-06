@@ -41,6 +41,9 @@ message SessionItem {
   string last_message = 7;
   string last_time = 8;
   bool latest = 9;
+  string workdir = 10;
+  string updated_at = 11;
+  string status = 12;
 }
 
 message SessionsResponse {
@@ -57,6 +60,7 @@ message SendToSessionRequest {
   string msg_type = 5;
   bool dry_run = 6;
   string source = 7;
+  string workdir = 8;
 }
 
 message SendToSessionResponse {
@@ -72,6 +76,25 @@ message SendToSessionResponse {
   string session_id = 10;
   string result = 11;
   int32 elapsed_sec = 12;
+  string raw_output = 13;
+  string result_json = 14;
+  string terminal_reason = 15;
+}
+
+message SessionNewRequest {
+  string repo_root = 1;
+  string session_key = 2;
+  string workdir = 3;
+}
+
+message SessionNewResponse {
+  bool ok = 1;
+  string error = 2;
+  string session_key = 3;
+  string session_id = 4;
+  string workdir = 5;
+  string updated_at = 6;
+  string status = 7;
 }
 
 message SessionMessagesRequest {
@@ -147,6 +170,7 @@ message HealthCheckResponse {
 service GatewayControl {
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc Sessions(SessionsRequest) returns (SessionsResponse);
+  rpc SessionNew(SessionNewRequest) returns (SessionNewResponse);
   rpc Start(StatusRequest) returns (StatusResponse);
   rpc Stop(StatusRequest) returns (StatusResponse);
   rpc Restart(StatusRequest) returns (StatusResponse);

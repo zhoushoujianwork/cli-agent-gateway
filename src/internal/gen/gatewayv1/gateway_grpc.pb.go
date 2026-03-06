@@ -24,6 +24,7 @@ const _ = grpc.SupportPackageIsVersion7
 type GatewayControlClient interface {
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	Sessions(ctx context.Context, in *SessionsRequest, opts ...grpc.CallOption) (*SessionsResponse, error)
+	SessionNew(ctx context.Context, in *SessionNewRequest, opts ...grpc.CallOption) (*SessionNewResponse, error)
 	Start(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	Stop(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	Restart(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
@@ -56,6 +57,15 @@ func (c *gatewayControlClient) Status(ctx context.Context, in *StatusRequest, op
 func (c *gatewayControlClient) Sessions(ctx context.Context, in *SessionsRequest, opts ...grpc.CallOption) (*SessionsResponse, error) {
 	out := new(SessionsResponse)
 	err := c.cc.Invoke(ctx, "/gateway.v1.GatewayControl/Sessions", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayControlClient) SessionNew(ctx context.Context, in *SessionNewRequest, opts ...grpc.CallOption) (*SessionNewResponse, error) {
+	out := new(SessionNewResponse)
+	err := c.cc.Invoke(ctx, "/gateway.v1.GatewayControl/SessionNew", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +168,7 @@ func (c *gatewayControlClient) DeleteAllSessions(ctx context.Context, in *EmptyR
 type GatewayControlServer interface {
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
 	Sessions(context.Context, *SessionsRequest) (*SessionsResponse, error)
+	SessionNew(context.Context, *SessionNewRequest) (*SessionNewResponse, error)
 	Start(context.Context, *StatusRequest) (*StatusResponse, error)
 	Stop(context.Context, *StatusRequest) (*StatusResponse, error)
 	Restart(context.Context, *StatusRequest) (*StatusResponse, error)
@@ -180,6 +191,9 @@ func (UnimplementedGatewayControlServer) Status(context.Context, *StatusRequest)
 }
 func (UnimplementedGatewayControlServer) Sessions(context.Context, *SessionsRequest) (*SessionsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Sessions not implemented")
+}
+func (UnimplementedGatewayControlServer) SessionNew(context.Context, *SessionNewRequest) (*SessionNewResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SessionNew not implemented")
 }
 func (UnimplementedGatewayControlServer) Start(context.Context, *StatusRequest) (*StatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Start not implemented")
@@ -256,6 +270,24 @@ func _GatewayControl_Sessions_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(GatewayControlServer).Sessions(ctx, req.(*SessionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayControl_SessionNew_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SessionNewRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayControlServer).SessionNew(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/gateway.v1.GatewayControl/SessionNew",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayControlServer).SessionNew(ctx, req.(*SessionNewRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -454,6 +486,10 @@ var GatewayControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Sessions",
 			Handler:    _GatewayControl_Sessions_Handler,
+		},
+		{
+			MethodName: "SessionNew",
+			Handler:    _GatewayControl_SessionNew_Handler,
 		},
 		{
 			MethodName: "Start",

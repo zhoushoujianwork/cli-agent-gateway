@@ -62,7 +62,7 @@ type AppConfig struct {
 }
 
 func Load(repoRoot, workdirArg string) (AppConfig, error) {
-	if err := envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env")); err != nil {
+	if err := loadEnvDefaults(repoRoot); err != nil {
 		return AppConfig{}, err
 	}
 
@@ -156,6 +156,20 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 		cfg.TimeoutSec = 1
 	}
 	return cfg, nil
+}
+
+func loadEnvDefaults(repoRoot string) error {
+	if err := envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env")); err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return nil
+	}
+	if err := envfile.LoadDotEnvSetDefault(filepath.Join(home, ".cag", ".env")); err != nil {
+		return err
+	}
+	return nil
 }
 
 func getEnv(key, fallback string) string {

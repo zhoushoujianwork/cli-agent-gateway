@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,10 +12,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"cli-agent-gateway/internal/config"
 	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
+	"cli-agent-gateway/internal/infra/envfile"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -23,6 +26,8 @@ import (
 const defaultGatewaydAddr = "127.0.0.1:58473"
 const defaultGatewaydLogFile = "logs/.gatewayd.log"
 const gatewaydStateFileName = ".cli_agent_gatewayd.json"
+
+var gatewayAddrEnvOnce sync.Once
 
 type gatewaydState struct {
 	PID       int    `json:"pid"`
@@ -100,10 +105,51 @@ func (s *gatewayControlServer) Sessions(_ context.Context, req *gatewayv1.Sessio
 			ThreadId:    it.ThreadID,
 			LastMessage: it.LastMessage,
 			LastTime:    it.LastTime,
+			Workdir:     it.Workdir,
+			UpdatedAt:   it.UpdatedAt,
+			Status:      it.Status,
 			Latest:      it.Latest,
 		})
 	}
 	return out, nil
+}
+
+func (s *gatewayControlServer) SessionNew(_ context.Context, req *gatewayv1.SessionNewRequest) (*gatewayv1.SessionNewResponse, error) {
+	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
+	cfg, err := config.Load(root, "")
+	if err != nil {
+		return &gatewayv1.SessionNewResponse{Ok: false, Error: err.Error()}, nil
+	}
+	key := normalizeSessionKey(req.GetSessionKey())
+	if key == "" {
+		return &gatewayv1.SessionNewResponse{Ok: false, Error: "session key required"}, nil
+	}
+	workdir, err := normalizeWorkdirPath(root, req.GetWorkdir())
+	if err != nil {
+		return &gatewayv1.SessionNewResponse{Ok: false, Error: err.Error()}, nil
+	}
+	if strings.TrimSpace(workdir) == "" {
+		return &gatewayv1.SessionNewResponse{Ok: false, Error: "workdir required"}, nil
+	}
+	info, err := os.Stat(workdir)
+	if err != nil {
+		return &gatewayv1.SessionNewResponse{Ok: false, Error: fmt.Sprintf("invalid workdir: %s", workdir)}, nil
+	}
+	if !info.IsDir() {
+		return &gatewayv1.SessionNewResponse{Ok: false, Error: fmt.Sprintf("invalid workdir (not a directory): %s", workdir)}, nil
+	}
+	payload, err := upsertSessionMetadata(cfg, key, workdir)
+	if err != nil {
+		return &gatewayv1.SessionNewResponse{Ok: false, Error: err.Error(), SessionKey: key}, nil
+	}
+	return &gatewayv1.SessionNewResponse{
+		Ok:         true,
+		SessionKey: payload.SessionKey,
+		SessionId:  payload.SessionID,
+		Workdir:    payload.Workdir,
+		UpdatedAt:  payload.UpdatedAt,
+		Status:     payload.Status,
+	}, nil
 }
 
 func (s *gatewayControlServer) Start(_ context.Context, req *gatewayv1.StatusRequest) (*gatewayv1.StatusResponse, error) {
@@ -197,20 +243,30 @@ func (s *gatewayControlServer) SendToSession(_ context.Context, req *gatewayv1.S
 		source,
 		msgID,
 		req.GetDryRun(),
+		strings.TrimSpace(req.GetWorkdir()),
 	)
+	resultJSON := ""
+	if payload.ResultJSON != nil {
+		if raw, err := json.Marshal(payload.ResultJSON); err == nil {
+			resultJSON = string(raw)
+		}
+	}
 	resp := &gatewayv1.SendToSessionResponse{
-		Ok:         payload.OK,
-		Error:      payload.Error,
-		Channel:    payload.Channel,
-		To:         payload.To,
-		MessageId:  payload.MessageID,
-		MsgType:    payload.MsgType,
-		DryRun:     payload.DryRun,
-		Source:     payload.Source,
-		SessionKey: payload.SessionKey,
-		SessionId:  payload.SessionID,
-		Result:     payload.Result,
-		ElapsedSec: int32(payload.ElapsedSec),
+		Ok:             payload.OK,
+		Error:          payload.Error,
+		Channel:        payload.Channel,
+		To:             payload.To,
+		MessageId:      payload.MessageID,
+		MsgType:        payload.MsgType,
+		DryRun:         payload.DryRun,
+		Source:         payload.Source,
+		SessionKey:     payload.SessionKey,
+		SessionId:      payload.SessionID,
+		Result:         payload.Result,
+		ElapsedSec:     int32(payload.ElapsedSec),
+		RawOutput:      payload.RawOutput,
+		ResultJson:     resultJSON,
+		TerminalReason: payload.TerminalReason,
 	}
 	if execErr != nil {
 		resp.Ok = false
@@ -274,7 +330,7 @@ func (s *gatewayControlServer) ClearSession(_ context.Context, req *gatewayv1.Se
 }
 
 func (s *gatewayControlServer) DeleteSession(_ context.Context, req *gatewayv1.SessionKeyRequest) (*gatewayv1.SessionMutationResponse, error) {
-	return s.mutateSession(req.GetRepoRoot(), req.GetSessionKey(), clearSessionMapping)
+	return s.mutateSession(req.GetRepoRoot(), req.GetSessionKey(), deleteSessionMapping)
 }
 
 func (s *gatewayControlServer) DeleteAllSessions(_ context.Context, req *gatewayv1.EmptyRepoRequest) (*gatewayv1.SessionMutationResponse, error) {
@@ -650,7 +706,41 @@ func shutdownManagedGatewayd(repoRoot string) (bool, error) {
 }
 
 func gatewaydStatePath(repoRoot string) string {
-	return filepath.Join(repoRoot, gatewaydStateFileName)
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		home = os.TempDir()
+	}
+	return gatewaydStatePathForHome(home, repoRoot)
+}
+
+func gatewaydStatePathForHome(home, repoRoot string) string {
+	root := strings.TrimSpace(repoRoot)
+	if root == "" {
+		root = "."
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	base := sanitizeStateToken(filepath.Base(root))
+	if base == "" || base == "." {
+		base = "repo"
+	}
+	sum := sha1.Sum([]byte(root))
+	repoKey := fmt.Sprintf("%s-%x", base, sum[:8])
+	return filepath.Join(home, ".cag", "gatewayd", repoKey, gatewaydStateFileName)
+}
+
+func sanitizeStateToken(v string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(v) {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('-')
+	}
+	out := strings.Trim(strings.TrimSpace(b.String()), "-")
+	return out
 }
 
 func loadGatewaydState(repoRoot string) (gatewaydState, error) {
@@ -667,6 +757,9 @@ func loadGatewaydState(repoRoot string) (gatewaydState, error) {
 
 func saveGatewaydState(repoRoot string, state gatewaydState) error {
 	path := gatewaydStatePath(repoRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	tmp := path + ".tmp"
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -792,7 +885,7 @@ func trySessionsViaGRPC(repoRoot string, limit int) (*gatewayv1.SessionsResponse
 	})
 }
 
-func trySendToSessionViaGRPC(repoRoot, sessionKey, text, messageID, msgType string, dryRun bool, source string) (*gatewayv1.SendToSessionResponse, error) {
+func trySendToSessionViaGRPC(repoRoot, sessionKey, text, messageID, msgType string, dryRun bool, source, workdir string) (*gatewayv1.SendToSessionResponse, error) {
 	cli, conn, err := grpcGatewayClient(repoRoot)
 	if err != nil {
 		return nil, err
@@ -808,6 +901,22 @@ func trySendToSessionViaGRPC(repoRoot, sessionKey, text, messageID, msgType stri
 		MsgType:    msgType,
 		DryRun:     dryRun,
 		Source:     source,
+		Workdir:    workdir,
+	})
+}
+
+func trySessionNewViaGRPC(repoRoot, sessionKey, workdir string) (*gatewayv1.SessionNewResponse, error) {
+	cli, conn, err := grpcGatewayClient(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	return cli.SessionNew(ctx, &gatewayv1.SessionNewRequest{
+		RepoRoot:   repoRoot,
+		SessionKey: sessionKey,
+		Workdir:    workdir,
 	})
 }
 
@@ -895,10 +1004,21 @@ func dialGateway(addr string, timeout time.Duration) (*grpc.ClientConn, error) {
 }
 
 func gatewaydAddr() string {
+	loadGatewayAddrEnvDefaults()
 	if v := strings.TrimSpace(os.Getenv("GATEWAYD_ADDR")); v != "" {
 		return v
 	}
 	return defaultGatewaydAddr
+}
+
+func loadGatewayAddrEnvDefaults() {
+	gatewayAddrEnvOnce.Do(func() {
+		home, err := os.UserHomeDir()
+		if err != nil || strings.TrimSpace(home) == "" {
+			return
+		}
+		_ = envfile.LoadDotEnvSetDefault(filepath.Join(home, ".cag", ".env"))
+	})
 }
 
 func grpcDisabled() bool {
