@@ -39,7 +39,9 @@ GUI 用户操作映射：
 ## 消息状态映射
 
 - GUI 发送前：本地显示 `sending`
-- CLI 返回 `ok=true`：更新为 `sent`
+- 消息写入系统（`messages` 可见 `status=sent`）：更新为 `sent`
+- 服务端处理中（`messages` 可见 `status=processing`）：更新为 `processing`
+- CLI 闭环完成且 `ok=true`：保留 `sent`，并刷新会话/消息
 - CLI 返回 `ok=false` 或非 0 退出码：更新为 `failed`
 - `failed` 时展示 `error.code` 与 `error.message`
 

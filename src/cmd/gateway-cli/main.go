@@ -1251,9 +1251,27 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		return payload, nil
 	}
 
+	agentWorkdir := strings.TrimSpace(cfg.Workdir)
+	if agentWorkdir == "" {
+		agentWorkdir = cfg.RepoRoot
+	}
+	if _, err := os.Stat(agentWorkdir); err != nil {
+		fallback := strings.TrimSpace(cfg.RepoRoot)
+		if fallback != "" {
+			if _, fbErr := os.Stat(fallback); fbErr == nil {
+				agentWorkdir = fallback
+			}
+		}
+	}
+	if _, err := os.Stat(agentWorkdir); err != nil {
+		payload.OK = false
+		payload.Error = fmt.Sprintf("invalid workdir: %s", agentWorkdir)
+		return payload, err
+	}
+
 	agent := acp.NewAdapter(
 		cfg.ACPAgentCmd,
-		cfg.Workdir,
+		agentWorkdir,
 		cfg.PermissionPolicy,
 		cfg.TimeoutSec,
 		cfg.InitializeTimeoutSec,
@@ -1309,7 +1327,7 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		Metadata: map[string]any{
 			"received_ts": now,
 			"message_id":  msgID,
-			"workdir":     cfg.Workdir,
+			"workdir":     agentWorkdir,
 			"source":      "gui",
 			"sender_name": senderName,
 		},

@@ -260,6 +260,19 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 	timelineMap := map[string][]SessionProcessEvent{}
 	seenInbound := map[string]struct{}{}
 	seenFinal := map[string]struct{}{}
+	userMsgIndex := map[string]int{}
+	setUserStatus := func(msgID, status, detail string) {
+		idx, ok := userMsgIndex[msgID]
+		if !ok || idx < 0 || idx >= len(msgs) {
+			return
+		}
+		if strings.TrimSpace(status) != "" {
+			msgs[idx].Status = strings.TrimSpace(status)
+		}
+		if strings.TrimSpace(detail) != "" {
+			msgs[idx].StatusDetail = strings.TrimSpace(detail)
+		}
+	}
 
 	for idx, rec := range records {
 		msgID := cleanAnyString(rec["msg_id"])
@@ -293,7 +306,9 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 				Role:        "user",
 				Text:        text,
 				Time:        ts,
+				Status:      "sent",
 			})
+			userMsgIndex[msgID] = len(msgs) - 1
 			continue
 		}
 		if kind == "trace" {
@@ -311,6 +326,14 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 				Title:  title,
 				Detail: detail,
 			})
+			switch strings.ToLower(title) {
+			case "session_resolved", "execute_start", "execute_done", "send_progress_ok", "acp_event", "send_final_ok":
+				setUserStatus(msgID, "processing", title)
+			case "send_ack_ok":
+				setUserStatus(msgID, "sent", "")
+			case "send_ack_failed", "send_final_failed":
+				setUserStatus(msgID, "failed", detail)
+			}
 			continue
 		}
 
@@ -330,12 +353,28 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 			continue
 		}
 		seenFinal[msgID] = struct{}{}
+		statusLower := strings.ToLower(strings.TrimSpace(status))
+		switch {
+		case errText != "", statusLower == "error", statusLower == "failed", statusLower == "timeout":
+			setUserStatus(msgID, "failed", nonEmpty(errText, status))
+		default:
+			setUserStatus(msgID, "sent", "")
+		}
+		finalStatus := strings.TrimSpace(status)
+		if finalStatus == "" {
+			if errText != "" {
+				finalStatus = "error"
+			} else {
+				finalStatus = "done"
+			}
+		}
 		msgs = append(msgs, SessionMessageItem{
 			ID:           "persist-a-" + msgID,
 			SourceMsgID:  msgID,
 			Role:         role,
 			Text:         finalText,
 			Time:         ts,
+			Status:       finalStatus,
 			StatusDetail: status,
 		})
 	}

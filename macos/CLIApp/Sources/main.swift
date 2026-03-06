@@ -59,6 +59,7 @@ struct SessionEntry: Identifiable {
 enum MessageDeliveryStatus: String {
     case sending
     case sent
+    case processing
     case failed
     case action
 }
@@ -165,6 +166,7 @@ final class GatewayController: ObservableObject {
     private var refreshingHealth = false
     private var refreshingStatus = false
     private var refreshingSessions = false
+    private var refreshingChat = false
 
     init() throws {
         cfg = try GatewayController.loadConfig()
@@ -439,6 +441,9 @@ final class GatewayController: ObservableObject {
         case "sessions":
             if refreshingSessions { return false }
             refreshingSessions = true
+        case "chat":
+            if refreshingChat { return false }
+            refreshingChat = true
         default:
             return true
         }
@@ -455,6 +460,8 @@ final class GatewayController: ObservableObject {
             refreshingStatus = false
         case "sessions":
             refreshingSessions = false
+        case "chat":
+            refreshingChat = false
         default:
             break
         }
@@ -502,6 +509,21 @@ final class GatewayController: ObservableObject {
                 self?.log("refresh end kind=sessions")
             }
             self?.refreshSessions()
+        }
+    }
+
+    func refreshSelectedSessionChatAsync() {
+        if !beginRefresh(kind: "chat") {
+            log("refresh skip kind=chat reason=inflight")
+            return
+        }
+        log("refresh start kind=chat")
+        runInBackground { [weak self] in
+            defer {
+                self?.endRefresh(kind: "chat")
+                self?.log("refresh end kind=chat")
+            }
+            self?.refreshSelectedSessionChat()
         }
     }
 
@@ -672,7 +694,10 @@ final class GatewayController: ObservableObject {
                             role: (item["role"] as? String) ?? "assistant",
                             text: (item["text"] as? String) ?? "",
                             time: (item["time"] as? String) ?? ISO8601DateFormatter().string(from: Date()),
-                            deliveryStatus: nil,
+                            deliveryStatus: self.messageDeliveryStatus(
+                                role: (item["role"] as? String) ?? "assistant",
+                                rawStatus: (item["status"] as? String) ?? ""
+                            ),
                             statusDetail: (item["status_detail"] as? String) ?? ""
                         )
                     }
@@ -853,10 +878,32 @@ final class GatewayController: ObservableObject {
         var merged = persisted
         for msg in overlay {
             if !merged.contains(where: { $0.id == msg.id }) {
+                if !msg.sourceMsgId.isEmpty &&
+                    merged.contains(where: { $0.sourceMsgId == msg.sourceMsgId && $0.role == msg.role }) {
+                    continue
+                }
                 merged.append(msg)
             }
         }
         return merged.sorted { $0.time < $1.time }
+    }
+
+    private func messageDeliveryStatus(role: String, rawStatus: String) -> MessageDeliveryStatus? {
+        if role != "user" {
+            return nil
+        }
+        switch rawStatus.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "sending":
+            return .sending
+        case "sent", "done", "ok", "success":
+            return .sent
+        case "processing", "running":
+            return .processing
+        case "failed", "error", "timeout":
+            return .failed
+        default:
+            return nil
+        }
     }
 
     private func appendOverlayMessage(_ msg: ChatMessage, sessionKey: String) {
@@ -1063,7 +1110,7 @@ final class GatewayController: ObservableObject {
         let timeout = localChatTimeoutSec()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let sendArgs = ["--session-key", baseSessionKey, "--text", text]
+            let sendArgs = ["--session-key", baseSessionKey, "--message-id", userMsgId, "--text", text]
             let result = self.cagJSON("send", args: sendArgs, timeoutSec: timeout)
             DispatchQueue.main.async {
                 self.localSending = false
@@ -1347,6 +1394,7 @@ struct ChatBubble: View {
         switch message.deliveryStatus {
         case .sending: return "Sending..."
         case .sent: return "Sent"
+        case .processing: return "Processing..."
         case .failed: return "Failed"
         case .action: return "Action"
         case .none: return ""
@@ -1356,6 +1404,7 @@ struct ChatBubble: View {
     private var deliveryColor: Color {
         switch message.deliveryStatus {
         case .sending: return .orange
+        case .processing: return .blue
         case .failed: return .red
         case .action: return .secondary
         case .sent, .none: return .gray
@@ -1709,7 +1758,9 @@ struct ContentView: View {
         .onReceive(refreshTimer) { _ in
             refreshTick += 1
             controller.refreshStatusAsync()
-            if !controller.localSending && (refreshTick % 3 == 0) {
+            if controller.localSending {
+                controller.refreshSelectedSessionChatAsync()
+            } else if refreshTick % 3 == 0 {
                 controller.refreshSessionsAsync()
             }
         }
