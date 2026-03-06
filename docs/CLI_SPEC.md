@@ -17,6 +17,8 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
 - `config [workdir]`
 - `status [--json]`
 - `gatewayd [--listen <addr>]`
+- `gatewayd-up [--json]`
+- `gatewayd-down [--json]`
 - `health [--json]`
 - `send (--to <id> | --session-key <key>) (--text <msg> | --file <path>) [--msgtype text|markdown] [--channel <name>] [--message-id <id>] [--report-file <path>] [--dry-run] [--json]`
 - `sessions [--limit <n>] [--json]`
@@ -36,7 +38,7 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
 - Missing `.env` for runtime commands (`run`, `start`, `send`) is fatal.
 - `run` does not accept positional workdir arg.
 - `status/start/stop/restart/health/doctor/sessions/send(--session-key)/messages/session-*` 仅通过 gRPC 控制面访问 `gatewayd`。
-- `gatewayd` 不可达时，命令直接失败并输出 `error.code=gateway_unreachable`；不做本地回退或自动拉起。
+- CLI 会在 gRPC 调用前自动确保 `gatewayd` 在线（必要时自动拉起）；不做本地业务回退。
 
 ## Exit codes
 

@@ -4,7 +4,7 @@
 
 macOS GUI 不直接读写网关内部文件，只通过 `gateway` CLI 获取数据与执行动作。
 
-> 注：GUI 相关命令仅经 `gatewayd` gRPC；CLI 不走本地回退、不自动拉起 `gatewayd`，连接失败直接报错。
+> 注：GUI 相关命令仅经 `gatewayd` gRPC；CLI 不走本地业务回退，但会自动确保 `gatewayd` 在线（必要时自动拉起）。
 
 ## 读模型（Read）
 

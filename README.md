@@ -57,6 +57,8 @@ cd src && go run ./cmd/gateway-cli health
 cd src && go run ./cmd/gateway-cli health --json
 cd src && go run ./cmd/gateway-cli doctor --json
 cd src && go run ./cmd/gateway-cli gatewayd --listen 127.0.0.1:58473
+cd src && go run ./cmd/gateway-cli gatewayd-up --json
+cd src && go run ./cmd/gateway-cli gatewayd-down --json
 cd src && go run ./cmd/gateway-cli send --to tester --text "hello" --json
 cd src && go run ./cmd/gateway-cli send --session-key sess_xxx --text "hello from gui" --json
 cd src && go run ./cmd/gateway-cli messages --session-key sess_xxx --json
@@ -70,7 +72,8 @@ cd src && go run ./cmd/gateway-cli send --to tester --file ./message.md --msgtyp
 
 - `gatewayd` 提供控制面 gRPC 服务（当前已开放 `Status/Start/Stop/Restart`、`Health/Doctor`、`Sessions`、`SendToSession`、`SessionMessages`、`Clear/Delete`）。
 - CLI 控制面命令仅通过 gRPC 访问 `gatewayd`（`status/start/stop/restart/health/doctor/sessions/messages/send --session-key/session-*`）。
-- `gatewayd` 不可达时直接报错（`error.code=gateway_unreachable`），不做本地回退/自动拉起。
+- CLI 在 gRPC 调用前会自动确保 `gatewayd` 在线（必要时自动拉起），仍不做本地业务回退。
+- 可显式执行 `gatewayd-up` / `gatewayd-down` 管理控制面进程。
 - 地址通过 `GATEWAYD_ADDR` 控制（默认 `127.0.0.1:58473`）。
 - 可通过 `CAG_GRPC_DISABLE=1` 强制禁用 gRPC 路径。
 

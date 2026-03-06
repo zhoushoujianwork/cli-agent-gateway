@@ -135,6 +135,10 @@ func main() {
 		os.Exit(runSessionsDeleteAll(repoRoot, args))
 	case "gatewayd":
 		os.Exit(runGatewayd(repoRoot, args))
+	case "gatewayd-up":
+		os.Exit(runGatewaydUp(repoRoot, args))
+	case "gatewayd-down":
+		os.Exit(runGatewaydDown(repoRoot, args))
 	case "actions":
 		printActions(os.Stdout)
 	case "help", "-h", "--help":
@@ -162,6 +166,8 @@ func printActions(out *os.File) {
 	fmt.Fprintln(out, "session-delete")
 	fmt.Fprintln(out, "sessions-delete-all")
 	fmt.Fprintln(out, "gatewayd")
+	fmt.Fprintln(out, "gatewayd-up")
+	fmt.Fprintln(out, "gatewayd-down")
 	fmt.Fprintln(out, "actions")
 	fmt.Fprintln(out, "help")
 }
@@ -185,6 +191,8 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  session-delete      Delete session map entry (--session-key)")
 	fmt.Fprintln(out, "  sessions-delete-all Delete all session map entries")
 	fmt.Fprintln(out, "  gatewayd [opts]     Run gRPC control plane server")
+	fmt.Fprintln(out, "  gatewayd-up         Ensure gRPC control plane is running")
+	fmt.Fprintln(out, "  gatewayd-down       Stop managed gRPC control plane process")
 	fmt.Fprintln(out, "  actions             Print supported action names")
 	fmt.Fprintln(out, "  help                Show this message")
 }
