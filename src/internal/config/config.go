@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -61,6 +63,15 @@ type AppConfig struct {
 	DingTalkSendURL         string
 }
 
+type RuntimePaths struct {
+	BaseDir            string
+	ReportDir          string
+	StateFile          string
+	InteractionLogFile string
+	LockFile           string
+	StorageSQLitePath  string
+}
+
 func Load(repoRoot, workdirArg string) (AppConfig, error) {
 	if err := loadEnvDefaults(repoRoot); err != nil {
 		return AppConfig{}, err
@@ -84,9 +95,10 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 
 	workdir := workdirArg
 	if strings.TrimSpace(workdir) == "" {
-		workdir = getEnv("CODEX_WORKDIR", repoRoot)
+		workdir = "~/.cag"
 	}
 	workdir = resolvePath(repoRoot, workdir)
+	runtimePaths := DefaultRuntimePaths(repoRoot)
 
 	allowRaw := strings.TrimSpace(getEnv("ALLOWED_FROM", strings.TrimSpace(getEnv("REMOTE_USER_ID", ""))))
 	allowedFrom := map[string]struct{}{}
@@ -107,10 +119,10 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 		AllowedFrom:          allowedFrom,
 		PollIntervalSec:      getEnvInt("POLL_INTERVAL_SEC", 5),
 		TimeoutSec:           getEnvInt("AGENT_TIMEOUT_SEC", 1800),
-		ReportDir:            resolvePath(repoRoot, getEnv("REPORT_DIR", filepath.Join(repoRoot, ".agent_gateway_reports"))),
-		StateFile:            resolvePath(repoRoot, getEnv("STATE_FILE", filepath.Join(repoRoot, ".agent_gateway_state.json"))),
-		InteractionLogFile:   resolvePath(repoRoot, getEnv("INTERACTION_LOG_FILE", filepath.Join(repoRoot, ".agent_gateway_interactions.jsonl"))),
-		LockFile:             resolvePath(repoRoot, getEnv("LOCK_FILE", filepath.Join(repoRoot, ".cli_agent_gateway.lock"))),
+		ReportDir:            runtimePaths.ReportDir,
+		StateFile:            runtimePaths.StateFile,
+		InteractionLogFile:   runtimePaths.InteractionLogFile,
+		LockFile:             runtimePaths.LockFile,
 		ProcessOnlyLatest:    getEnvBool("PROCESS_ONLY_LATEST", false),
 		ACPAgentCmd:          strings.TrimSpace(getEnv("ACP_AGENT_CMD", "codex-acp")),
 		PermissionPolicy:     strings.TrimSpace(getEnv("ACP_PERMISSION_POLICY", "auto_allow")),
@@ -124,7 +136,7 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 		ShowToolTrace:           getEnvBool("SHOW_TOOL_TRACE", false),
 		ToolProgressNotify:      getEnvBool("TOOL_PROGRESS_NOTIFY_ENABLED", true),
 		StorageBackend:          strings.TrimSpace(getEnv("STORAGE_BACKEND", "sqlite")),
-		StorageSQLitePath:       resolvePath(repoRoot, getEnv("STORAGE_SQLITE_PATH", filepath.Join(repoRoot, ".agent_gateway.db"))),
+		StorageSQLitePath:       runtimePaths.StorageSQLitePath,
 		IMessageFetchCmd:        strings.TrimSpace(getEnv("IMESSAGE_FETCH_CMD", defaultFetchCmd)),
 		IMessageSendCmd:         strings.TrimSpace(getEnv("IMESSAGE_SEND_CMD", defaultSendCmd)),
 		IMessageFetchTimeoutSec: getEnvInt("IMESSAGE_FETCH_TIMEOUT_SEC", 30),
@@ -240,4 +252,26 @@ func resolvePath(repoRoot, path string) string {
 		return abs
 	}
 	return path
+}
+
+func repoRuntimeDir(repoRoot string) string {
+	absRoot := filepath.Clean(repoRoot)
+	if r, err := filepath.Abs(repoRoot); err == nil {
+		absRoot = filepath.Clean(r)
+	}
+	sum := sha1.Sum([]byte(absRoot))
+	repoID := hex.EncodeToString(sum[:])[:12]
+	return filepath.Join("~", ".cag", "runtime", "repos", repoID)
+}
+
+func DefaultRuntimePaths(repoRoot string) RuntimePaths {
+	base := resolvePath(repoRoot, repoRuntimeDir(repoRoot))
+	return RuntimePaths{
+		BaseDir:            base,
+		ReportDir:          filepath.Join(base, "reports"),
+		StateFile:          filepath.Join(base, "state.json"),
+		InteractionLogFile: filepath.Join(base, "interactions.jsonl"),
+		LockFile:           filepath.Join(base, "gateway.lock"),
+		StorageSQLitePath:  filepath.Join(base, "gateway.db"),
+	}
 }

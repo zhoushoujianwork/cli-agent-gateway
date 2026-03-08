@@ -14,7 +14,7 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
 - `start`
 - `stop`
 - `restart`
-- `config [workdir]`
+- `config`
 - `config --global [--gatewayd-addr <addr>]`
 - `status [--json]`
 - `gatewayd [--listen <addr>]`
@@ -64,7 +64,7 @@ Output object:
   "running": true,
   "pid": 12345,
   "started_at": "2026-03-05T04:54:08Z",
-  "lock_file": "/abs/path/.cli_agent_gateway.lock",
+  "lock_file": "/abs/path/gateway.lock",
   "metadata": {
     "channel": "dingtalk",
     "workdir": "/abs/path"
@@ -162,9 +162,10 @@ Semantics:
 
 ### `config`
 
-- `config [workdir]`: 写仓库级 `.env`（兼容现有行为）。
+- `config`: 写仓库级 `.env`（默认运行目录固定为 `~/.cag`）。
 - `config --global`: 写用户级 `~/.cag/.env`（默认写入 `GATEWAYD_ADDR=127.0.0.1:58473`）。
 - `config --global --gatewayd-addr <addr>`: 覆盖用户级 `GATEWAYD_ADDR`。
+- 默认运行态文件（lock/state/db/reports/interactions）位于 `~/.cag/runtime/repos/<repo-id>/`。
 
 ### `start`
 

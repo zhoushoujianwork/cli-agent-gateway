@@ -190,7 +190,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  stop                Stop running gateway process by lock owner pid")
 	fmt.Fprintln(out, "  restart             Stop then start")
 	fmt.Fprintln(out, "  start --log-file    Optional server log path for background runtime")
-	fmt.Fprintln(out, "  config [workdir]    Generate/update repo .env using Go-native defaults")
+	fmt.Fprintln(out, "  config              Generate/update repo .env using Go-native defaults")
 	fmt.Fprintln(out, "  config --global     Generate/update ~/.cag/.env (gateway defaults)")
 	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
@@ -210,7 +210,7 @@ func printUsage(out *os.File) {
 
 func runGoMain(repoRoot string, args []string) int {
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
-		fmt.Fprintln(os.Stderr, "run does not accept workdir arg; configure CODEX_WORKDIR in .env (use `cag config`)")
+		fmt.Fprintln(os.Stderr, "run does not accept positional arguments")
 		return 2
 	}
 	workdir := ""
@@ -323,8 +323,11 @@ func runGoConfig(repoRoot string, args []string) int {
 		fmt.Printf("configured user env file: %s\n", path)
 		return 0
 	}
-	workdir := resolveWorkdir(repoRoot, fs.Args())
-	path, err := config.WriteDefaultEnv(repoRoot, workdir)
+	if len(fs.Args()) > 0 {
+		fmt.Fprintln(os.Stderr, "config does not accept workdir argument; default runtime workdir is ~/.cag")
+		return 2
+	}
+	path, err := config.WriteDefaultEnv(repoRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "write .env failed: %v\n", err)
 		return 1
@@ -2070,19 +2073,12 @@ func buildChannelAdapter(cfg config.AppConfig) core.ChannelAdapter {
 
 func getStatusPayload(repoRoot string) (StatusPayload, error) {
 	loadEnvDefaults(repoRoot)
-	lockPath := strings.TrimSpace(os.Getenv("LOCK_FILE"))
-	if lockPath == "" {
-		lockPath = filepath.Join(repoRoot, ".cli_agent_gateway.lock")
-	}
-	resolvedLock, err := resolveAgainstRepo(repoRoot, lockPath)
+	runtimePaths := config.DefaultRuntimePaths(repoRoot)
+	st, err := lockfile.Inspect(runtimePaths.LockFile)
 	if err != nil {
 		return StatusPayload{}, err
 	}
-	st, err := lockfile.Inspect(resolvedLock)
-	if err != nil {
-		return StatusPayload{}, err
-	}
-	payload := StatusPayload{Running: st.Locked, LockFile: resolvedLock, Metadata: st.Metadata}
+	payload := StatusPayload{Running: st.Locked, LockFile: runtimePaths.LockFile, Metadata: st.Metadata}
 	if st.OwnerPID != nil {
 		pid := *st.OwnerPID
 		payload.PID = &pid
@@ -2177,7 +2173,7 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 
 	envPath := filepath.Join(repoRoot, ".env")
 	if _, err := os.Stat(envPath); err != nil {
-		add("env", false, ".env missing", "run `cag config <workdir>` first")
+		add("env", false, ".env missing", "run `cag config` first")
 		return p
 	}
 	add("env", true, ".env loaded", "")
@@ -2190,7 +2186,7 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 	p.Channel = cfg.ChannelType
 
 	if _, err := os.Stat(cfg.Workdir); err != nil {
-		add("workdir", false, fmt.Sprintf("workdir not accessible: %s", cfg.Workdir), "set CODEX_WORKDIR to an existing directory")
+		add("workdir", false, fmt.Sprintf("workdir not accessible: %s", cfg.Workdir), "create ~/.cag and ensure it is accessible")
 	} else {
 		add("workdir", true, "workdir ready", "")
 	}
@@ -2299,21 +2295,6 @@ func addWritableCheck(items *[]HealthItem, key, dir string) {
 	_ = f.Close()
 	_ = os.Remove(path)
 	*items = append(*items, HealthItem{Key: key, OK: true, Detail: "writable: " + d})
-}
-
-func resolveWorkdir(repoRoot string, args []string) string {
-	for _, arg := range args {
-		if strings.HasPrefix(strings.TrimSpace(arg), "-") {
-			continue
-		}
-		if strings.TrimSpace(arg) != "" {
-			return arg
-		}
-	}
-	if envWorkdir := strings.TrimSpace(os.Getenv("WORKDIR")); envWorkdir != "" {
-		return envWorkdir
-	}
-	return repoRoot
 }
 
 func detectRepoRoot(cwd string) string {

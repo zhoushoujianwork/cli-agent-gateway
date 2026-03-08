@@ -58,7 +58,7 @@ To minimize migration risk, keep these contracts stable:
 ## Migration plan (staged)
 
 1. `infra` port
-- Process lock semantics (`.cli_agent_gateway.lock`).
+- Process lock semantics (`~/.cag/runtime/repos/<repo-id>/gateway.lock` by default).
 - Config loader and defaults.
 - JSON state/log/report persistence.
 

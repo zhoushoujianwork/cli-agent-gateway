@@ -27,7 +27,7 @@
 1. 生成/更新配置：
 
 ```bash
-cd src && go run ./cmd/gateway-cli config /path/to/your/workdir
+cd src && go run ./cmd/gateway-cli config
 cd src && go run ./cmd/gateway-cli config --global
 ```
 
@@ -51,7 +51,7 @@ cd src && go run ./cmd/gateway-cli run
 cd src && go run ./cmd/gateway-cli start
 cd src && go run ./cmd/gateway-cli stop
 cd src && go run ./cmd/gateway-cli restart
-cd src && go run ./cmd/gateway-cli config /path/to/your/workdir
+cd src && go run ./cmd/gateway-cli config
 cd src && go run ./cmd/gateway-cli config --global --gatewayd-addr 127.0.0.1:58473
 cd src && go run ./cmd/gateway-cli status
 cd src && go run ./cmd/gateway-cli status --json

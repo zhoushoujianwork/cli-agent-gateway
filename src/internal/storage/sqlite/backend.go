@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -135,6 +136,9 @@ func (b *Backend) WriteReport(report map[string]any, messageID string) (string, 
 }
 
 func writeReportFile(reportDir string, report map[string]any, messageID string) (string, error) {
+	if sessionKey := extractReportSessionKey(report); sessionKey != "" {
+		reportDir = filepath.Join(reportDir, "sessions", sessionKey)
+	}
 	if err := os.MkdirAll(reportDir, 0o755); err != nil {
 		return "", err
 	}
@@ -152,6 +156,31 @@ func writeReportFile(reportDir string, report map[string]any, messageID string) 
 		return "", err
 	}
 	return path, nil
+}
+
+func extractReportSessionKey(report map[string]any) string {
+	req, ok := report["request"]
+	if !ok || req == nil {
+		return ""
+	}
+	if m, ok := req.(map[string]any); ok {
+		return strings.TrimSpace(fmt.Sprint(m["session_key"]))
+	}
+	v := reflect.ValueOf(req)
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return ""
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return ""
+	}
+	f := v.FieldByName("SessionKey")
+	if !f.IsValid() || f.Kind() != reflect.String {
+		return ""
+	}
+	return strings.TrimSpace(f.String())
 }
 
 func emptyState() storageapi.StateData {

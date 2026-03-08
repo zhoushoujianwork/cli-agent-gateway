@@ -107,8 +107,7 @@ func TestCLIConfigCommand(t *testing.T) {
 
 	bin := buildGatewayBinary(t)
 	repo := t.TempDir()
-	workdir := repo
-	res := runBin(t, bin, repo, "config", workdir)
+	res := runBin(t, bin, repo, "config")
 	if res.Code != 0 {
 		t.Fatalf("config failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
@@ -389,7 +388,6 @@ func createTempRepo(t *testing.T) string {
 	repo := t.TempDir()
 	envPath := filepath.Join(repo, ".env")
 	content := strings.Join([]string{
-		"CODEX_WORKDIR=" + repo,
 		"CHANNEL_TYPE=command",
 		"SMS_FETCH_CMD=printf '[]'",
 		"SMS_SEND_CMD=true",

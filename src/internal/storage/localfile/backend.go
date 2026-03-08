@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -76,7 +77,11 @@ func (b *Backend) WriteReport(report map[string]any, messageID string) (string, 
 	if strings.TrimSpace(b.reportDir) == "" {
 		return "", nil
 	}
-	if err := os.MkdirAll(b.reportDir, 0o755); err != nil {
+	reportDir := b.reportDir
+	if sessionKey := extractReportSessionKey(report); sessionKey != "" {
+		reportDir = filepath.Join(reportDir, "sessions", sessionKey)
+	}
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
 		return "", err
 	}
 	ts := time.Now().Format("20060102_150405")
@@ -84,7 +89,7 @@ func (b *Backend) WriteReport(report map[string]any, messageID string) (string, 
 	if strings.TrimSpace(messageID) == "" {
 		name = fmt.Sprintf("%s_report.json", ts)
 	}
-	path := filepath.Join(b.reportDir, name)
+	path := filepath.Join(reportDir, name)
 	raw, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return "", err
@@ -93,6 +98,31 @@ func (b *Backend) WriteReport(report map[string]any, messageID string) (string, 
 		return "", err
 	}
 	return path, nil
+}
+
+func extractReportSessionKey(report map[string]any) string {
+	req, ok := report["request"]
+	if !ok || req == nil {
+		return ""
+	}
+	if m, ok := req.(map[string]any); ok {
+		return strings.TrimSpace(fmt.Sprint(m["session_key"]))
+	}
+	v := reflect.ValueOf(req)
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return ""
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return ""
+	}
+	f := v.FieldByName("SessionKey")
+	if !f.IsValid() || f.Kind() != reflect.String {
+		return ""
+	}
+	return strings.TrimSpace(f.String())
 }
 
 func emptyState() storageapi.StateData {

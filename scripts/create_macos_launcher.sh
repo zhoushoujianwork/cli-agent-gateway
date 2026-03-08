@@ -72,27 +72,12 @@ if [[ ! -d "$REPO_ROOT/src" ]]; then
 fi
 
 if [[ -z "$WORKDIR" ]]; then
-  ENV_FILE="$REPO_ROOT/.env"
-  if [[ -f "$ENV_FILE" ]]; then
-    WORKDIR="$(awk -F= '/^CODEX_WORKDIR=/{print $2; exit}' "$ENV_FILE" | tr -d '"' | tr -d "'")"
-  fi
-fi
-if [[ -z "$WORKDIR" ]]; then
-  WORKDIR="$REPO_ROOT"
+  WORKDIR="$HOME/.cag"
 fi
 
-LOCK_FILE_RAW=""
-ENV_FILE="$REPO_ROOT/.env"
-if [[ -f "$ENV_FILE" ]]; then
-  LOCK_FILE_RAW="$(awk -F= '/^LOCK_FILE=/{print $2; exit}' "$ENV_FILE" | tr -d '"' | tr -d "'")"
-fi
-if [[ -z "$LOCK_FILE_RAW" ]]; then
-  LOCK_FILE="$REPO_ROOT/.cli_agent_gateway.lock"
-elif [[ "$LOCK_FILE_RAW" = /* ]]; then
-  LOCK_FILE="$LOCK_FILE_RAW"
-else
-  LOCK_FILE="$REPO_ROOT/$LOCK_FILE_RAW"
-fi
+REPO_ID="$(printf "%s" "$REPO_ROOT" | shasum | awk '{print substr($1,1,12)}')"
+RUNTIME_BASE="$HOME/.cag/runtime/repos/$REPO_ID"
+LOCK_FILE="$RUNTIME_BASE/gateway.lock"
 
 mkdir -p "$OUTPUT_DIR"
 APP_PATH="$OUTPUT_DIR/$APP_NAME.app"
