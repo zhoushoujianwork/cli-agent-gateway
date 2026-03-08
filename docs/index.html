@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CLI Agent Gateway - 本地 AI 网关</title>
+    <style>
+        :root { --bg: #0a0a0a; --bg2: #141414; --text: #fff; --text2: #a1a1a1; --accent: #3b82f6; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+        .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+        header { background: rgba(10,10,10,0.9); backdrop-filter: blur(20px); position: fixed; top: 0; width: 100%; border-bottom: 1px solid #2a2a2a; z-index: 100; }
+        .h { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+        .logo { display: flex; align-items: center; gap: 12px; font-weight: 600; }
+        .logo-icon { width: 32px; height: 32px; background: linear-gradient(135deg, var(--accent), #8b5cf6); border-radius: 8px; display: flex; align-items: center; justify-content: center; }
+        .logo-icon svg { width: 18px; height: 18px; color: white; }
+        nav { display: flex; gap: 32px; }
+        nav a { color: var(--text2); text-decoration: none; font-size: 14px; }
+        nav a:hover { color: var(--text); }
+        .btn { padding: 8px 16px; border-radius: 8px; font-size: 14px; cursor: pointer; text-decoration: none; }
+        .btn-ghost { background: transparent; border: 1px solid #2a2a2a; color: var(--text); }
+        .btn-primary { background: var(--accent); border: none; color: white; }
+        .hero { padding: 160px 0 100px; text-align: center; background: radial-gradient(ellipse at top, rgba(59,130,246,0.15) 0%, transparent 60%); }
+        .hero h1 { font-size: 48px; font-weight: 700; margin-bottom: 20px; }
+        .hero h1 span { background: linear-gradient(135deg, var(--accent), #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .hero p { font-size: 18px; color: var(--text2); max-width: 500px; margin: 0 auto 32px; }
+        .hero-actions { display: flex; gap: 16px; justify-content: center; margin-bottom: 50px; }
+        .stats { display: flex; justify-content: center; gap: 60px; }
+        .stat { text-align: center; }
+        .stat-value { font-size: 28px; font-weight: 700; }
+        .stat-label { font-size: 13px; color: #6b6b6b; }
+        .section { padding: 80px 0; }
+        .section-header { text-align: center; margin-bottom: 40px; }
+        .section-header h2 { font-size: 28px; font-weight: 600; margin-bottom: 8px; }
+        .section-header p { color: var(--text2); }
+        .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        .card { background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 12px; padding: 24px; }
+        .card:hover { border-color: var(--accent); }
+        .card-icon { width: 40px; height: 40px; background: rgba(59,130,246,0.1); border-radius: 10px; display: flex; align-items: center; justify-content: center; margin-bottom: 12px; }
+        .card-icon svg { width: 20px; height: 20px; color: var(--accent); }
+        .card h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+        .card p { font-size: 13px; color: var(--text2); }
+        .channels { background: var(--bg2); }
+        .channel-card { background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 12px; padding: 28px; text-align: center; }
+        .channel-icon { width: 56px; height: 56px; background: #2a2a2a; border-radius: 14px; display: flex; align-items: center; justify-content: center; margin: 0 auto 14px; }
+        .channel-icon svg { width: 28px; height: 28px; color: var(--text); }
+        .channel-card h3 { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+        .channel-card p { font-size: 13px; color: var(--text2); margin-bottom: 10px; }
+        .status { display: inline-block; padding: 4px 12px; background: rgba(34,197,94,0.1); color: #22c55e; font-size: 11px; border-radius: 20px; }
+        .tech-content { display: flex; align-items: center; gap: 50px; }
+        .tech-info { flex: 1; }
+        .tech-info h2 { font-size: 28px; font-weight: 600; margin-bottom: 14px; }
+        .tech-info p { font-size: 14px; color: var(--text2); margin-bottom: 20px; }
+        .tags { display: flex; flex-wrap: wrap; gap: 8px; }
+        .tag { padding: 6px 12px; background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; font-size: 12px; color: var(--text2); }
+        .diagram { width: 280px; background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 12px; padding: 18px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+        .d-layer { padding: 8px 14px; background: #1a1a1a; border-radius: 6px; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+        .d-layer svg { width: 16px; height: 16px; color: var(--text2); }
+        .d-layer.hl { background: rgba(59,130,246,0.2); border: 1px solid var(--accent); }
+        .d-layer.hl svg { color: var(--accent); }
+        .d-arrow { color: #4a4a4a; font-size: 14px; }
+        .code { background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 10px; padding: 18px; margin-top: 20px; }
+        .code pre { font-family: monospace; font-size: 12px; line-height: 1.7; }
+        .c { color: #6b6b6b; }
+        .k { color: #c792ea; }
+        .f { color: #82aaff; }
+        footer { padding: 30px 0; border-top: 1px solid #2a2a2a; text-align: center; }
+        footer p { color: #6b6b6b; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container h">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                </div>
+                <span>CLI Agent Gateway</span>
+            </div>
+            <nav>
+                <a href="#features">特性</a>
+                <a href="#channels">通道</a>
+                <a href="#tech">技术</a>
+                <a href="#start">开始</a>
+            </nav>
+            <div style="display:flex;gap:12px;">
+                <a href="https://github.com/mikasakai/cli-agent-gateway" class="btn btn-ghost">GitHub</a>
+                <a href="#start" class="btn btn-primary">开始</a>
+            </div>
+        </div>
+    </header>
+    <section class="hero">
+        <div class="container">
+            <h1>本地 AI 网关<br><span>连接你的 AI 助手</span></h1>
+            <p>开源的本地 AI 网关，支持多通讯通道与 ACP 协议</p>
+            <div class="hero-actions">
+                <a href="#start" class="btn btn-primary">快速开始</a>
+                <a href="https://github.com/mikasakai/cli-agent-gateway" class="btn btn-ghost">文档</a>
+            </div>
+            <div class="stats">
+                <div class="stat"><div class="stat-value">3</div><div class="stat-label">通道</div></div>
+                <div class="stat"><div class="stat-value">Go</div><div class="stat-label">原生</div></div>
+                <div class="stat"><div class="stat-value">ACP</div><div class="stat-label">协议</div></div>
+            </div>
+        </div>
+    </section>
+    <section class="section" id="features">
+        <div class="container">
+            <div class="section-header"><h2>核心特性</h2><p>简洁设计，强大功能</p></div>
+            <div class="grid">
+                <div class="card">
+                    <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></div>
+                    <h3>多通道支持</h3>
+                    <p>DingTalk、iMessage、Command</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+                    <h3>ACP 协议</h3>
+                    <p>基于 JSON-RPC 标准</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>
+                    <h3>会话管理</h3>
+                    <p>多会话、消息持久化</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
+                    <h3>macOS GUI</h3>
+                    <p>原生图形界面</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+                    <h3>高性能</h3>
+                    <p>Go 语言原生</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
+                    <h3>易于扩展</h3>
+                    <p>模块化设计</p>
+                </div>
+            </div>
+        </div>
+    </section>
+    <section class="section channels" id="channels">
+        <div class="container">
+            <div class="section-header"><h2>支持的通道</h2><p>连接多种通讯平台</p></div>
+            <div class="grid">
+                <div class="channel-card">
+                    <div class="channel-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.94-.49-7-3.85-7-7.93s3.06-7.44 7-7.93v15.86zm2-15.86c1.03.13 2 .45 2.87.93H13v-.93zM13 7h5.24c.25.31.48.65.68 1H13V7zm0 3h6.74c.08.33.15.66.19 1H13v-1zm0 9.93V19h2.87c-.87.48-1.84.8-2.87.93zM18.24 17H13v-1h5.92c-.2.35-.43.69-.68 1zm1.5-3H13v-1h6.93c-.04.34-.11.67-.19 1z"/></svg></div>
+                    <h3>DingTalk</h3>
+                    <p>钉钉企业消息</p><span class="status">已支持</span>
+                </div>
+                <div class="channel-card">
+                    <div class="channel-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09l.01-.01zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/></svg></div>
+                    <h3>iMessage</h3>
+                    <p>苹果消息</p><span class="status">已支持</span>
+                </div>
+                <div class="channel-card">
+                    <div class="channel-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div>
+                    <h3>Command</h3>
+                    <p>本地命令行</p><span class="status">已支持</span>
+                </div>
+            </div>
+        </div>
+    </section>
+    <section class="section" id="tech">
+        <div class="container">
+            <div class="section-header"><h2>技术架构</h2><p>现代化技术栈</p></div>
+            <div class="tech-content">
+                <div class="tech-info">
+                    <h2>Go 原生实现</h2>
+                    <p>Go 语言构建，高性能与跨平台能力。ACP 协议对接 AI 代理，支持 SQLite 与本地文件存储。</p>
+                    <div class="tags">
+                        <span class="tag">Go 1.21+</span><span class="tag">gRPC</span><span class="tag">SQLite</span><span class="tag">SwiftUI</span><span class="tag">JSON-RPC</span>
+                    </div>
+                </div>
+                <div class="diagram">
+                    <div class="d-layer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> 通道</div>
+                    <div class="d-arrow">↓</div>
+                    <div class="d-layer hl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> Gateway</div>
+                    <div class="d-arrow">↓</div>
+                    <div class="d-layer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10H12V2z"/><path d="M12 2a10 10 0 0 1 10 10"/></svg> ACP</div>
+                    <div class="d-arrow">↓</div>
+                    <div class="d-layer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg> AI Agent</div>
+                </div>
+            </div>
+        </div>
+    </section>
+    <section class="section" id="start" style="background:#141414;">
+        <div class="container">
+            <div class="section-header"><h2>快速开始</h2></div>
+            <div class="code">
+<pre><span class="c"># 克隆项目</span>
+<span class="k">git</span> clone https://github.com/mikasakai/cli-agent-gateway.git
+<span class="k">cd</span> cli-agent-gateway
+
+<span class="c"># 配置</span>
+<span class="k">cp</span> .env.example .env
+
+<span class="c"># 启动</span>
+<span class="k">make</span> run</pre>
+            </div>
+        </div>
+    </section>
+    <footer>
+        <div class="container"><p>CLI Agent Gateway - 开源本地 AI 网关</p></div>
+    </footer>
+</body>
+</html>

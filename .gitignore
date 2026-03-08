@@ -36,3 +36,6 @@ __pycache__/
 # macOS
 .DS_Store
 docs/NOTEPAD_LOGS.txt
+
+.artifacts/
+.minimax/
