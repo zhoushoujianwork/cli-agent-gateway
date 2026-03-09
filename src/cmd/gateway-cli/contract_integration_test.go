@@ -171,8 +171,7 @@ func TestCLIContractJSONFlow(t *testing.T) {
 func TestCLIConfigCommand(t *testing.T) {
 	bin := buildGatewayBinary(t)
 	repo := t.TempDir()
-	workdir := repo
-	res := runBin(t, bin, repo, "config", workdir)
+	res := runBin(t, bin, repo, "config")
 	if res.Code != 0 {
 		t.Fatalf("config failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}

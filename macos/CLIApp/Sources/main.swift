@@ -31,6 +31,15 @@ enum RepairAction: String {
     case setupEnv
     case installCodexACP
     case installIMsg
+    case installCAG
+}
+
+struct ComponentStatus: Identifiable {
+    let id: String
+    let name: String
+    let installed: Bool
+    let installCommand: String
+    let description: String
 }
 
 struct HealthCheckItem: Identifiable {
@@ -282,6 +291,7 @@ final class GatewayController: ObservableObject {
     @Published var timelineByMsgId: [String: [ProcessEvent]] = [:]
     @Published var localDraftText: String = ""
     @Published var localSending: Bool = false
+    @Published var componentChecks: [ComponentStatus] = []
     @Published var currentLogFile: String = ""
     @Published var gatewayAddressText: String = ""
     @Published var selectedSessionWorkdir: String = ""
@@ -317,7 +327,7 @@ final class GatewayController: ObservableObject {
         envFilePath = URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent(".env").path
         globalEnvFilePath = GatewayController.userEnvPath()
         selectedSessionWorkdir = ""
-        needsInitialSetup = requiresInitialSetup()
+        componentChecks = checkRequiredComponents()
         let guiLogPath = URL(fileURLWithPath: cfg.logFile).deletingLastPathComponent().appendingPathComponent("gui.log").path
         GUILogger.shared.setLogPath(guiLogPath)
         log("controller init repo=\(cfg.repoRoot) workdir=\(cfg.workdir)")
@@ -799,10 +809,51 @@ final class GatewayController: ObservableObject {
         if key == "acp" {
             return .installCodexACP
         }
+        if key == "cag" {
+            return .installCAG
+        }
         if key.hasPrefix("imessage") {
             return .installIMsg
         }
         return nil
+    }
+
+    func checkRequiredComponents() -> [ComponentStatus] {
+        let cagInstalled = commandExists("cag")
+        let codexAcpInstalled = commandExists("codex-acp")
+
+        return [
+            ComponentStatus(
+                id: "cag",
+                name: "cag CLI",
+                installed: cagInstalled,
+                installCommand: "brew install cag 或者 go install ./cmd/gateway-cli",
+                description: "CLI Agent Gateway 命令行工具"
+            ),
+            ComponentStatus(
+                id: "codex-acp",
+                name: "codex-acp",
+                installed: codexAcpInstalled,
+                installCommand: "brew install codex-acp 或者 npm install -g @anthropic-ai/codex-acp",
+                description: " Anthropic Codex Agent"
+            )
+        ]
+    }
+
+    func installCAG() {
+        let script = """
+        tell application "Terminal"
+            activate
+            do script "cd \(shellEscape(cfg.repoRoot)) && make build && ln -sf \\(pwd)/bin/cag /usr/local/bin/cag"
+        end tell
+        """
+        _ = shellOutput("osascript -e \"\(script.replacingOccurrences(of: "\"", with: "\\\""))\"")
+        detailText = "正在构建并安装 cag CLI..."
+    }
+
+    func installCodexACP() {
+        NSWorkspace.shared.open(URL(string: "https://github.com/anthropics/codex-cli")!)
+        detailText = "请安装 codex-acp 后重试。"
     }
 
     private func hasHealthFailures() -> Bool {
@@ -877,6 +928,17 @@ final class GatewayController: ObservableObject {
                 self?.log("refresh end kind=health")
             }
             self?.refreshHealthChecks()
+        }
+    }
+
+    func refreshComponentChecksAsync() {
+        runInBackground { [weak self] in
+            guard let self else { return }
+            let checks = self.checkRequiredComponents()
+            self.onMain {
+                self.componentChecks = checks
+            }
+            self.log("component checks refreshed: cag=\(checks[0].installed) codex-acp=\(checks[1].installed)")
         }
     }
 
@@ -1083,6 +1145,9 @@ final class GatewayController: ObservableObject {
         case .installIMsg:
             NSWorkspace.shared.open(URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent("docs/IMESSAGE_SETUP.md"))
             detailText = "Opened iMessage setup guide. Install and configure imsg first."
+
+        case .installCAG:
+            installCAG()
 
         }
         refreshHealthChecksAsync()
@@ -2099,6 +2164,40 @@ struct HealthRow: View {
     }
 }
 
+struct ComponentRow: View {
+    let component: ComponentStatus
+    let onInstall: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: component.installed ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                    .foregroundStyle(component.installed ? .green : .red)
+                Text(component.name)
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                if !component.installed {
+                    Button("Install") { onInstall() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                }
+            }
+            Text(component.description)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            if !component.installed {
+                Text("Install: \(component.installCommand)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(component.installed ? Color.green.opacity(0.05) : Color.red.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 struct SessionRow: View {
     let session: SessionEntry
 
@@ -2776,6 +2875,31 @@ struct ConfigView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             Divider()
+            
+            // Required Components Section
+            Text("Required Components").font(.headline)
+            ForEach(controller.componentChecks) { component in
+                ComponentRow(component: component) {
+                    if component.id == "cag" {
+                        controller.installCAG()
+                    } else if component.id == "codex-acp" {
+                        controller.installCodexACP()
+                    }
+                    // Refresh after action
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        controller.refreshComponentChecksAsync()
+                    }
+                }
+            }
+            
+            if controller.componentChecks.contains(where: { !$0.installed }) {
+                Button("Refresh Status") {
+                    controller.refreshComponentChecksAsync()
+                }
+                .font(.system(size: 12))
+            }
+            
+            Divider()
             Text("Health Board").font(.headline)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
@@ -3078,6 +3202,7 @@ struct ContentView: View {
         .frame(width: 1140, height: 700)
         .onAppear {
             GUILogger.shared.log("view onAppear bootstrap refresh")
+            controller.refreshComponentChecksAsync()
             controller.ensureGatewaydForGUI()
             controller.refreshConfigPanel()
             controller.refreshSessionsAsync()
@@ -3145,11 +3270,7 @@ struct CLIAppMain: App {
     var body: some Scene {
         WindowGroup {
             if let controller = bootstrap.controller {
-                if controller.needsInitialSetup {
-                    InitialSetupView(controller: controller)
-                } else {
-                    ContentView(controller: controller)
-                }
+                ContentView(controller: controller)
             } else {
                 VStack(spacing: 10) {
                     Text("Failed to load app configuration.")
@@ -3174,5 +3295,174 @@ struct CLIAppMain: App {
                 .keyboardShortcut("j", modifiers: .command)
             }
         }
+    }
+}
+
+struct SetupRequiredView: View {
+    @ObservedObject var controller: GatewayController
+    let missingComponents: [ComponentStatus]
+    @State private var isInstalling = false
+    @State private var installProgress = ""
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Left Panel - Global Status (Sidebar)
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.orange)
+                    
+                    Text("Setup Required")
+                        .font(.title2.weight(.bold))
+                    
+                    Text("Please install the following components to use the CLI Agent Gateway:")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                
+                Spacer()
+                
+                // Status Summary
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(missingComponents) { component in
+                        HStack(spacing: 8) {
+                            Image(systemName: component.installed ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundStyle(component.installed ? .green : .red)
+                                .font(.system(size: 12))
+                            Text("\(component.name): \(component.installed ? "Installed" : "Not Installed")")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                
+                Button("Refresh Status") {
+                    controller.refreshComponentChecksAsync()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(24)
+            .frame(minWidth: 280, idealWidth: 320, maxWidth: 360)
+            .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+            
+            Divider()
+            
+            // Right Panel - Component Cards
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Components")
+                    .font(.title3.weight(.semibold))
+                    .padding(.top, 8)
+                
+                ScrollView {
+                    VStack(spacing: 16) {
+                        ForEach(missingComponents) { component in
+                            ComponentCard(component: component) {
+                                if component.id == "cag" {
+                                    controller.installCAG()
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                                        controller.refreshComponentChecksAsync()
+                                    }
+                                } else if component.id == "codex-acp" {
+                                    controller.installCodexACP()
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                Spacer()
+                
+                Text("After installation, restart the app.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(32)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 700, minHeight: 500)
+    }
+}
+
+struct ComponentCard: View {
+    let component: ComponentStatus
+    let onAction: () -> Void
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            // Icon
+            Image(systemName: component.id == "cag" ? "terminal.fill" : "brain")
+                .font(.system(size: 28))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 48, height: 48)
+                .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+            
+            // Content
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(component.name)
+                        .font(.system(size: 16, weight: .semibold))
+                    
+                    if component.installed {
+                        Text("Installed")
+                            .font(.system(size: 10, weight: .medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.green.opacity(0.15), in: Capsule())
+                            .foregroundStyle(.green)
+                    }
+                }
+                
+                Text(component.description)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                
+                if !component.installed {
+                    // Code block
+                    HStack {
+                        Text(component.installCommand)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(component.installCommand, forType: .string)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .background(Color(NSColor.textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                    )
+                }
+            }
+            
+            // Action Button
+            if !component.installed {
+                if component.id == "cag" {
+                    Button("Install") {
+                        onAction()
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button("View Docs") {
+                        onAction()
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+        .padding(16)
+        .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .shadow(color: Color.black.opacity(0.05), radius: 4, x: 0, y: 2)
     }
 }

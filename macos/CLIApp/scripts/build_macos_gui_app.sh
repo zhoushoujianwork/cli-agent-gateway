@@ -11,7 +11,7 @@ Options:
   --output-dir <dir>   Output directory for the .app (default: ~/Desktop)
   --app-name <name>    App bundle name (default: CLI Agent Gateway GUI)
   --repo-root <dir>    Repository root (default: auto-detected)
-  --workdir <dir>      Workdir passed to GUI bundle config (default: repo root)
+  --workdir <dir>      Workdir passed to gateway (default: ~/.cag)
   --icon-svg <path>    SVG file used to build macOS app icon (.icns)
   --no-open            Do not auto-open app after successful build
   --no-kill-old        Do not kill previous running app process before build
@@ -78,10 +78,9 @@ if [[ ! -d "$REPO_ROOT/src" ]]; then
   echo "[ERROR] Invalid repo root (missing src/): $REPO_ROOT" >&2
   exit 2
 fi
-
 ENV_FILE="$REPO_ROOT/.env"
 if [[ -z "$WORKDIR" ]]; then
-  WORKDIR="$REPO_ROOT"
+  WORKDIR="$HOME/.cag"
 fi
 if [[ -z "$ICON_SVG" ]]; then
   ICON_SVG="$APP_ROOT/Assets/AppLogo.svg"
@@ -99,35 +98,11 @@ if [[ ! -f "$ENV_FILE" ]]; then
   fi
 fi
 
-LOCK_FILE_RAW=""
-STATE_FILE_RAW=""
-INTERACTION_LOG_RAW=""
-if [[ -f "$ENV_FILE" ]]; then
-  LOCK_FILE_RAW="$(awk -F= '/^LOCK_FILE=/{print $2; exit}' "$ENV_FILE" | tr -d '"' | tr -d "'")"
-  STATE_FILE_RAW="$(awk -F= '/^STATE_FILE=/{print $2; exit}' "$ENV_FILE" | tr -d '"' | tr -d "'")"
-  INTERACTION_LOG_RAW="$(awk -F= '/^INTERACTION_LOG_FILE=/{print $2; exit}' "$ENV_FILE" | tr -d '"' | tr -d "'")"
-fi
-if [[ -z "$LOCK_FILE_RAW" ]]; then
-  LOCK_FILE="$REPO_ROOT/.cli_agent_gateway.lock"
-elif [[ "$LOCK_FILE_RAW" = /* ]]; then
-  LOCK_FILE="$LOCK_FILE_RAW"
-else
-  LOCK_FILE="$REPO_ROOT/$LOCK_FILE_RAW"
-fi
-if [[ -z "$STATE_FILE_RAW" ]]; then
-  STATE_FILE="$REPO_ROOT/.agent_gateway_state.json"
-elif [[ "$STATE_FILE_RAW" = /* ]]; then
-  STATE_FILE="$STATE_FILE_RAW"
-else
-  STATE_FILE="$REPO_ROOT/$STATE_FILE_RAW"
-fi
-if [[ -z "$INTERACTION_LOG_RAW" ]]; then
-  INTERACTION_LOG_FILE="$REPO_ROOT/.agent_gateway_interactions.jsonl"
-elif [[ "$INTERACTION_LOG_RAW" = /* ]]; then
-  INTERACTION_LOG_FILE="$INTERACTION_LOG_RAW"
-else
-  INTERACTION_LOG_FILE="$REPO_ROOT/$INTERACTION_LOG_RAW"
-fi
+REPO_ID="$(printf "%s" "$REPO_ROOT" | shasum | awk '{print substr($1,1,12)}')"
+RUNTIME_BASE="$HOME/.cag/runtime/repos/$REPO_ID"
+LOCK_FILE="$RUNTIME_BASE/gateway.lock"
+STATE_FILE="$RUNTIME_BASE/state.json"
+INTERACTION_LOG_FILE="$RUNTIME_BASE/interactions.jsonl"
 
 LOG_FILE="$HOME/Library/Logs/cli-agent-gateway/gateway.log"
 
