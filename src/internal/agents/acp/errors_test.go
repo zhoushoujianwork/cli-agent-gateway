@@ -58,3 +58,12 @@ func TestIsSessionResourceNotFound_MessageOnly(t *testing.T) {
 		t.Fatalf("expected true for session not found message")
 	}
 }
+
+func TestAppendSummaryChunk_PrefersRawChunk(t *testing.T) {
+	base := "当前工作目录是/Users/m"
+	got := appendSummaryChunk(base, "ikas/github/cli-agent-gateway。", "ikas/github/cli-agent-gateway。", true)
+	want := "当前工作目录是/Users/mikas/github/cli-agent-gateway。"
+	if got != want {
+		t.Fatalf("unexpected summary chunk assembly:\n got=%q\nwant=%q", got, want)
+	}
+}

@@ -11,7 +11,7 @@ Options:
   --output-dir <dir>   Output directory for the .app (default: ~/Desktop)
   --app-name <name>    App bundle name (default: CLI Agent Gateway GUI)
   --repo-root <dir>    Repository root (default: auto-detected)
-  --workdir <dir>      Workdir passed to gateway (default: CODEX_WORKDIR from .env or repo root)
+  --workdir <dir>      Workdir passed to GUI bundle config (default: repo root)
   --icon-svg <path>    SVG file used to build macOS app icon (.icns)
   --no-open            Do not auto-open app after successful build
   --no-kill-old        Do not kill previous running app process before build
@@ -80,9 +80,6 @@ if [[ ! -d "$REPO_ROOT/src" ]]; then
 fi
 
 ENV_FILE="$REPO_ROOT/.env"
-if [[ -z "$WORKDIR" && -f "$ENV_FILE" ]]; then
-  WORKDIR="$(awk -F= '/^CODEX_WORKDIR=/{print $2; exit}' "$ENV_FILE" | tr -d '"' | tr -d "'")"
-fi
 if [[ -z "$WORKDIR" ]]; then
   WORKDIR="$REPO_ROOT"
 fi
@@ -148,29 +145,9 @@ ICON_NAME="AppIcon"
 ICON_ICNS="$RESOURCES_DIR/$ICON_NAME.icns"
 EXEC_PATTERN="/Contents/MacOS/$EXEC_NAME"
 
-run_osascript_quit_with_timeout() {
-  local script="$1"
-  (
-    osascript \
-      -e 'with timeout of 2 seconds' \
-      -e "$script" \
-      -e 'end timeout' \
-      >/dev/null 2>&1
-  ) &
-  local pid=$!
-  for _ in {1..20}; do
-    if ! kill -0 "$pid" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 0.1
-  done
-  kill -9 "$pid" >/dev/null 2>&1 || true
-}
-
 if [[ "$KILL_OLD" == "1" ]]; then
-  # Best-effort: close previously running GUI app instance before replacing bundle.
-  run_osascript_quit_with_timeout 'tell application id "com.cli-agent-gateway.gui" to quit' || true
-  run_osascript_quit_with_timeout "tell application \"$APP_NAME\" to quit" || true
+  # Avoid Apple Events here. A delayed quit event can reach the freshly built app
+  # after it launches, which looks like "start then immediately exit".
   pkill -f "$EXEC_PATTERN" >/dev/null 2>&1 || true
   # Wait up to 5 seconds for existing process to exit.
   for _ in {1..10}; do
@@ -289,6 +266,10 @@ swiftc \
 
 chmod +x "$BIN_PATH"
 
+# The Swift linker emits an ad-hoc signature on the Mach-O executable, but the
+# app bundle still needs a resource envelope to be launchable via LaunchServices.
+codesign --force --deep -s - "$APP_PATH"
+
 echo "[OK] GUI app built: $APP_PATH"
 echo "[INFO] repo_root=$REPO_ROOT"
 echo "[INFO] workdir=$WORKDIR"
@@ -297,6 +278,6 @@ echo "[INFO] log_file=$LOG_FILE"
 echo "[INFO] state_file=$STATE_FILE"
 echo "[INFO] interaction_log_file=$INTERACTION_LOG_FILE"
 if [[ "$OPEN_AFTER_BUILD" == "1" ]]; then
-  open -a "$APP_PATH"
+  open "$APP_PATH"
   echo "[INFO] opened_app=1"
 fi

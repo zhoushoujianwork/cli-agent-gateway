@@ -71,6 +71,41 @@ func runMessages(repoRoot string, args []string) int {
 		fmt.Fprintln(os.Stderr, "messages requires --session-key")
 		return 2
 	}
+	if grpcDisabled() {
+		cfg, err := config.Load(repoRoot, "")
+		if err != nil {
+			if *jsonOut {
+				printJSONActionError("messages", "config_load_failed", err.Error())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "messages failed: %v\n", err)
+			return 1
+		}
+		msgs, timeline, err := collectSessionMessages(cfg, key)
+		if err != nil {
+			if *jsonOut {
+				printJSONActionError("messages", "messages_collect_failed", err.Error())
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "messages failed: %v\n", err)
+			return 1
+		}
+		payload := MessagesPayload{
+			OK:         true,
+			Action:     "messages",
+			SessionKey: key,
+			Messages:   msgs,
+			Timeline:   timeline,
+		}
+		if *jsonOut {
+			printJSON(payload)
+			return 0
+		}
+		for _, m := range payload.Messages {
+			fmt.Printf("%s\t%s\t%s\n", m.Time, m.Role, m.Text)
+		}
+		return 0
+	}
 
 	grpcRes, err := trySessionMessagesViaGRPC(repoRoot, key)
 	if err != nil {
@@ -325,6 +360,18 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 	if err != nil {
 		return nil, nil, err
 	}
+	deletedMap, err := loadDeletedSessionMap(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	baseKey := baseSessionKeyForLifecycle(sessionKey)
+	deletedCutoff := strings.TrimSpace(deletedMap[baseKey])
+	afterDeleted := func(ts string) bool {
+		if deletedCutoff == "" {
+			return true
+		}
+		return isAfterTimestamp(ts, deletedCutoff)
+	}
 	msgIDs := map[string]struct{}{}
 	for _, rec := range records {
 		kind := cleanAnyString(rec["kind"])
@@ -333,7 +380,7 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 			continue
 		}
 		if kind == "trace" && cleanAnyString(rec["stage"]) == "session_resolved" {
-			if cleanAnyString(rec["session_key"]) == sessionKey {
+			if cleanAnyString(rec["session_key"]) == sessionKey && afterDeleted(cleanAnyString(rec["ts"])) {
 				msgIDs[msgID] = struct{}{}
 			}
 		}
@@ -342,7 +389,9 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 			channel := cleanAnyString(profile["channel"])
 			threadID := cleanAnyString(profile["thread_id"])
 			sender := cleanAnyString(rec["sender"])
-			if buildSessionKey(channel, sender, threadID) == sessionKey {
+			base := buildSessionKey(channel, sender, threadID)
+			resolved := sessionKeyForInbound(base, cleanAnyString(rec["time"]), deletedMap)
+			if resolved == sessionKey && afterDeleted(cleanAnyString(rec["time"])) {
 				msgIDs[msgID] = struct{}{}
 			}
 		}
@@ -429,7 +478,10 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 			continue
 		}
 
-		resultText := cleanAnyString(rec["result"])
+		resultText := cleanAnyString(rec["raw_output"])
+		if resultText == "" {
+			resultText = cleanAnyString(rec["result"])
+		}
 		errText := cleanAnyString(rec["error"])
 		status := cleanAnyString(rec["status"])
 		role := "assistant"
@@ -492,17 +544,37 @@ func collectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 
 func clearSessionMapping(cfg config.AppConfig, key string) error {
 	return mutateSessionState(cfg, func(st *storage.StateData) {
-		delete(st.SessionMap, key)
-		delete(st.SessionMeta, key)
+		base := baseSessionKeyForLifecycle(key)
+		for k := range st.SessionMap {
+			if k == key || k == base || strings.HasPrefix(k, base+"_r") {
+				delete(st.SessionMap, k)
+			}
+		}
+		for k := range st.SessionMeta {
+			if k == key || k == base || strings.HasPrefix(k, base+"_r") {
+				delete(st.SessionMeta, k)
+			}
+		}
 		delete(st.SessionDeleted, key)
+		delete(st.SessionDeleted, base)
 	})
 }
 
 func deleteSessionMapping(cfg config.AppConfig, key string) error {
 	return mutateSessionState(cfg, func(st *storage.StateData) {
-		delete(st.SessionMap, key)
-		delete(st.SessionMeta, key)
-		st.SessionDeleted[key] = time.Now().UTC().Format(time.RFC3339)
+		base := baseSessionKeyForLifecycle(key)
+		for k := range st.SessionMap {
+			if k == key || k == base || strings.HasPrefix(k, base+"_r") {
+				delete(st.SessionMap, k)
+			}
+		}
+		for k := range st.SessionMeta {
+			if k == key || k == base || strings.HasPrefix(k, base+"_r") {
+				delete(st.SessionMeta, k)
+			}
+		}
+		delete(st.SessionDeleted, key)
+		st.SessionDeleted[base] = time.Now().UTC().Format(time.RFC3339Nano)
 	})
 }
 
@@ -544,7 +616,7 @@ func upsertSessionMetadata(cfg config.AppConfig, key, workdir string) (SessionMu
 	if st.SessionDeleted == nil {
 		st.SessionDeleted = map[string]string{}
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	meta := st.SessionMeta[key]
 	meta.Workdir = strings.TrimSpace(workdir)
 	meta.UpdatedAt = now
@@ -552,7 +624,6 @@ func upsertSessionMetadata(cfg config.AppConfig, key, workdir string) (SessionMu
 		meta.Status = "ready"
 	}
 	st.SessionMeta[key] = meta
-	delete(st.SessionDeleted, key)
 	if err := store.SaveState(st); err != nil {
 		return SessionMutationPayload{}, err
 	}

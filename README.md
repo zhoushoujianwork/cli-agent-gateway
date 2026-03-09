@@ -27,8 +27,10 @@
 1. 生成/更新配置：
 
 ```bash
-cd src && go run ./cmd/gateway-cli config /path/to/your/workdir
+cd src && go run ./cmd/gateway-cli config
 cd src && go run ./cmd/gateway-cli config --global
+cd src && go run ./cmd/gateway-cli config set POLL_INTERVAL_SEC 3
+cd src && go run ./cmd/gateway-cli config set GATEWAYD_ADDR 127.0.0.1:58473 --global
 ```
 
 2. 启动网关：
@@ -36,6 +38,8 @@ cd src && go run ./cmd/gateway-cli config --global
 ```bash
 make run
 ```
+
+启动成功后，网关会通过当前 channel 主动发送一条问候消息，说明自己已经上线并简要自我介绍。
 
 3. 查看状态：
 
@@ -51,8 +55,12 @@ cd src && go run ./cmd/gateway-cli run
 cd src && go run ./cmd/gateway-cli start
 cd src && go run ./cmd/gateway-cli stop
 cd src && go run ./cmd/gateway-cli restart
-cd src && go run ./cmd/gateway-cli config /path/to/your/workdir
+cd src && go run ./cmd/gateway-cli config
 cd src && go run ./cmd/gateway-cli config --global --gatewayd-addr 127.0.0.1:58473
+cd src && go run ./cmd/gateway-cli config list
+cd src && go run ./cmd/gateway-cli config get POLL_INTERVAL_SEC
+cd src && go run ./cmd/gateway-cli config set POLL_INTERVAL_SEC 3
+cd src && go run ./cmd/gateway-cli config set GATEWAYD_ADDR 127.0.0.1:58473 --global
 cd src && go run ./cmd/gateway-cli status
 cd src && go run ./cmd/gateway-cli status --json
 cd src && go run ./cmd/gateway-cli health
@@ -79,6 +87,16 @@ cd src && go run ./cmd/gateway-cli send --to tester --file ./message.md --msgtyp
 - 地址通过 `GATEWAYD_ADDR` 控制（默认 `127.0.0.1:58473`）。
 - 可通过 `CAG_GRPC_DISABLE=1` 强制禁用 gRPC 路径。
 
+### 配置收敛规则
+
+- 仓库级 `.env` 现在只保留启动必需项。
+- `~/.cag/.env` 保留用户级控制面配置，以及 GUI/全局共享的 DingTalk 配置。
+- 轮询间隔、超时、回复风格、DingTalk 行为等运行期可调项统一通过 `cag config set` 落到 SQLite。
+- 旧 `.env` 中的运行期键在执行 `cag config <workdir>` 时会自动迁移到 SQLite，并从 `.env` 清除。
+- 旧 repo `.env` 中的 GUI DingTalk 启动键会在执行 `cag config <workdir>` 时自动迁移到 `~/.cag/.env`。
+- GUI 会话使用的 workdir 不再保存在 `.env`，而是挂在 session metadata 上。
+- `send --session-key` 在未显式设置 workdir 且会话 metadata 为空时，会自动初始化并使用 `~/.cag/workspace/default`。
+
 ## DingTalk（已实现）
 
 `CHANNEL_TYPE=dingtalk` 时：
@@ -86,6 +104,9 @@ cd src && go run ./cmd/gateway-cli send --to tester --file ./message.md --msgtyp
 - 出站：
   - `DINGTALK_SEND_MODE=api`：走企业应用 API（`DINGTALK_AGENT_ID`；同时 stream 本身要求 `DINGTALK_APP_KEY/SECRET`）
   - `DINGTALK_SEND_MODE=webhook`：走机器人 webhook（`DINGTALK_BOT_WEBHOOK`）
+- 直聊鉴权：
+  - `DINGTALK_DM_POLICY=allow_all`：收到即处理
+  - `DINGTALK_DM_POLICY=allowlist`：未知用户先记入状态库并收到一条“待管理员在 GUI Access Requests 中批准”的提示；管理员可在 GUI 中 Allow/Block，后续消息按库内状态处理
 
 ## 处理链路与职责
 

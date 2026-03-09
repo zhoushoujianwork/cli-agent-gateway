@@ -57,6 +57,9 @@ This file provides practical instructions for human and AI agents working in thi
   - storage/config/lock in `src/internal/infra/` and `src/internal/storage/`
 - Avoid introducing heavy dependencies unless clearly justified.
 - Do not hardcode secrets or credentials; use environment variables.
+- GUI integration must go through `gateway-cli` / `gatewayd` only.
+  - Do not let the macOS GUI directly read/write user config, state, logs, or env files as part of normal product behavior.
+  - GUI-triggered config changes must go through CLI control/config commands rather than mutating `.env` or other files directly.
 
 ## Editing and Safety
 

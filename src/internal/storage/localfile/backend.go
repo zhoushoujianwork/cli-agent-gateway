@@ -101,6 +101,7 @@ func emptyState() storageapi.StateData {
 		SessionMap:     map[string]string{},
 		SessionMeta:    map[string]storageapi.SessionMetaRecord{},
 		SessionDeleted: map[string]string{},
+		UserAccess:     map[string]storageapi.UserAccessRecord{},
 		Inflight:       map[string]any{},
 	}
 }
@@ -117,6 +118,9 @@ func normalizeState(d *storageapi.StateData) {
 	}
 	if d.SessionDeleted == nil {
 		d.SessionDeleted = map[string]string{}
+	}
+	if d.UserAccess == nil {
+		d.UserAccess = map[string]storageapi.UserAccessRecord{}
 	}
 	if d.Inflight == nil {
 		d.Inflight = map[string]any{}

@@ -57,6 +57,7 @@ type Adapter struct {
 	webhookByMsg map[string]string
 	webhookOrder []string
 	profileCache map[string]cachedProfile
+	sendWarning  string
 }
 
 type cachedProfile struct {
@@ -233,20 +234,43 @@ func (a *Adapter) Send(text, to, messageID, reportFile string) error {
 	sessionWebhook := a.getSessionWebhook(messageID)
 	if mode == "webhook" {
 		if strings.TrimSpace(sessionWebhook) != "" {
-			return a.sendToWebhookURL(sessionWebhook, text, messageID, "")
+			err := a.sendToWebhookURL(sessionWebhook, text, messageID, "")
+			if err != nil {
+				a.setSendWarning(fmt.Sprintf("dingtalk webhook send failed: %v", err))
+			} else {
+				a.clearSendWarning()
+			}
+			return err
 		}
-		return a.sendWebhook(text, messageID)
+		err := a.sendWebhook(text, messageID)
+		if err != nil {
+			a.setSendWarning(fmt.Sprintf("dingtalk webhook send failed: %v", err))
+		} else {
+			a.clearSendWarning()
+		}
+		return err
 	}
 	if err := a.sendAPI(text, to, messageID); err != nil {
 		if strings.TrimSpace(sessionWebhook) != "" {
 			a.logf("api send failed for message_id=%s target=%s err=%v, fallback=session_webhook", sanitize(messageID), sanitize(to), err)
 			if werr := a.sendToWebhookURL(sessionWebhook, text, messageID, ""); werr == nil {
+				a.setSendWarning(fmt.Sprintf("dingtalk api send failed and fallback to session webhook succeeded: %v", err))
 				return nil
 			}
 		}
+		a.setSendWarning(fmt.Sprintf("dingtalk api send failed: %v", err))
 		return err
 	}
+	a.clearSendWarning()
 	return nil
+}
+
+func (a *Adapter) PopSendWarning() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	warn := strings.TrimSpace(a.sendWarning)
+	a.sendWarning = ""
+	return warn
 }
 
 func (a *Adapter) shouldKeep(node map[string]any) bool {
@@ -554,6 +578,18 @@ func (a *Adapter) rememberSessionWebhook(messageID, webhook string) {
 		a.webhookOrder = a.webhookOrder[1:]
 		delete(a.webhookByMsg, old)
 	}
+}
+
+func (a *Adapter) setSendWarning(message string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sendWarning = strings.TrimSpace(message)
+}
+
+func (a *Adapter) clearSendWarning() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sendWarning = ""
 }
 
 func (a *Adapter) getSessionWebhook(messageID string) string {

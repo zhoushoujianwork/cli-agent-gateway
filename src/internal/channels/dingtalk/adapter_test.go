@@ -72,6 +72,9 @@ func TestSendFallbackToSessionWebhookWhenAPIFails(t *testing.T) {
 	if hit != 1 {
 		t.Fatalf("expected webhook fallback hit=1, got %d", hit)
 	}
+	if warning := a.PopSendWarning(); !strings.Contains(warning, "fallback to session webhook succeeded") {
+		t.Fatalf("expected fallback warning, got=%q", warning)
+	}
 }
 
 func TestOnStreamMessageUsesContentTextFallback(t *testing.T) {

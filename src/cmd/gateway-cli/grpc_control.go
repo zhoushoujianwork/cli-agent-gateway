@@ -368,7 +368,7 @@ func runLocalJSONAction(repoRoot string, args ...string) (map[string]any, error)
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(), "CAG_GRPC_DISABLE=1")
+	cmd.Env = managedChildEnv("CAG_GRPC_DISABLE=1")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -510,12 +510,17 @@ func runGatewayd(repoRoot string, args []string) int {
 	fs := flag.NewFlagSet("gatewayd", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	listen := fs.String("listen", gatewaydAddr(), "gRPC listen address")
+	defaultRoot := fs.String("repo-root", repoRoot, "default repository root")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	addr := strings.TrimSpace(*listen)
 	if addr == "" {
 		addr = defaultGatewaydAddr
+	}
+	root := strings.TrimSpace(*defaultRoot)
+	if root == "" {
+		root = repoRoot
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -525,7 +530,7 @@ func runGatewayd(repoRoot string, args []string) int {
 	defer ln.Close()
 
 	srv := grpc.NewServer()
-	gatewayv1.RegisterGatewayControlServer(srv, &gatewayControlServer{repoRoot: repoRoot})
+	gatewayv1.RegisterGatewayControlServer(srv, &gatewayControlServer{repoRoot: root})
 	fmt.Printf("gatewayd listening=%s\n", addr)
 	if err := srv.Serve(ln); err != nil {
 		fmt.Fprintf(os.Stderr, "gatewayd serve failed: %v\n", err)
@@ -628,7 +633,10 @@ func ensureGatewaydRunning(repoRoot string) error {
 func startManagedGatewayd(repoRoot, addr string) error {
 	if state, err := loadGatewaydState(repoRoot); err == nil {
 		if state.PID > 0 && processAlive(state.PID) && strings.TrimSpace(state.Listen) == addr {
-			return nil
+			if conn, err := dialGateway(addr, 250*time.Millisecond); err == nil {
+				_ = conn.Close()
+				return nil
+			}
 		}
 		_ = removeGatewaydState(repoRoot)
 	}
@@ -646,11 +654,11 @@ func startManagedGatewayd(repoRoot, addr string) error {
 	}
 	defer logFile.Close()
 
-	cmd := exec.Command(exe, "gatewayd", "--listen", addr)
-	cmd.Dir = repoRoot
+	cmd := exec.Command(exe, "gatewayd", "--listen", addr, "--repo-root", repoRoot)
+	cmd.Dir = managedGatewaydWorkdir()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = append(os.Environ(), "CAG_GRPC_DISABLE=1")
+	cmd.Env = managedChildEnv("CAG_GRPC_DISABLE=1")
 	configureDetachedProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
@@ -714,6 +722,19 @@ func gatewaydStatePath(repoRoot string) string {
 }
 
 func gatewaydStatePathForHome(home, repoRoot string) string {
+	_ = repoRoot
+	return filepath.Join(home, ".cag", "gatewayd", gatewaydStateFileName)
+}
+
+func legacyGatewaydStatePath(repoRoot string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		home = os.TempDir()
+	}
+	return legacyGatewaydStatePathForHome(home, repoRoot)
+}
+
+func legacyGatewaydStatePathForHome(home, repoRoot string) string {
 	root := strings.TrimSpace(repoRoot)
 	if root == "" {
 		root = "."
@@ -744,15 +765,21 @@ func sanitizeStateToken(v string) string {
 }
 
 func loadGatewaydState(repoRoot string) (gatewaydState, error) {
-	raw, err := os.ReadFile(gatewaydStatePath(repoRoot))
-	if err != nil {
-		return gatewaydState{}, err
+	for _, path := range []string{gatewaydStatePath(repoRoot), legacyGatewaydStatePath(repoRoot)} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return gatewaydState{}, err
+		}
+		var state gatewaydState
+		if err := json.Unmarshal(raw, &state); err != nil {
+			return gatewaydState{}, err
+		}
+		return state, nil
 	}
-	var state gatewaydState
-	if err := json.Unmarshal(raw, &state); err != nil {
-		return gatewaydState{}, err
-	}
-	return state, nil
+	return gatewaydState{}, os.ErrNotExist
 }
 
 func saveGatewaydState(repoRoot string, state gatewaydState) error {
@@ -769,7 +796,11 @@ func saveGatewaydState(repoRoot string, state gatewaydState) error {
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	_ = removeLegacyGatewaydState(repoRoot)
+	return nil
 }
 
 func removeGatewaydState(repoRoot string) error {
@@ -777,6 +808,15 @@ func removeGatewaydState(repoRoot string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	return removeLegacyGatewaydState(repoRoot)
+}
+
+func removeLegacyGatewaydState(repoRoot string) error {
+	path := legacyGatewaydStatePath(repoRoot)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	_ = os.Remove(filepath.Dir(path))
 	return nil
 }
 
@@ -788,6 +828,13 @@ func resolveGatewaydLogPath(repoRoot string) string {
 		return filepath.Join(repoRoot, v)
 	}
 	return filepath.Join(repoRoot, defaultGatewaydLogFile)
+}
+
+func managedGatewaydWorkdir() string {
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return home
+	}
+	return os.TempDir()
 }
 
 func tryStatusViaGRPC(repoRoot string) (*gatewayv1.StatusResponse, error) {

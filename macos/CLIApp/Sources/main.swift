@@ -3,7 +3,13 @@ import CryptoKit
 import Foundation
 import SwiftUI
 
+extension Notification.Name {
+    static let guiOpenSettings = Notification.Name("gui.openSettings")
+    static let guiToggleLogDrawer = Notification.Name("gui.toggleLogDrawer")
+}
+
 enum ChannelType: String, CaseIterable, Identifiable {
+    case command
     case imessage
     case dingtalk
 
@@ -11,6 +17,8 @@ enum ChannelType: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .command:
+            return "GUI Chat"
         case .imessage:
             return "iMessage"
         case .dingtalk:
@@ -56,6 +64,23 @@ struct SessionEntry: Identifiable {
     var id: String { sessionKey }
 }
 
+struct AccessUserEntry: Identifiable {
+    let key: String
+    let channel: String
+    let userID: String
+    let senderName: String
+    let status: String
+    let firstSeenAt: String
+    let lastSeenAt: String
+    let lastMessageID: String
+    let lastText: String
+    let threadID: String
+    let conversationTitle: String
+
+    var id: String { key }
+    var displayName: String { senderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? userID : senderName }
+}
+
 enum MessageDeliveryStatus: String {
     case sending
     case sent
@@ -72,6 +97,37 @@ struct ChatMessage: Identifiable {
     let time: String
     let deliveryStatus: MessageDeliveryStatus?
     let statusDetail: String
+}
+
+enum LocalTimeDisplay {
+    private static let parseWithFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let parseBasic: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    private static let outputFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        f.timeZone = .current
+        f.dateStyle = .medium
+        f.timeStyle = .medium
+        return f
+    }()
+
+    static func text(_ raw: String) -> String {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return "" }
+        let date = parseWithFractional.date(from: value) ?? parseBasic.date(from: value)
+        guard let date else { return value }
+        return outputFormatter.string(from: date)
+    }
 }
 
 struct ProcessEvent: Identifiable {
@@ -140,6 +196,77 @@ final class GUILogger {
     }
 }
 
+final class LogTailController: ObservableObject {
+    @Published var content: String = ""
+    @Published var logPath: String = ""
+    @Published var isLoading: Bool = false
+    @Published var autoRefresh: Bool = true
+    @Published var followTail: Bool = true
+    @Published var lineCount: Int = 240
+    @Published var lastUpdatedText: String = ""
+
+    private let pathsProvider: () -> [String]
+    private var refreshTimer: Timer?
+
+    init(pathsProvider: @escaping () -> [String]) {
+        self.pathsProvider = pathsProvider
+    }
+
+    deinit {
+        stop()
+    }
+
+    func start() {
+        refresh()
+        guard refreshTimer == nil else { return }
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            guard let self, self.autoRefresh else { return }
+            self.refresh()
+        }
+    }
+
+    func stop() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+    }
+
+    func refresh() {
+        let targets = pathsProvider()
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        logPath = targets.joined(separator: "\n")
+        isLoading = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let rendered: String
+            if targets.isEmpty {
+                rendered = "Log tail unavailable: empty log path."
+            } else {
+                var sections: [String] = []
+                for target in targets {
+                    let title = URL(fileURLWithPath: target).lastPathComponent
+                    if !FileManager.default.fileExists(atPath: target) {
+                        sections.append("=== \(title) ===\nLog file not found.\n\(target)")
+                        continue
+                    }
+                    if let content = try? String(contentsOfFile: target, encoding: .utf8) {
+                        let recent = content.split(separator: "\n", omittingEmptySubsequences: false).suffix(max(1, self.lineCount))
+                        sections.append("=== \(title) ===\n" + recent.joined(separator: "\n"))
+                    } else {
+                        sections.append("=== \(title) ===\nFailed to read log file.\n\(target)")
+                    }
+                }
+                rendered = sections.joined(separator: "\n\n")
+            }
+            DispatchQueue.main.async {
+                self.content = rendered
+                self.isLoading = false
+                self.lastUpdatedText = LocalTimeDisplay.text(ISO8601DateFormatter().string(from: Date()))
+            }
+        }
+    }
+}
+
 final class GatewayController: ObservableObject {
     typealias CAGJSONResult = (code: Int32, json: [String: Any]?, raw: String)
 
@@ -151,17 +278,23 @@ final class GatewayController: ObservableObject {
     @Published var selectedSessionKey: String?
     @Published var chatMessages: [ChatMessage] = []
     @Published var healthChecks: [HealthCheckItem] = []
+    @Published var accessUsers: [AccessUserEntry] = []
     @Published var timelineByMsgId: [String: [ProcessEvent]] = [:]
     @Published var localDraftText: String = ""
     @Published var localSending: Bool = false
     @Published var currentLogFile: String = ""
+    @Published var gatewayAddressText: String = ""
     @Published var selectedSessionWorkdir: String = ""
+    @Published var envFilePath: String = ""
+    @Published var globalEnvFilePath: String = ""
+    @Published var configReloadVersion: Int = 0
+    @Published var needsInitialSetup: Bool = false
+    @Published var initialSetupBusy: Bool = false
+    @Published var initialSetupMessage: String = ""
 
     private let cfg: GatewayConfig
     private let channelDefaultsKey = "gateway.selected_channel"
-    private let hiddenSessionsDefaultsPrefix = "gateway.hidden_sessions"
     private let sessionWorkdirDefaultsPrefix = "gateway.session_workdir"
-    private var hiddenSessionCutoffByKey: [String: String] = [:]
     private var sessionWorkdirByKey: [String: String] = [:]
     private var localOverlayMessagesBySession: [String: [ChatMessage]] = [:]
     private var lastLocalSendFingerprint: String = ""
@@ -172,49 +305,30 @@ final class GatewayController: ObservableObject {
     private var refreshingStatus = false
     private var refreshingSessions = false
     private var refreshingChat = false
+    private var refreshingUsers = false
+    private var configValuesByKey: [String: String] = [:]
 
     init() throws {
         cfg = try GatewayController.loadConfig()
-        selectedChannel = GatewayController.detectEnvChannel(repoRoot: cfg.repoRoot)
-        hiddenSessionCutoffByKey = loadHiddenSessionCutoffByKey()
+        let detectedChannel = GatewayController.detectEnvChannel(repoRoot: cfg.repoRoot)
+        selectedChannel = GatewayController.loadSavedChannel(defaultChannel: detectedChannel)
         sessionWorkdirByKey = loadSessionWorkdirByKey()
         currentLogFile = cfg.logFile
+        envFilePath = URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent(".env").path
+        globalEnvFilePath = GatewayController.userEnvPath()
         selectedSessionWorkdir = ""
+        needsInitialSetup = requiresInitialSetup()
         let guiLogPath = URL(fileURLWithPath: cfg.logFile).deletingLastPathComponent().appendingPathComponent("gui.log").path
         GUILogger.shared.setLogPath(guiLogPath)
         log("controller init repo=\(cfg.repoRoot) workdir=\(cfg.workdir)")
-    }
-
-    private var hiddenSessionsDefaultsKey: String {
-        "\(hiddenSessionsDefaultsPrefix).\(cfg.repoRoot)"
     }
 
     private var sessionWorkdirDefaultsKey: String {
         "\(sessionWorkdirDefaultsPrefix).\(cfg.repoRoot)"
     }
 
-    private func nowISO8601() -> String {
-        ISO8601DateFormatter().string(from: Date())
-    }
-
     private func log(_ message: String) {
         GUILogger.shared.log(message)
-    }
-
-    private func loadHiddenSessionCutoffByKey() -> [String: String] {
-        guard let raw = UserDefaults.standard.dictionary(forKey: hiddenSessionsDefaultsKey) else {
-            return [:]
-        }
-        var out: [String: String] = [:]
-        for (k, v) in raw {
-            guard let ts = v as? String else { continue }
-            out[k] = ts
-        }
-        return out
-    }
-
-    private func saveHiddenSessionCutoffByKey() {
-        UserDefaults.standard.set(hiddenSessionCutoffByKey, forKey: hiddenSessionsDefaultsKey)
     }
 
     private func loadSessionWorkdirByKey() -> [String: String] {
@@ -253,21 +367,6 @@ final class GatewayController: ObservableObject {
         selectedSessionWorkdir = workdirForSessionKey(key)
     }
 
-    private func hideSessionKey(_ key: String) {
-        hiddenSessionCutoffByKey[key] = nowISO8601()
-    }
-
-    private func shouldShowSession(_ session: SessionEntry) -> Bool {
-        guard let cutoff = hiddenSessionCutoffByKey[session.sessionKey] else {
-            return true
-        }
-        if session.lastTime > cutoff {
-            hiddenSessionCutoffByKey.removeValue(forKey: session.sessionKey)
-            return true
-        }
-        return false
-    }
-
     private static func loadConfig() throws -> GatewayConfig {
         guard let url = Bundle.main.url(forResource: "gateway_config", withExtension: "json") else {
             throw GatewayError.missingConfig
@@ -281,18 +380,32 @@ final class GatewayController: ObservableObject {
     }
 
     private static func detectEnvChannel(repoRoot: String) -> ChannelType {
-        let envPath = URL(fileURLWithPath: repoRoot).appendingPathComponent(".env").path
-        guard let text = try? String(contentsOfFile: envPath, encoding: .utf8) else {
-            return .dingtalk
+        let srcPath = URL(fileURLWithPath: repoRoot).appendingPathComponent("src").path
+        let escapedSrcPath = "'" + srcPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let cmd = "cd \(escapedSrcPath) && go run ./cmd/gateway-cli config get CHANNEL_TYPE"
+        let proc = Process()
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        proc.arguments = ["-lc", cmd]
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            return .command
         }
-        for line in text.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("CHANNEL_TYPE=") {
-                let value = String(trimmed.dropFirst("CHANNEL_TYPE=".count)).replacingOccurrences(of: "\"", with: "")
-                return ChannelType(rawValue: value) ?? .dingtalk
-            }
-        }
-        return .dingtalk
+        let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let line = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard line.hasPrefix("CHANNEL_TYPE=") else { return .command }
+        let rest = String(line.dropFirst("CHANNEL_TYPE=".count))
+        let value = rest.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? rest
+        return ChannelType(rawValue: value) ?? .command
+    }
+
+    private static func userEnvPath() -> String {
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".cag/.env").path
     }
 
     private static func loadSavedChannel(defaultChannel: ChannelType) -> ChannelType {
@@ -303,44 +416,200 @@ final class GatewayController: ObservableObject {
     }
 
     private var envPath: String { URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent(".env").path }
+    private var userEnvPath: String { Self.userEnvPath() }
 
-    private func envValue(_ key: String) -> String? {
-        guard let text = try? String(contentsOfFile: envPath, encoding: .utf8) else { return nil }
-        for raw in text.split(separator: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.isEmpty || line.hasPrefix("#") { continue }
-            guard let idx = line.firstIndex(of: "=") else { continue }
-            let k = String(line[..<idx]).trimmingCharacters(in: .whitespaces)
-            if k != key { continue }
-            let v = String(line[line.index(after: idx)...]).trimmingCharacters(in: .whitespaces)
-            return v.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+    var repoRootPath: String { cfg.repoRoot }
+
+    var gatewayWorkdirPath: String { cfg.workdir }
+
+    var effectiveLogPath: String { currentLogFile.isEmpty ? cfg.logFile : currentLogFile }
+
+    var gatewaydLogPath: String { URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent("logs/.gatewayd.log").path }
+
+    var liveLogPaths: [String] {
+        var paths: [String] = []
+        let primary = effectiveLogPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !primary.isEmpty {
+            paths.append(primary)
         }
-        return nil
+        let control = gatewaydLogPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !control.isEmpty && !paths.contains(control) {
+            paths.append(control)
+        }
+        return paths
     }
 
-    private func writeEnvValue(_ key: String, value: String) {
-        let path = envPath
-        var lines: [String] = []
-        if let text = try? String(contentsOfFile: path, encoding: .utf8) {
-            lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    private func envValue(_ key: String) -> String? {
+        if let value = configValuesByKey[key] {
+            return value
         }
-        var replaced = false
-        for idx in lines.indices {
-            let trimmed = lines[idx].trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
-            guard let eq = trimmed.firstIndex(of: "=") else { continue }
-            let k = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
-            if k == key {
-                lines[idx] = "\(key)=\(value)"
-                replaced = true
-                break
+        let loaded = loadConfigValuesSnapshot()
+        configValuesByKey = loaded
+        return loaded[key]
+    }
+
+    func envValueOrDefault(_ key: String, fallback: String) -> String {
+        let value = (envValue(key) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? fallback : value
+    }
+
+    private func writeConfigValue(_ key: String, value: String, global: Bool) {
+        var args = ["set", key, value]
+        if global {
+            args.append("--global")
+        }
+        _ = cagCommand("config", args: args, timeoutSec: 8)
+    }
+
+    func writeEnvValue(_ key: String, value: String) {
+        writeConfigValue(key, value: value, global: false)
+        refreshConfigPanel()
+    }
+
+    func writeUserEnvValue(_ key: String, value: String) {
+        writeConfigValue(key, value: value, global: true)
+        refreshConfigPanel()
+    }
+
+    func writeEnvValues(_ values: [(String, String)]) {
+        for (key, value) in values {
+            writeConfigValue(key, value: value, global: false)
+        }
+        refreshConfigPanel()
+    }
+
+    func writeUserEnvValues(_ values: [(String, String)]) {
+        for (key, value) in values {
+            writeConfigValue(key, value: value, global: true)
+        }
+        refreshConfigPanel()
+    }
+
+    func refreshConfigPanel() {
+        envFilePath = envPath
+        globalEnvFilePath = userEnvPath
+        refreshConfigSnapshotAsync()
+        refreshHealthChecksAsync()
+        refreshStatusAsync()
+        refreshAccessUsersAsync()
+    }
+
+    private func refreshConfigSnapshotAsync() {
+        runInBackground { [weak self] in
+            guard let self else { return }
+            let snapshot = self.loadConfigValuesSnapshot()
+            self.onMain {
+                self.configValuesByKey = snapshot
+                self.configReloadVersion += 1
             }
         }
-        if !replaced {
-            lines.append("\(key)=\(value)")
+    }
+
+    private func loadConfigValuesSnapshot() -> [String: String] {
+        let res = cagCommand("config", args: ["show"], timeoutSec: 8)
+        guard res.code == 0 else { return [:] }
+        return parseConfigValues(res.output)
+    }
+
+    private func parseConfigValues(_ raw: String) -> [String: String] {
+        var values: [String: String] = [:]
+        for line in raw.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let entry = trimmed.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? trimmed
+            guard let eq = entry.firstIndex(of: "=") else { continue }
+            let key = String(entry[..<eq]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let valueStart = entry.index(after: eq)
+            let value = String(entry[valueStart...]).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            guard !key.isEmpty else { continue }
+            values[key] = value
         }
-        let finalText = lines.joined(separator: "\n") + "\n"
-        try? finalText.write(toFile: path, atomically: true, encoding: .utf8)
+        return values
+    }
+
+    private func requiresInitialSetup() -> Bool {
+        !FileManager.default.fileExists(atPath: envPath)
+    }
+
+    func pickConfigWorkdir(currentValue: String, completion: @escaping (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Use Workdir"
+        panel.message = "Select the local working directory used by GUI chat."
+        let fallback = currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? cfg.repoRoot : currentValue
+        panel.directoryURL = URL(fileURLWithPath: fallback)
+        let response = panel.runModal()
+        guard response == .OK, let dirURL = panel.url else { return }
+        completion(dirURL.path)
+    }
+
+    private func cagCommand(_ action: String, args: [String] = [], timeoutSec: TimeInterval? = nil, direct: Bool = false) -> (code: Int32, output: String) {
+        let runner = cagRunner()
+        let cmdParts = runner.prefix + [action] + args
+        let full = cmdParts.map { shellEscape($0) }.joined(separator: " ")
+        let envPrefix = direct ? "CAG_GRPC_DISABLE=1 " : ""
+        let cmd = "cd \(shellEscape(runner.workdir)) && \(envPrefix)\(full)"
+        let out = shellOutput(cmd, timeoutSec: timeoutSec)
+        return (out.code, out.output)
+    }
+
+    func testActiveChannelAsync(completion: @escaping (Bool, String) -> Void) {
+        runInBackground { [weak self] in
+            guard let self else { return }
+            let res = self.cagJSON("doctor", timeoutSec: 10, direct: true)
+            var ok = false
+            var message = "Channel test failed."
+            if let node = res.json {
+                ok = (node["ok"] as? Bool) ?? false
+                if let items = node["items"] as? [[String: Any]] {
+                    let failed = items.compactMap { item -> String? in
+                        let passed = (item["ok"] as? Bool) ?? false
+                        if passed { return nil }
+                        return (item["detail"] as? String) ?? (item["key"] as? String) ?? "check failed"
+                    }
+                    if failed.isEmpty {
+                        message = "Active channel looks ready."
+                    } else {
+                        message = failed.prefix(3).joined(separator: "\n")
+                    }
+                } else {
+                    message = ok ? "Active channel looks ready." : (res.raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? message : res.raw.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+            } else if !res.raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                message = res.raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            self.onMain {
+                completion(ok, message)
+            }
+        }
+    }
+
+    func completeInitialSetup() {
+        initialSetupBusy = true
+        initialSetupMessage = "Initializing gateway config..."
+        runInBackground { [weak self] in
+            guard let self else { return }
+            _ = self.cagJSON("gatewayd-down", timeoutSec: 3)
+            let configRes = self.cagCommand("config", timeoutSec: 20)
+            self.onMain {
+                guard configRes.code == 0 else {
+                    self.initialSetupBusy = false
+                    self.initialSetupMessage = "Config init failed.\n\(configRes.output.trimmingCharacters(in: .whitespacesAndNewlines))"
+                    return
+                }
+                self.selectedChannel = .command
+                UserDefaults.standard.set(ChannelType.command.rawValue, forKey: self.channelDefaultsKey)
+                self.envFilePath = self.envPath
+                self.initialSetupBusy = false
+                self.initialSetupMessage = "Initialization complete. Session workdir can be set per chat session."
+                self.needsInitialSetup = false
+                self.refreshConfigPanel()
+                self.refreshSessionsAsync()
+            }
+        }
     }
 
     func addSessionByPickingWorkdir() {
@@ -457,11 +726,33 @@ final class GatewayController: ObservableObject {
         return attrs[.modificationDate] as? Date
     }
 
+    private func newestSourceModDate() -> Date? {
+        let srcRoot = URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent("src").path
+        var latest: Date?
+        if let enumerator = FileManager.default.enumerator(atPath: srcRoot) {
+            for case let rel as String in enumerator {
+                guard rel.hasSuffix(".go") else { continue }
+                let fullPath = URL(fileURLWithPath: srcRoot).appendingPathComponent(rel).path
+                guard let mod = fileModDate(fullPath) else { continue }
+                if latest == nil || mod > latest! {
+                    latest = mod
+                }
+            }
+        }
+        for extra in ["go.mod", "go.sum"] {
+            let path = URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent(extra).path
+            guard let mod = fileModDate(path) else { continue }
+            if latest == nil || mod > latest! {
+                latest = mod
+            }
+        }
+        return latest
+    }
+
     private func cagRunner() -> (workdir: String, prefix: [String]) {
         let binPath = URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent("bin/cag").path
         if FileManager.default.isExecutableFile(atPath: binPath) {
-            let srcMain = URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent("src/cmd/gateway-cli/main.go").path
-            if let binMod = fileModDate(binPath), let srcMod = fileModDate(srcMain), binMod >= srcMod {
+            if let binMod = fileModDate(binPath), let srcMod = newestSourceModDate(), binMod >= srcMod {
                 return (cfg.repoRoot, [binPath])
             }
             log("runner fallback reason=stale_bin bin=\(binPath)")
@@ -470,12 +761,13 @@ final class GatewayController: ObservableObject {
         return (srcPath, ["go", "run", "./cmd/gateway-cli"])
     }
 
-    private func cagJSON(_ action: String, args: [String] = [], timeoutSec: TimeInterval? = nil) -> CAGJSONResult {
+    private func cagJSON(_ action: String, args: [String] = [], timeoutSec: TimeInterval? = nil, direct: Bool = false) -> CAGJSONResult {
         let t0 = Date()
         let runner = cagRunner()
         let cmdParts = runner.prefix + [action] + args + ["--json"]
         let full = cmdParts.map { shellEscape($0) }.joined(separator: " ")
-        let cmd = "cd \(shellEscape(runner.workdir)) && \(full)"
+        let envPrefix = direct ? "CAG_GRPC_DISABLE=1 " : ""
+        let cmd = "cd \(shellEscape(runner.workdir)) && \(envPrefix)\(full)"
         let out = shellOutput(cmd, timeoutSec: timeoutSec)
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
         let parseSource = out.stdout.isEmpty ? out.output : out.stdout
@@ -490,10 +782,10 @@ final class GatewayController: ObservableObject {
         return (out.code, node, out.output)
     }
 
-    private func cagJSONAsync(_ action: String, args: [String] = [], timeoutSec: TimeInterval? = nil, completion: @escaping (CAGJSONResult) -> Void) {
+    private func cagJSONAsync(_ action: String, args: [String] = [], timeoutSec: TimeInterval? = nil, direct: Bool = false, completion: @escaping (CAGJSONResult) -> Void) {
         runInBackground { [weak self] in
             guard let self else { return }
-            let result = self.cagJSON(action, args: args, timeoutSec: timeoutSec)
+            let result = self.cagJSON(action, args: args, timeoutSec: timeoutSec, direct: direct)
             self.onMain {
                 completion(result)
             }
@@ -545,6 +837,9 @@ final class GatewayController: ObservableObject {
         case "chat":
             if refreshingChat { return false }
             refreshingChat = true
+        case "users":
+            if refreshingUsers { return false }
+            refreshingUsers = true
         default:
             return true
         }
@@ -563,6 +858,8 @@ final class GatewayController: ObservableObject {
             refreshingSessions = false
         case "chat":
             refreshingChat = false
+        case "users":
+            refreshingUsers = false
         default:
             break
         }
@@ -628,14 +925,29 @@ final class GatewayController: ObservableObject {
         }
     }
 
+    func refreshAccessUsersAsync() {
+        if !beginRefresh(kind: "users") {
+            log("refresh skip kind=users reason=inflight")
+            return
+        }
+        log("refresh start kind=users")
+        runInBackground { [weak self] in
+            defer {
+                self?.endRefresh(kind: "users")
+                self?.log("refresh end kind=users")
+            }
+            self?.refreshAccessUsers()
+        }
+    }
+
     func timeline(for message: ChatMessage) -> [ProcessEvent] {
         timelineByMsgId[message.sourceMsgId, default: []]
     }
 
     func refreshHealthChecks() {
         let t0 = Date()
-        let doctor = cagJSON("doctor")
-        let fallback = cagJSON("health")
+        let doctor = cagJSON("doctor", direct: true)
+        let fallback = cagJSON("health", direct: true)
         let response = doctor.json ?? fallback.json
 
         guard let node = response else {
@@ -691,6 +1003,68 @@ final class GatewayController: ObservableObject {
         }
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
         log("refresh result kind=health status=ok checks=\(checks.count) elapsed_ms=\(ms)")
+    }
+
+    func refreshAccessUsers() {
+        let t0 = Date()
+        let res = cagJSON("users", timeoutSec: 8, direct: true)
+        guard let node = res.json, ((node["ok"] as? Bool) ?? false) else {
+            onMain { [weak self] in
+                self?.accessUsers = []
+            }
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            log("refresh result kind=users status=empty elapsed_ms=\(ms)")
+            return
+        }
+        let items = (node["items"] as? [[String: Any]] ?? []).compactMap { item -> AccessUserEntry? in
+            let key = ((item["key"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let channel = ((item["channel"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let userID = ((item["user_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty, !channel.isEmpty, !userID.isEmpty else { return nil }
+            return AccessUserEntry(
+                key: key,
+                channel: channel,
+                userID: userID,
+                senderName: ((item["sender_name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                status: ((item["status"] as? String) ?? "pending").trimmingCharacters(in: .whitespacesAndNewlines),
+                firstSeenAt: ((item["first_seen_at"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                lastSeenAt: ((item["last_seen_at"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                lastMessageID: ((item["last_message_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                lastText: ((item["last_text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                threadID: ((item["thread_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                conversationTitle: ((item["conversation_title"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        onMain { [weak self] in
+            self?.accessUsers = items
+        }
+        let ms = Int(Date().timeIntervalSince(t0) * 1000)
+        log("refresh result kind=users status=ok count=\(items.count) elapsed_ms=\(ms)")
+    }
+
+    func updateUserAccessStatus(entry: AccessUserEntry, status: String, completion: @escaping (Bool, String) -> Void) {
+        let allowing = status.caseInsensitiveCompare("allowed") == .orderedSame
+        let action = allowing ? "user-allow" : "user-block"
+        let successMessage = allowing
+            ? "Allowed \(entry.displayName). Future messages will be processed."
+            : "Blocked \(entry.displayName). Future messages will be rejected."
+        cagJSONAsync(
+            action,
+            args: ["--channel", entry.channel, "--user-id", entry.userID],
+            timeoutSec: 8,
+            direct: true
+        ) { [weak self] result in
+            guard let self else { return }
+            let ok = (result.json?["ok"] as? Bool) ?? false
+            if ok {
+                self.refreshAccessUsersAsync()
+                self.refreshHealthChecksAsync()
+                completion(true, successMessage)
+                return
+            }
+            let fallback = allowing ? "Allow user failed." : "Block user failed."
+            completion(false, self.cliErrorMessage(from: result.raw, fallback: fallback))
+        }
     }
 
     func runRepair(_ action: RepairAction) {
@@ -780,7 +1154,7 @@ final class GatewayController: ObservableObject {
         let overlay = localOverlayMessagesBySession[sessionKey, default: []]
         runInBackground { [weak self] in
             guard let self else { return }
-            let res = self.cagJSON("messages", args: ["--session-key", baseSessionKey], timeoutSec: 8)
+            let res = self.cagJSON("messages", args: ["--session-key", baseSessionKey], timeoutSec: 8, direct: true)
             var persisted: [ChatMessage] = []
             var timeline: [String: [ProcessEvent]] = [:]
             if let node = res.json,
@@ -852,6 +1226,18 @@ final class GatewayController: ObservableObject {
         refreshStatusAsync()
     }
 
+    func applyChannelConfig(channel: ChannelType, values: [(String, String)]) {
+        writeEnvValues(values)
+        setChannel(channel)
+        detailText = "Config updated for \(channel.title)."
+    }
+
+    func applyGlobalChannelConfig(channel: ChannelType, values: [(String, String)]) {
+        writeUserEnvValues(values)
+        setChannel(channel)
+        detailText = "Config updated for \(channel.title) in ~/.cag/.env."
+    }
+
     func refreshStatus() {
         let t0 = Date()
         let res = cagJSON("status")
@@ -870,6 +1256,7 @@ final class GatewayController: ObservableObject {
         let channelRaw = (node["channel"] as? String) ?? selectedChannel.rawValue
         let channel = ChannelType(rawValue: channelRaw) ?? selectedChannel
         let nodeLog = ((node["log_file"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let gatewayAddr = ((node["gateway_addr"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         onMain { [weak self] in
             guard let self else { return }
             if !nodeLog.isEmpty {
@@ -877,17 +1264,22 @@ final class GatewayController: ObservableObject {
             } else if self.currentLogFile.isEmpty {
                 self.currentLogFile = self.cfg.logFile
             }
+            if !gatewayAddr.isEmpty {
+                self.gatewayAddressText = gatewayAddr
+            }
             self.activeChannelText = channel.title
             if status == "running" {
                 self.statusText = "Running"
                 let pidPart = (node["pid"] as? Int).map { "PID \($0)\n" } ?? ""
+                let gatewayPart = self.gatewayAddressText.isEmpty ? "" : "Gatewayd: \(self.gatewayAddressText)\n"
                 let lockPart = (node["lock_file"] as? String).map { "Lock: \($0)\n" } ?? ""
                 let logPart = self.currentLogFile
-                self.detailText = "\(pidPart)Channel: \(channel.title)\n\(lockPart)Log: \(logPart)"
+                self.detailText = "\(gatewayPart)\(pidPart)Channel: \(channel.title)\n\(lockPart)Log: \(logPart)"
             } else {
                 self.statusText = "Stopped"
+                let gatewayPart = self.gatewayAddressText.isEmpty ? "" : "Gatewayd: \(self.gatewayAddressText)\n"
                 let lockPart = (node["lock_file"] as? String).map { "\nLock: \($0)" } ?? ""
-                self.detailText = "Channel: \(channel.title)\nLog: \(self.currentLogFile)\(lockPart)"
+                self.detailText = "\(gatewayPart)Channel: \(channel.title)\nLog: \(self.currentLogFile)\(lockPart)"
             }
         }
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
@@ -913,7 +1305,7 @@ final class GatewayController: ObservableObject {
 
     func refreshSessions() {
         let t0 = Date()
-        let sessionsResult = cagJSON("sessions", args: ["--limit", "200"])
+        let sessionsResult = cagJSON("sessions", args: ["--limit", "200"], direct: true)
         if let node = sessionsResult.json,
            let ok = node["ok"] as? Bool, ok,
            let items = node["items"] as? [[String: Any]] {
@@ -939,7 +1331,7 @@ final class GatewayController: ObservableObject {
             }
             onMain { [weak self] in
                 guard let self else { return }
-                self.sessions = built.filter { self.shouldShowSession($0) }
+                self.sessions = built
                 if let selected = self.selectedSessionKey, !self.sessions.contains(where: { $0.sessionKey == selected }) {
                     self.selectedSessionKey = nil
                 }
@@ -1144,7 +1536,9 @@ final class GatewayController: ObservableObject {
         timeout: TimeInterval
     ) {
         var sendArgs = ["--session-key", baseSessionKey, "--message-id", userMsgId, "--text", text]
-        sendArgs.append(contentsOf: ["--workdir", sessionWorkdir])
+        if !sessionWorkdir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sendArgs.append(contentsOf: ["--workdir", sessionWorkdir])
+        }
         cagJSONAsync("send", args: sendArgs, timeoutSec: timeout) { [weak self] result in
             guard let self else { return }
             self.localSending = false
@@ -1249,10 +1643,6 @@ final class GatewayController: ObservableObject {
         }
 
         let sessionWorkdir = workdirForSessionKey(baseSessionKey)
-        if sessionWorkdir.isEmpty {
-            detailText = "Send failed: this session requires workdir. Click Add Session and pick a directory first."
-            return
-        }
 
         let userMsgId = "local-u-\(Int(Date().timeIntervalSince1970 * 1000))"
         let nowIso = ISO8601DateFormatter().string(from: Date())
@@ -1312,10 +1702,6 @@ final class GatewayController: ObservableObject {
     func deleteAllSessions() {
         let res = cagJSON("sessions-delete-all")
         if ((res.json?["ok"] as? Bool) ?? false) {
-            for s in sessions {
-                hideSessionKey(s.sessionKey)
-            }
-            saveHiddenSessionCutoffByKey()
             sessionWorkdirByKey.removeAll()
             saveSessionWorkdirByKey()
             selectedSessionKey = nil
@@ -1328,35 +1714,17 @@ final class GatewayController: ObservableObject {
     }
 
     func deleteSession(key: String) {
-        if key.contains("#") {
-            hideSessionKey(key)
-            saveHiddenSessionCutoffByKey()
-            sessionWorkdirByKey.removeValue(forKey: baseSessionKey(key))
-            saveSessionWorkdirByKey()
-            if selectedSessionKey == key {
-                selectedSessionKey = nil
-            }
-            refreshSelectedSessionWorkdir()
-            refreshSessionsAsync()
-            detailText = "Deleted archived session segment from app list."
-            return
-        }
-        let res = cagJSON("session-delete", args: ["--session-key", key])
+        let targetKey = baseSessionKey(key)
+        let res = cagJSON("session-delete", args: ["--session-key", targetKey])
         if ((res.json?["ok"] as? Bool) ?? false) {
-            for session in sessions {
-                if session.sessionKey == key || session.sessionKey.hasPrefix("\(key)#") {
-                    hideSessionKey(session.sessionKey)
-                }
-            }
-            saveHiddenSessionCutoffByKey()
             if selectedSessionKey == key {
                 selectedSessionKey = nil
             }
-            sessionWorkdirByKey.removeValue(forKey: baseSessionKey(key))
+            sessionWorkdirByKey.removeValue(forKey: targetKey)
             saveSessionWorkdirByKey()
             refreshSelectedSessionWorkdir()
             refreshSessionsAsync()
-            detailText = "Deleted session: \(key)"
+            detailText = "Deleted session: \(targetKey)"
         } else {
             detailText = "Delete failed: command failed."
         }
@@ -1436,6 +1804,56 @@ final class GatewayController: ObservableObject {
         detailText = "\(pidText)Gateway restarted.\nLog: \(shownLog)"
     }
 
+    func restartAsync(completion: @escaping (Bool, String) -> Void) {
+        statusText = "Restarting"
+        detailText = "Restarting gateway..."
+        runInBackground { [weak self] in
+            guard let self else { return }
+            let shutdownRes = self.cagJSON("gatewayd-down", timeoutSec: 5)
+            if shutdownRes.code != 0 {
+                self.log("config restart gatewayd-down failed code=\(shutdownRes.code) raw=\(shutdownRes.raw)")
+            }
+            let bootRes = self.cagJSON("gatewayd-up", timeoutSec: 5)
+            if bootRes.code != 0 || (bootRes.json?["ok"] as? Bool) == false {
+                self.onMain {
+                    self.statusText = "Restart failed"
+                    let message = "Saved config, but gateway control plane restart failed.\n\(self.cliErrorMessage(from: bootRes.raw, fallback: "Gateway control plane restart failed."))"
+                    self.detailText = message
+                    completion(false, message)
+                }
+                return
+            }
+            let res = self.cagJSON("restart", timeoutSec: 15, direct: true)
+            self.onMain {
+                guard let node = res.json else {
+                    self.statusText = "Restart failed"
+                    let message = "Saved config, but restart returned invalid CLI output.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
+                    self.detailText = message
+                    completion(false, message)
+                    return
+                }
+                if ((node["ok"] as? Bool) ?? false) == false {
+                    self.statusText = "Restart failed"
+                    let errorText = ((node["error"] as? [String: Any])?["message"] as? String) ?? "Unknown error"
+                    self.detailText = errorText
+                    completion(false, "Saved config, but restart failed.\n\(errorText)")
+                    return
+                }
+                self.refreshStatus()
+                self.refreshHealthChecksAsync()
+                self.refreshConfigPanel()
+                let pidText = (node["pid"] as? Int).map { "PID: \($0)\n" } ?? ""
+                let logPath = ((node["log_file"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !logPath.isEmpty {
+                    self.currentLogFile = logPath
+                }
+                let shownLog = self.currentLogFile.isEmpty ? self.cfg.logFile : self.currentLogFile
+                self.detailText = "\(pidText)Gateway restarted.\nLog: \(shownLog)"
+                completion(true, "Saved and restarted \(self.selectedChannel.title).")
+            }
+        }
+    }
+
     func ensureGatewaydForGUI() {
         runInBackground { [weak self] in
             guard let self else { return }
@@ -1460,22 +1878,25 @@ final class GatewayController: ObservableObject {
         }
     }
 
-    func latestLogTail(lines: Int = 120) -> String {
-        let target = currentLogFile.isEmpty ? cfg.logFile : currentLogFile
-        guard FileManager.default.fileExists(atPath: target),
-              let content = try? String(contentsOfFile: target, encoding: .utf8) else {
-            return "Log tail failed: file not found.\n\(target)"
-        }
-        let recent = content.split(separator: "\n", omittingEmptySubsequences: false).suffix(max(1, lines))
-        let preview = recent.joined(separator: "\n")
-        return "Log: \(target)\n--- tail \(lines) ---\n\(preview)"
-    }
-
     private func shellEscape(_ raw: String) -> String {
         if raw.isEmpty {
             return "''"
         }
         return "'" + raw.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func cliErrorMessage(from raw: String, fallback: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else {
+            return fallback
+        }
+        if let node = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = node["error"] as? [String: Any],
+           let message = (error["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !message.isEmpty {
+            return message
+        }
+        return fallback
     }
 }
 
@@ -1490,6 +1911,167 @@ struct Pill: View {
             .padding(.vertical, 5)
             .background(color.opacity(0.14), in: Capsule())
             .overlay(Capsule().stroke(color.opacity(0.35), lineWidth: 1))
+    }
+}
+
+struct ActionIconBadge: View {
+    let systemName: String
+    let tint: Color
+
+    var body: some View {
+        Image(systemName: systemName)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(tint)
+            .frame(width: 32, height: 32)
+            .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(tint.opacity(0.24), lineWidth: 1)
+            )
+    }
+}
+
+struct IconActionButton: View {
+    let systemName: String
+    let helpText: String
+    var tint: Color = .primary
+    var disabled: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ActionIconBadge(systemName: systemName, tint: disabled ? .secondary : tint)
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(helpText)
+        .opacity(disabled ? 0.55 : 1)
+    }
+}
+
+struct ChannelStatusPill: View {
+    let channelText: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 11, weight: .semibold))
+            Text(channelText)
+                .font(.system(size: 12, weight: .semibold))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.blue.opacity(0.14), in: Capsule())
+        .overlay(Capsule().stroke(Color.blue.opacity(0.35), lineWidth: 1))
+    }
+}
+
+struct AccessStatusPill: View {
+    let status: String
+
+    private var normalized: String {
+        status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var tint: Color {
+        switch normalized {
+        case "allowed":
+            return .green
+        case "blocked":
+            return .red
+        default:
+            return .orange
+        }
+    }
+
+    private var title: String {
+        switch normalized {
+        case "allowed":
+            return "Allowed"
+        case "blocked":
+            return "Blocked"
+        default:
+            return "Pending"
+        }
+    }
+
+    var body: some View {
+        Pill(text: title, color: tint)
+    }
+}
+
+struct AccessUserRow: View {
+    let entry: AccessUserEntry
+    let busy: Bool
+    let onAllow: () -> Void
+    let onBlock: () -> Void
+
+    private var channelTitle: String {
+        ChannelType(rawValue: entry.channel)?.title ?? entry.channel.capitalized
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(entry.displayName)
+                        .font(.system(size: 13, weight: .semibold))
+                    HStack(spacing: 8) {
+                        Text(channelTitle)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Text(entry.userID)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+                Spacer()
+                AccessStatusPill(status: entry.status)
+            }
+            if !entry.conversationTitle.isEmpty {
+                Text(entry.conversationTitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            if !entry.lastText.isEmpty {
+                Text(entry.lastText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
+                    .lineLimit(3)
+            }
+            HStack(spacing: 12) {
+                if !entry.lastSeenAt.isEmpty {
+                    Text("Last seen \(LocalTimeDisplay.text(entry.lastSeenAt))")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+                if !entry.lastMessageID.isEmpty {
+                    Text("msg \(entry.lastMessageID)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            HStack(spacing: 8) {
+                ConfigActionButton(
+                    systemName: busy ? "hourglass" : "checkmark.circle",
+                    title: "Allow",
+                    tint: .green,
+                    disabled: busy || entry.status.lowercased() == "allowed",
+                    action: onAllow
+                )
+                ConfigActionButton(
+                    systemName: busy ? "hourglass" : "hand.raised.circle",
+                    title: "Block",
+                    tint: .red,
+                    disabled: busy || entry.status.lowercased() == "blocked",
+                    action: onBlock
+                )
+            }
+        }
+        .padding(14)
+        .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -1592,7 +2174,7 @@ struct ChatBubble: View {
                     .lineLimit(2)
             }
             if !message.time.isEmpty {
-                Text(message.time)
+                Text(LocalTimeDisplay.text(message.time))
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
@@ -1673,7 +2255,7 @@ struct ProcessTimelineView: View {
                                     Text(evt.title).font(.system(size: 12, weight: .semibold))
                                     Spacer()
                                     if !evt.time.isEmpty {
-                                        Text(evt.time).font(.system(size: 10)).foregroundStyle(.tertiary)
+                                        Text(LocalTimeDisplay.text(evt.time)).font(.system(size: 10)).foregroundStyle(.tertiary)
                                     }
                                 }
                                 if !evt.detail.isEmpty {
@@ -1692,46 +2274,504 @@ struct ProcessTimelineView: View {
     }
 }
 
-struct LogTailView: View {
-    let content: String
+struct LogTailDrawerView: View {
+    @ObservedObject var controller: LogTailController
+    let onClose: () -> Void
+    private let lineCountOptions = [120, 240, 500, 1000]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Gateway Log Tail")
-                .font(.headline)
-            ScrollView {
-                Text(content)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Live Logs")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(controller.logPath.isEmpty ? "(log path unavailable)" : controller.logPath)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                Toggle("Auto", isOn: $controller.autoRefresh)
+                    .toggleStyle(.switch)
+                    .frame(width: 90)
+                Toggle("Follow", isOn: $controller.followTail)
+                    .toggleStyle(.switch)
+                    .frame(width: 100)
+                Picker("Lines", selection: $controller.lineCount) {
+                    ForEach(lineCountOptions, id: \.self) { count in
+                        Text("\(count)").tag(count)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 90)
+                IconActionButton(systemName: "arrow.clockwise", helpText: "Refresh log tail") { controller.refresh() }
+                IconActionButton(systemName: "xmark", helpText: "Hide logs", tint: .secondary, action: onClose)
             }
-            .padding(10)
-            .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(controller.content.isEmpty ? "No log output yet." : controller.content)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Color.clear
+                            .frame(height: 1)
+                            .id("log-bottom-anchor")
+                    }
+                    .padding(12)
+                }
+                .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+                .onAppear {
+                    if controller.followTail {
+                        proxy.scrollTo("log-bottom-anchor", anchor: .bottom)
+                    }
+                }
+                .onChange(of: controller.content) { _, _ in
+                    guard controller.followTail else { return }
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("log-bottom-anchor", anchor: .bottom)
+                    }
+                }
+            }
         }
-        .padding(16)
-        .frame(width: 760, height: 520)
+        .onChange(of: controller.lineCount) { _, _ in
+            controller.refresh()
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 14)
+        .background(.thinMaterial)
+    }
+}
+
+struct ChannelCard: View {
+    let systemName: String
+    let title: String
+    let subtitle: String
+    let selected: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: systemName)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background((selected ? Color.accentColor.opacity(0.16) : Color.gray.opacity(0.08)), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(selected ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct ConfigActionButton: View {
+    let systemName: String
+    let title: String
+    var tint: Color = .accentColor
+    var disabled: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemName)
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(disabled ? Color.secondary : tint)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background((disabled ? Color.gray.opacity(0.08) : tint.opacity(0.12)), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke((disabled ? Color.gray.opacity(0.15) : tint.opacity(0.24)), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.65 : 1)
+    }
+}
+
+struct ConfigField<Content: View>: View {
+    let title: String
+    let hint: String?
+    let content: Content
+
+    init(title: String, hint: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.hint = hint
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            content
+            if let hint, !hint.isEmpty {
+                Text(hint)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+}
+
+struct ConfigStatusBanner: View {
+    let message: String
+    let ok: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "info.circle.fill")
+                .foregroundStyle(ok ? Color.green : Color.secondary)
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundStyle(ok ? Color.green : Color.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(10)
+        .background((ok ? Color.green.opacity(0.08) : Color.gray.opacity(0.08)), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
 struct ConfigView: View {
     @ObservedObject var controller: GatewayController
+    @State private var editingChannel: ChannelType
+    @State private var guiACPAgentCmd: String
+    @State private var imessageFetchCmd: String
+    @State private var imessageSendCmd: String
+    @State private var dingtalkSendMode: String
+    @State private var dingtalkAppKey: String
+    @State private var dingtalkAppSecret: String
+    @State private var dingtalkAgentID: String
+    @State private var dingtalkBotWebhook: String
+    @State private var dingtalkDefaultTo: String
+    @State private var configStatusMessage: String = ""
+    @State private var configStatusOK: Bool = false
+    @State private var configTestBusy: Bool = false
+    @State private var configSaveBusy: Bool = false
+    @State private var accessActionKey: String = ""
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Config")
-                    .font(.headline)
-                Spacer()
-            }
-            Picker("Channel", selection: Binding(
-                get: { controller.selectedChannel },
-                set: { controller.setChannel($0) }
-            )) {
-                ForEach(ChannelType.allCases) { channel in
-                    Text(channel.title).tag(channel)
+    init(controller: GatewayController, initialChannel: ChannelType? = nil) {
+        self.controller = controller
+        let channel = initialChannel ?? controller.selectedChannel
+        _editingChannel = State(initialValue: channel)
+        _guiACPAgentCmd = State(initialValue: controller.envValueOrDefault("ACP_AGENT_CMD", fallback: "codex-acp"))
+        _imessageFetchCmd = State(initialValue: controller.envValueOrDefault("IMESSAGE_FETCH_CMD", fallback: "imsg fetch --json"))
+        _imessageSendCmd = State(initialValue: controller.envValueOrDefault("IMESSAGE_SEND_CMD", fallback: "imsg send"))
+        _dingtalkSendMode = State(initialValue: controller.envValueOrDefault("DINGTALK_SEND_MODE", fallback: "api"))
+        _dingtalkAppKey = State(initialValue: controller.envValueOrDefault("DINGTALK_APP_KEY", fallback: ""))
+        _dingtalkAppSecret = State(initialValue: controller.envValueOrDefault("DINGTALK_APP_SECRET", fallback: ""))
+        _dingtalkAgentID = State(initialValue: controller.envValueOrDefault("DINGTALK_AGENT_ID", fallback: ""))
+        _dingtalkBotWebhook = State(initialValue: controller.envValueOrDefault("DINGTALK_BOT_WEBHOOK", fallback: ""))
+        _dingtalkDefaultTo = State(initialValue: controller.envValueOrDefault("DINGTALK_DEFAULT_TO_USER", fallback: ""))
+    }
+
+    private func reloadFromEnv() {
+        editingChannel = controller.selectedChannel
+        guiACPAgentCmd = controller.envValueOrDefault("ACP_AGENT_CMD", fallback: "codex-acp")
+        imessageFetchCmd = controller.envValueOrDefault("IMESSAGE_FETCH_CMD", fallback: "imsg fetch --json")
+        imessageSendCmd = controller.envValueOrDefault("IMESSAGE_SEND_CMD", fallback: "imsg send")
+        dingtalkSendMode = controller.envValueOrDefault("DINGTALK_SEND_MODE", fallback: "api")
+        dingtalkAppKey = controller.envValueOrDefault("DINGTALK_APP_KEY", fallback: "")
+        dingtalkAppSecret = controller.envValueOrDefault("DINGTALK_APP_SECRET", fallback: "")
+        dingtalkAgentID = controller.envValueOrDefault("DINGTALK_AGENT_ID", fallback: "")
+        dingtalkBotWebhook = controller.envValueOrDefault("DINGTALK_BOT_WEBHOOK", fallback: "")
+        dingtalkDefaultTo = controller.envValueOrDefault("DINGTALK_DEFAULT_TO_USER", fallback: "")
+    }
+
+    private func saveCurrentChannelConfig() {
+        configSaveBusy = true
+        configStatusOK = false
+        configStatusMessage = "Saving config and restarting gateway..."
+        switch editingChannel {
+        case .command:
+            controller.applyChannelConfig(
+                channel: .command,
+                values: [
+                    ("ACP_AGENT_CMD", guiACPAgentCmd.trimmingCharacters(in: .whitespacesAndNewlines)),
+                ]
+            )
+        case .imessage:
+            controller.applyChannelConfig(
+                channel: .imessage,
+                values: [
+                    ("IMESSAGE_FETCH_CMD", imessageFetchCmd.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("IMESSAGE_SEND_CMD", imessageSendCmd.trimmingCharacters(in: .whitespacesAndNewlines)),
+                ]
+            )
+        case .dingtalk:
+            controller.applyGlobalChannelConfig(
+                channel: .dingtalk,
+                values: [
+                    ("DINGTALK_SEND_MODE", dingtalkSendMode.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("DINGTALK_APP_KEY", dingtalkAppKey.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("DINGTALK_APP_SECRET", dingtalkAppSecret.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("DINGTALK_AGENT_ID", dingtalkAgentID.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("DINGTALK_BOT_WEBHOOK", dingtalkBotWebhook.trimmingCharacters(in: .whitespacesAndNewlines)),
+                    ("DINGTALK_DEFAULT_TO_USER", dingtalkDefaultTo.trimmingCharacters(in: .whitespacesAndNewlines)),
+                ]
+            )
+        }
+        controller.restartAsync { ok, message in
+            configSaveBusy = false
+            configStatusOK = ok
+            configStatusMessage = message
+        }
+    }
+
+    private func testActiveChannel() {
+        configTestBusy = true
+        configStatusMessage = "Testing active channel..."
+        configStatusOK = false
+        controller.testActiveChannelAsync { ok, message in
+            configTestBusy = false
+            configStatusOK = ok
+            configStatusMessage = message
+        }
+    }
+
+    private func updateAccess(_ entry: AccessUserEntry, status: String) {
+        accessActionKey = entry.key
+        configStatusOK = false
+        configStatusMessage = status == "allowed" ? "Allowing \(entry.displayName)..." : "Blocking \(entry.displayName)..."
+        controller.updateUserAccessStatus(entry: entry, status: status) { ok, message in
+            accessActionKey = ""
+            configStatusOK = ok
+            configStatusMessage = message
+        }
+    }
+
+    @ViewBuilder
+    private var channelEditor: some View {
+        switch editingChannel {
+        case .command:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("GUI Chat uses local session execution and is the lowest-friction default.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text("Session workdir is no longer a global config item. Set it per session from the chat panel.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                ConfigField(title: "ACP Command", hint: "Default is `codex-acp`. This controls the local ACP agent executable.") {
+                    TextField("codex-acp", text: $guiACPAgentCmd)
+                        .textFieldStyle(.roundedBorder)
                 }
             }
-            .pickerStyle(.segmented)
+        case .imessage:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Configure the `imsg` commands used for fetch/send.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                ConfigField(title: "Fetch Command", hint: "Command used to pull iMessage updates.") {
+                    TextField("imsg fetch --json", text: $imessageFetchCmd)
+                        .textFieldStyle(.roundedBorder)
+                }
+                ConfigField(title: "Send Command", hint: "Command used to send iMessage replies.") {
+                    TextField("imsg send", text: $imessageSendCmd)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+        case .dingtalk:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Configure DingTalk stream/app credentials and send routing.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                ConfigField(title: "Send Mode", hint: "Use `api` for enterprise app send, or `webhook` for bot webhook send.") {
+                    Picker("Send Mode", selection: $dingtalkSendMode) {
+                        Text("API").tag("api")
+                        Text("Webhook").tag("webhook")
+                    }
+                    .pickerStyle(.segmented)
+                }
+                ConfigField(title: "App Key", hint: "Required for DingTalk stream ingress.") {
+                    TextField("dingxxxxxxxx", text: $dingtalkAppKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                ConfigField(title: "App Secret", hint: "Required for DingTalk stream ingress.") {
+                    SecureField("App secret", text: $dingtalkAppSecret)
+                        .textFieldStyle(.roundedBorder)
+                }
+                if dingtalkSendMode == "webhook" {
+                    ConfigField(title: "Bot Webhook", hint: "Required when send mode is webhook.") {
+                        TextField("https://oapi.dingtalk.com/robot/send?access_token=...", text: $dingtalkBotWebhook)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                } else {
+                    ConfigField(title: "Agent ID", hint: "Required when send mode is api.") {
+                        TextField("2536...", text: $dingtalkAgentID)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    ConfigField(title: "Default User ID", hint: "Optional fallback recipient for startup greeting and direct sends.") {
+                        TextField("Optional", text: $dingtalkDefaultTo)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+            }
+        }
+    }
+
+    private func pathRow(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Config")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                IconActionButton(systemName: "arrow.clockwise", helpText: "Refresh config state") {
+                    controller.refreshConfigPanel()
+                }
+            }
+            HStack(spacing: 10) {
+                ChannelCard(
+                    systemName: "macwindow",
+                    title: ChannelType.command.title,
+                    subtitle: "Local GUI session mode",
+                    selected: editingChannel == .command
+                ) { editingChannel = .command }
+                ChannelCard(
+                    systemName: "message",
+                    title: ChannelType.imessage.title,
+                    subtitle: "External iMessage bridge",
+                    selected: editingChannel == .imessage
+                ) { editingChannel = .imessage }
+                ChannelCard(
+                    systemName: "bubble.left.and.bubble.right",
+                    title: ChannelType.dingtalk.title,
+                    subtitle: "Stream ingress and send routing",
+                    selected: editingChannel == .dingtalk
+                ) { editingChannel = .dingtalk }
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Edit \(editingChannel.title)")
+                        .font(.headline)
+                    Spacer()
+                    if controller.selectedChannel == editingChannel {
+                        Pill(text: "Active", color: .green)
+                    }
+                }
+                Text("Save will persist the selected channel config and restart the gateway automatically.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                channelEditor
+                HStack(spacing: 10) {
+                    ConfigActionButton(systemName: configSaveBusy ? "hourglass" : "checkmark.circle", title: configSaveBusy ? "Saving..." : "Save & Restart", tint: .green, disabled: configSaveBusy) {
+                        saveCurrentChannelConfig()
+                    }
+                    ConfigActionButton(systemName: configTestBusy ? "hourglass" : "bolt.badge.checkmark", title: "Test Channel", tint: .orange, disabled: configTestBusy || configSaveBusy || controller.selectedChannel != editingChannel) {
+                        testActiveChannel()
+                    }
+                    ConfigActionButton(systemName: "arrow.uturn.backward.circle", title: "Reload", tint: .secondary, disabled: configSaveBusy) {
+                        reloadFromEnv()
+                    }
+                }
+                if !configStatusMessage.isEmpty {
+                    ConfigStatusBanner(message: configStatusMessage, ok: configStatusOK)
+                }
+            }
+            .padding(16)
+            .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+            Divider()
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Access Requests")
+                        .font(.headline)
+                    Text("Unknown channel users are recorded here. Allow or block them without editing env allowlists.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if !controller.accessUsers.isEmpty {
+                    Pill(text: "\(controller.accessUsers.filter { $0.status.lowercased() == "pending" }.count) pending", color: .orange)
+                }
+            }
+            if controller.accessUsers.isEmpty {
+                Text("No external users recorded yet.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(Color.gray.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(controller.accessUsers) { entry in
+                        AccessUserRow(
+                            entry: entry,
+                            busy: accessActionKey == entry.key || configSaveBusy
+                        ) {
+                            updateAccess(entry, status: "allowed")
+                        } onBlock: {
+                            updateAccess(entry, status: "blocked")
+                        }
+                    }
+                }
+            }
+            Divider()
+            Text("Workspace")
+                .font(.headline)
+            VStack(alignment: .leading, spacing: 10) {
+                pathRow(
+                    title: "Repo Root",
+                    value: controller.repoRootPath
+                )
+                pathRow(
+                    title: "Gateway Workdir",
+                    value: controller.gatewayWorkdirPath
+                )
+                pathRow(
+                    title: "Repo .env",
+                    value: controller.envFilePath
+                )
+                pathRow(
+                    title: "~/.cag/.env",
+                    value: controller.globalEnvFilePath
+                )
+                pathRow(
+                    title: "Current Log",
+                    value: controller.effectiveLogPath
+                )
+                pathRow(
+                    title: "gatewayd Log",
+                    value: controller.gatewaydLogPath
+                )
+            }
+            .padding(14)
+            .background(Color.gray.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
             Text("Session Tips: /new to start a fresh session, /clear to reset current session mapping.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -1746,23 +2786,112 @@ struct ConfigView: View {
                     }
                 }
             }
+            }
+            .padding(16)
         }
-        .padding(16)
-        .frame(width: 560, height: 520)
+        .frame(width: 680, height: 720)
+        .onAppear {
+            controller.refreshConfigPanel()
+            reloadFromEnv()
+            controller.refreshAccessUsersAsync()
+        }
+        .onChange(of: controller.configReloadVersion) { _, _ in
+            reloadFromEnv()
+        }
+    }
+}
+
+struct SetupCard<Content: View>: View {
+    let title: String
+    let bodyText: String
+    let content: Content
+
+    init(title: String, bodyText: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.bodyText = bodyText
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.title3.weight(.semibold))
+            Text(bodyText)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            content
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+struct InitialSetupView: View {
+    @ObservedObject var controller: GatewayController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "sparkles.rectangle.stack")
+                    .font(.system(size: 22, weight: .semibold))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Welcome")
+                        .font(.title2.weight(.semibold))
+                    Text("First-time setup for GUI chat")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            SetupCard(
+                title: "Initialize GUI Chat",
+                bodyText: "The app will initialize the minimal gateway config for local GUI chat. External channels can be configured later from the Config panel."
+            ) {
+                HStack(spacing: 10) {
+                    Pill(text: "Default Channel: GUI Chat", color: .blue)
+                    Pill(text: "Mode: Local Session", color: .green)
+                }
+                Text("Session workdir is managed per session from the chat panel. Global startup config only keeps the minimal gateway defaults.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Button(controller.initialSetupBusy ? "Initializing..." : "Initialize") {
+                    controller.completeInitialSetup()
+                }
+                .disabled(controller.initialSetupBusy)
+            }
+
+            if !controller.initialSetupMessage.isEmpty {
+                Text(controller.initialSetupMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(controller.needsInitialSetup ? Color.secondary : Color.green)
+            }
+
+            Spacer()
+        }
+        .padding(24)
+        .frame(width: 860, height: 620)
+        .onAppear {
+            GUILogger.shared.log("initial setup view shown")
+        }
     }
 }
 
 struct ContentView: View {
     @StateObject private var controller: GatewayController
+    @StateObject private var logTailController: LogTailController
     private let refreshTimer = Timer.publish(every: 2.0, on: .main, in: .common).autoconnect()
     @State private var showConfig = false
+    @State private var configInitialChannel: ChannelType
+    @State private var showLogDrawer = false
     @State private var timelineMessage: ChatMessage?
-    @State private var showLogTail = false
-    @State private var logTailText = ""
     @State private var refreshTick: Int = 0
 
     init(controller: GatewayController) {
         _controller = StateObject(wrappedValue: controller)
+        _logTailController = StateObject(wrappedValue: LogTailController(pathsProvider: { controller.liveLogPaths }))
+        _configInitialChannel = State(initialValue: controller.selectedChannel)
     }
 
     private var statusColor: Color {
@@ -1780,26 +2909,46 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Image(systemName: "app.badge.checkmark")
-                    .font(.system(size: 18, weight: .semibold))
-                Text("CLI Agent Gateway")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Pill(text: controller.statusText, color: statusColor)
-                Pill(text: "Active: \(controller.activeChannelText)", color: .blue)
-                Button("Start") { controller.start() }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Image(systemName: "app.badge.checkmark")
+                        .font(.system(size: 18, weight: .semibold))
+                    Text("CLI Agent Gateway")
+                        .font(.title3.weight(.semibold))
+                    Spacer()
+                    Pill(text: controller.statusText, color: statusColor)
+                    ChannelStatusPill(channelText: controller.activeChannelText)
+                    IconActionButton(
+                        systemName: "play.fill",
+                        helpText: "Start gateway",
+                        tint: .green,
+                        disabled: controller.statusText == "Running"
+                    ) {
+                        controller.start()
+                    }
                     .keyboardShortcut(.return, modifiers: [])
-                    .disabled(controller.statusText == "Running")
-                Button("Stop") { controller.stop() }
-                    .disabled(controller.statusText != "Running")
-                Button("Restart") { controller.restart() }
-                    .disabled(controller.statusText == "Blocked")
-                Button("Tail Logs") {
-                    logTailText = controller.latestLogTail()
-                    showLogTail = true
+                    IconActionButton(
+                        systemName: "stop.fill",
+                        helpText: "Stop gateway",
+                        tint: .orange,
+                        disabled: controller.statusText != "Running"
+                    ) {
+                        controller.stop()
+                    }
+                    IconActionButton(
+                        systemName: "arrow.clockwise",
+                        helpText: "Restart gateway",
+                        tint: .blue,
+                        disabled: controller.statusText == "Blocked"
+                    ) {
+                        controller.restart()
+                    }
                 }
-                Button("Config") { showConfig = true }
+                if !controller.gatewayAddressText.isEmpty {
+                    Text("gatewayd \(controller.gatewayAddressText)")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 14)
@@ -1811,9 +2960,12 @@ struct ContentView: View {
                         Text("Sessions")
                             .font(.title3.weight(.semibold))
                         Spacer()
-                        Button("Add Session") { controller.addSessionByPickingWorkdir() }
-                        Button("Delete All") { controller.deleteAllSessions() }
-                            .foregroundStyle(.red)
+                        IconActionButton(systemName: "plus", helpText: "Add session", tint: .blue) {
+                            controller.addSessionByPickingWorkdir()
+                        }
+                        IconActionButton(systemName: "trash", helpText: "Delete all sessions", tint: .red) {
+                            controller.deleteAllSessions()
+                        }
                     }
                     Text("Session Workdir: \(controller.selectedSessionWorkdir.isEmpty ? "(not set)" : controller.selectedSessionWorkdir)")
                         .font(.system(size: 11))
@@ -1896,47 +3048,78 @@ struct ContentView: View {
                             .onSubmit {
                                 controller.sendLocalChat()
                             }
-                        Button(controller.localSending ? "Sending..." : "Send") {
-                            controller.sendLocalChat()
-                        }
-                        .disabled(
-                            controller.selectedSessionKey == nil
+                        IconActionButton(
+                            systemName: controller.localSending ? "hourglass" : "paperplane.fill",
+                            helpText: controller.localSending ? "Sending message" : "Send message",
+                            tint: .blue,
+                            disabled: controller.selectedSessionKey == nil
                                 || controller.localSending
                                 || controller.localDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        )
+                        ) {
+                            controller.sendLocalChat()
+                        }
                     }
                 }
                 .padding(14)
                 .frame(minWidth: 620, idealWidth: 720)
+            }
+
+            if showLogDrawer {
+                Divider()
+                LogTailDrawerView(controller: logTailController) {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        showLogDrawer = false
+                    }
+                }
+                .frame(height: 210)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .frame(width: 1140, height: 700)
         .onAppear {
             GUILogger.shared.log("view onAppear bootstrap refresh")
             controller.ensureGatewaydForGUI()
-            controller.refreshHealthChecksAsync()
-            controller.refreshStatusAsync()
+            controller.refreshConfigPanel()
             controller.refreshSessionsAsync()
+            controller.refreshAccessUsersAsync()
         }
         .onReceive(refreshTimer) { _ in
             refreshTick += 1
             controller.refreshStatusAsync()
             if controller.localSending {
                 controller.refreshSelectedSessionChatAsync()
-            } else if refreshTick % 3 == 0 {
+            }
+            if refreshTick % 3 == 0 {
                 controller.refreshSessionsAsync()
+            }
+            if refreshTick % 5 == 0 {
+                controller.refreshAccessUsersAsync()
             }
         }
         .sheet(isPresented: $showConfig) {
-            ConfigView(controller: controller)
+            ConfigView(controller: controller, initialChannel: configInitialChannel)
         }
         .sheet(item: $timelineMessage) { msg in
             ProcessTimelineView(message: msg, events: controller.timeline(for: msg))
         }
-        .sheet(isPresented: $showLogTail) {
-            LogTailView(content: logTailText)
+        .onReceive(NotificationCenter.default.publisher(for: .guiOpenSettings)) { _ in
+            configInitialChannel = controller.selectedChannel
+            showConfig = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .guiToggleLogDrawer)) { _ in
+            withAnimation(.easeOut(duration: 0.16)) {
+                showLogDrawer.toggle()
+            }
+        }
+        .onChange(of: showLogDrawer) { _, visible in
+            if visible {
+                logTailController.start()
+            } else {
+                logTailController.stop()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            logTailController.stop()
             controller.shutdownGatewaydForGUI()
         }
     }
@@ -1962,7 +3145,11 @@ struct CLIAppMain: App {
     var body: some Scene {
         WindowGroup {
             if let controller = bootstrap.controller {
-                ContentView(controller: controller)
+                if controller.needsInitialSetup {
+                    InitialSetupView(controller: controller)
+                } else {
+                    ContentView(controller: controller)
+                }
             } else {
                 VStack(spacing: 10) {
                     Text("Failed to load app configuration.")
@@ -1972,6 +3159,19 @@ struct CLIAppMain: App {
                 }
                 .padding(20)
                 .frame(width: 420, height: 160)
+            }
+        }
+        .commands {
+            CommandMenu("Gateway") {
+                Button("Open Settings") {
+                    NotificationCenter.default.post(name: .guiOpenSettings, object: nil)
+                }
+                .keyboardShortcut(",", modifiers: .command)
+
+                Button("Toggle Logs") {
+                    NotificationCenter.default.post(name: .guiToggleLogDrawer, object: nil)
+                }
+                .keyboardShortcut("j", modifiers: .command)
             }
         }
     }

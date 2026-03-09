@@ -10,13 +10,16 @@ import (
 )
 
 // LoadDotEnvSetDefault reads KEY=VALUE lines and only sets keys missing in process env.
+// Blank process env values are treated as unset so file-backed config can recover from
+// inherited KEY= entries emitted by parent processes.
 func LoadDotEnvSetDefault(path string) error {
 	values, err := Parse(path)
 	if err != nil {
 		return err
 	}
 	for key, value := range values {
-		if _, exists := os.LookupEnv(key); !exists {
+		current, exists := os.LookupEnv(key)
+		if !exists || strings.TrimSpace(current) == "" {
 			_ = os.Setenv(key, value)
 		}
 	}

@@ -152,9 +152,7 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 					if text != "" || hasRawText {
 						if isChunkUpdate(sessionUpdateType(result)) {
 							output = appendRawChunk(output, rawText)
-							if text != "" {
-								summary = appendChunk(summary, text)
-							}
+							summary = appendSummaryChunk(summary, text, rawText, hasRawText)
 							sawChunk = true
 						} else {
 							if text != "" {
@@ -215,9 +213,7 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 				if text != "" || hasRawText {
 					if isChunkUpdate(sessionUpdateType(n.Params)) {
 						output = appendRawChunk(output, rawText)
-						if text != "" {
-							summary = appendChunk(summary, text)
-						}
+						summary = appendSummaryChunk(summary, text, rawText, hasRawText)
 						sawChunk = true
 					} else {
 						if text != "" {
@@ -546,6 +542,13 @@ func appendChunk(base, chunk string) string {
 		return base + next
 	}
 	return base + " " + next
+}
+
+func appendSummaryChunk(base, text, raw string, hasRaw bool) string {
+	if hasRaw {
+		return appendRawChunk(base, raw)
+	}
+	return appendChunk(base, text)
 }
 
 func appendRawChunk(base, chunk string) string {

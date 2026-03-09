@@ -162,9 +162,16 @@ Semantics:
 
 ### `config`
 
-- `config [workdir]`: 写仓库级 `.env`（兼容现有行为）。
+- `config [workdir]`: 写仓库级 `.env`，仅保留启动必需项；会把旧 `.env` 里的运行期键迁移到 SQLite。`workdir` 位置参数已不再写入 `CODEX_WORKDIR`。
 - `config --global`: 写用户级 `~/.cag/.env`（默认写入 `GATEWAYD_ADDR=127.0.0.1:58473`）。
 - `config --global --gatewayd-addr <addr>`: 覆盖用户级 `GATEWAYD_ADDR`。
+- `config list`: 输出当前支持的有效配置值，以及其来源（`process_env|repo_env|user_env|runtime_db|default`）。
+- `config get <key>`: 读取单个有效配置值。
+- `config set <key> <value>`: 统一写配置。
+  - repo 启动项写回仓库 `.env`
+  - user 启动项（当前 `GATEWAYD_ADDR` 以及 GUI 共享的 `DINGTALK_*` 启动键）写回 `~/.cag/.env`
+  - 运行期项写入 SQLite `kv_state[key=config.runtime]`
+- `config unset <key>`: 删除持久化 override，回退到下一级来源/默认值。
 
 ### `start`
 
@@ -204,7 +211,7 @@ Defaulting:
 - `send --session-key` 的 `workdir` 优先级：
   1) 显式 `--workdir`
   2) 已保存的 `session metadata.workdir`（由 `session-new` 或历史执行写入）
-  3) 若仍为空：返回 `workdir_required`
+  3) 若仍为空：自动初始化并使用 `~/.cag/workspace/default`
 
 ### `gatewayd`
 

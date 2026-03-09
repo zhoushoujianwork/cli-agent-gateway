@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,15 +13,16 @@ import (
 )
 
 type Loop struct {
-	Channel           ChannelAdapter
-	Agent             AgentAdapter
-	Storage           storage.Backend
-	RemoteUserID      string
-	AllowedFrom       map[string]struct{}
-	ProcessOnlyLatest bool
-	PollIntervalSec   int
-	ReplyStyleEnabled bool
-	ReplyStylePrompt  string
+	Channel             ChannelAdapter
+	Agent               AgentAdapter
+	Storage             storage.Backend
+	RemoteUserID        string
+	AllowedFrom         map[string]struct{}
+	PendingUnknownUsers bool
+	ProcessOnlyLatest   bool
+	PollIntervalSec     int
+	ReplyStyleEnabled   bool
+	ReplyStylePrompt    string
 }
 
 func (l *Loop) RunForever() error {
@@ -33,6 +35,15 @@ func (l *Loop) RunForever() error {
 		processed[id] = struct{}{}
 	}
 	for {
+		if latest, loadErr := l.Storage.LoadState(); loadErr == nil {
+			st = latest
+			processed = map[string]struct{}{}
+			for _, id := range st.ProcessedIDs {
+				processed[id] = struct{}{}
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[WARN] reload state failed: %v\n", loadErr)
+		}
 		msgs, err := l.Channel.Fetch()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[WARN] fetch error: %v\n", err)
@@ -51,8 +62,25 @@ func (l *Loop) RunForever() error {
 				fmt.Fprintf(os.Stderr, "[INFO] skip duplicate msg_id=%s sender=%s\n", m.ID, m.Sender)
 				continue
 			}
-			if !l.allowed(m.Sender) {
-				fmt.Fprintf(os.Stderr, "[INFO] skip unauthorized msg_id=%s sender=%s\n", m.ID, m.Sender)
+			allowed, accessStatus := l.accessDecision(st, m)
+			st = l.upsertUserAccess(st, m, accessStatus)
+			if !allowed {
+				l.saveState(st)
+				fmt.Fprintf(os.Stderr, "[INFO] skip unauthorized msg_id=%s sender=%s status=%s\n", m.ID, m.Sender, accessStatus)
+				l.appendInteraction(map[string]any{
+					"kind":         "unauthorized_inbound",
+					"msg_id":       m.ID,
+					"sender":       m.Sender,
+					"text":         m.Text,
+					"time":         time.Now().UTC().Format(time.RFC3339),
+					"user_profile": buildUserProfile(m),
+					"status":       accessStatus,
+				})
+				if err := l.Channel.Send(l.unauthorizedNotice(m, accessStatus), m.Sender, "unauthorized-"+m.ID, ""); err != nil {
+					fmt.Fprintf(os.Stderr, "[WARN] send unauthorized notice failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
+				} else {
+					fmt.Fprintf(os.Stderr, "[INFO] send unauthorized notice ok msg_id=%s to=%s status=%s\n", m.ID, m.Sender, accessStatus)
+				}
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "[INFO] inbound accepted msg_id=%s sender=%s channel=%s thread=%s text=%s\n", m.ID, m.Sender, nonEmpty(m.Channel, "command"), nonEmpty(m.ThreadID, "-"), shortText(m.Text, 80))
@@ -67,7 +95,11 @@ func (l *Loop) RunForever() error {
 			})
 
 			cmd := strings.TrimSpace(m.Text)
-			sessionKey := l.sessionKeyFor(m)
+			baseSessionKey := l.sessionKeyFor(m)
+			sessionKey := baseSessionKey
+			if deletedAt := strings.TrimSpace(st.SessionDeleted[baseSessionKey]); deletedAt != "" {
+				sessionKey = deriveReopenedSessionKey(baseSessionKey, deletedAt)
+			}
 			if cmd == "/clear" || cmd == "/new" {
 				delete(st.SessionMap, sessionKey)
 				processed[m.ID] = struct{}{}
@@ -107,6 +139,26 @@ func (l *Loop) RunForever() error {
 			if l.ReplyStyleEnabled && strings.TrimSpace(l.ReplyStylePrompt) != "" {
 				userText = l.ReplyStylePrompt + "\n\n用户请求：\n" + userText
 			}
+			var workdirErr error
+			var resolvedWorkdir string
+			st, resolvedWorkdir, workdirErr = l.ensureSessionWorkdir(st, sessionKey)
+			if workdirErr != nil {
+				errText := fmt.Sprintf("执行失败: workdir 初始化失败: %v", workdirErr)
+				if err := l.Channel.Send(errText, m.Sender, m.ID, ""); err != nil {
+					fmt.Fprintf(os.Stderr, "[WARN] send workdir error reply failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
+				}
+				l.appendInteraction(map[string]any{
+					"msg_id":       m.ID,
+					"error":        errText,
+					"ts":           time.Now().UTC().Format(time.RFC3339),
+					"user_profile": buildUserProfile(m),
+				})
+				fmt.Fprintf(os.Stderr, "[WARN] execute skipped msg_id=%s reason=workdir_init_failed err=%v\n", m.ID, workdirErr)
+				processed[m.ID] = struct{}{}
+				st.ProcessedIDs = append(st.ProcessedIDs, m.ID)
+				l.saveState(st)
+				continue
+			}
 
 			req := TaskRequest{
 				TraceID:    traceID(m.ID),
@@ -119,16 +171,17 @@ func (l *Loop) RunForever() error {
 				Metadata: mergeMetadata(m.Metadata, map[string]any{
 					"received_ts": m.TS,
 					"message_id":  m.ID,
-					"workdir":     mustGetwd(),
+					"workdir":     resolvedWorkdir,
 				}),
 			}
-			fmt.Fprintf(os.Stderr, "[INFO] session resolved msg_id=%s session_key=%s session_id=%s\n", m.ID, sessionKey, req.SessionID)
+			fmt.Fprintf(os.Stderr, "[INFO] session resolved msg_id=%s session_key=%s session_id=%s workdir=%s\n", m.ID, sessionKey, req.SessionID, resolvedWorkdir)
 			l.appendInteraction(map[string]any{
 				"kind":        "trace",
 				"stage":       "session_resolved",
 				"msg_id":      m.ID,
 				"session_key": sessionKey,
 				"session_id":  req.SessionID,
+				"workdir":     resolvedWorkdir,
 				"ts":          now,
 			})
 			fmt.Fprintf(os.Stderr, "[INFO] execute start msg_id=%s session_key=%s session_id=%s sender=%s\n", m.ID, sessionKey, req.SessionID, m.Sender)
@@ -224,6 +277,11 @@ func (l *Loop) RunForever() error {
 			if strings.TrimSpace(result.SessionID) != "" {
 				st.SessionMap[sessionKey] = result.SessionID
 			}
+			meta := st.SessionMeta[sessionKey]
+			meta.Workdir = resolvedWorkdir
+			meta.Status = "ready"
+			meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			st.SessionMeta[sessionKey] = meta
 			reportPath := l.writeReport(m, req, result)
 			fmt.Fprintf(os.Stderr, "[INFO] report written msg_id=%s path=%s\n", m.ID, nonEmpty(reportPath, "-"))
 			finalText := formatFinal(result)
@@ -269,19 +327,36 @@ func (l *Loop) RunForever() error {
 	}
 }
 
-func (l *Loop) allowed(sender string) bool {
-	sender = strings.TrimSpace(sender)
+func (l *Loop) accessDecision(st storage.StateData, m InboundMessage) (bool, string) {
+	sender := strings.TrimSpace(m.Sender)
 	if sender == "" {
-		return false
+		return false, "pending"
+	}
+	key := userAccessKey(nonEmpty(m.Channel, "command"), sender)
+	if rec, ok := st.UserAccess[key]; ok {
+		switch strings.ToLower(strings.TrimSpace(rec.Status)) {
+		case "allowed":
+			return true, "allowed"
+		case "blocked":
+			return false, "blocked"
+		}
 	}
 	if len(l.AllowedFrom) == 0 {
 		if strings.TrimSpace(l.RemoteUserID) == "" {
-			return true
+			if l.PendingUnknownUsers {
+				return false, "pending"
+			}
+			return true, "allowed"
 		}
-		return sender == strings.TrimSpace(l.RemoteUserID)
+		if sender == strings.TrimSpace(l.RemoteUserID) {
+			return true, "allowed"
+		}
+		return false, "pending"
 	}
-	_, ok := l.AllowedFrom[sender]
-	return ok
+	if _, ok := l.AllowedFrom[sender]; ok {
+		return true, "allowed"
+	}
+	return false, "pending"
 }
 
 func (l *Loop) sessionKeyFor(m InboundMessage) string {
@@ -292,6 +367,19 @@ func (l *Loop) sessionKeyFor(m InboundMessage) string {
 	sig := nonEmpty(m.Channel, "command") + "|" + m.Sender + "|" + thread
 	h := sha1.Sum([]byte(sig))
 	return "sess_" + hex.EncodeToString(h[:])[:24]
+}
+
+func deriveReopenedSessionKey(baseKey, deletedAt string) string {
+	base := strings.TrimSpace(baseKey)
+	if base == "" {
+		return base
+	}
+	cutoff := strings.TrimSpace(deletedAt)
+	if cutoff == "" {
+		return base
+	}
+	h := sha1.Sum([]byte(base + "|" + cutoff))
+	return base + "_r" + hex.EncodeToString(h[:])[:8]
 }
 
 func (l *Loop) writeReport(msg InboundMessage, req TaskRequest, result TaskResult) string {
@@ -334,14 +422,6 @@ func nonEmpty(v, d string) string {
 		return d
 	}
 	return v
-}
-
-func mustGetwd() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	return wd
 }
 
 func (l *Loop) appendInteraction(node map[string]any) {
@@ -402,12 +482,138 @@ func anyString(v any) string {
 	return s
 }
 
+func userAccessKey(channel, userID string) string {
+	return strings.TrimSpace(nonEmpty(channel, "command")) + "|" + strings.TrimSpace(userID)
+}
+
+func userSenderName(m InboundMessage) string {
+	if name := strings.TrimSpace(anyString(m.Metadata["sender_name"])); name != "" {
+		return name
+	}
+	return strings.TrimSpace(m.Sender)
+}
+
+func userAccessMetadata(m InboundMessage) map[string]any {
+	out := map[string]any{}
+	for _, key := range []string{
+		"sender_staff_id",
+		"sender_id",
+		"sender_corp_id",
+		"conversation_id",
+		"conversation_title",
+		"chat_type",
+		"is_group",
+		"is_at_bot",
+		"sender_profile",
+	} {
+		if v, ok := m.Metadata[key]; ok {
+			out[key] = v
+		}
+	}
+	return out
+}
+
+func (l *Loop) upsertUserAccess(st storage.StateData, m InboundMessage, status string) storage.StateData {
+	if st.UserAccess == nil {
+		st.UserAccess = map[string]storage.UserAccessRecord{}
+	}
+	channel := strings.TrimSpace(nonEmpty(m.Channel, "command"))
+	userID := strings.TrimSpace(m.Sender)
+	if userID == "" {
+		return st
+	}
+	key := userAccessKey(channel, userID)
+	now := time.Now().UTC().Format(time.RFC3339)
+	rec := st.UserAccess[key]
+	if strings.TrimSpace(rec.Channel) == "" {
+		rec.Channel = channel
+	}
+	if strings.TrimSpace(rec.UserID) == "" {
+		rec.UserID = userID
+	}
+	if strings.TrimSpace(rec.FirstSeenAt) == "" {
+		rec.FirstSeenAt = now
+	}
+	if strings.TrimSpace(rec.Status) == "" || strings.EqualFold(strings.TrimSpace(rec.Status), "pending") || strings.EqualFold(status, "blocked") {
+		rec.Status = status
+	}
+	rec.SenderName = userSenderName(m)
+	rec.LastSeenAt = now
+	rec.LastMessageID = strings.TrimSpace(m.ID)
+	rec.LastText = shortText(m.Text, 120)
+	rec.ThreadID = strings.TrimSpace(m.ThreadID)
+	rec.ConversationID = strings.TrimSpace(anyString(m.Metadata["conversation_id"]))
+	rec.ConversationTitle = strings.TrimSpace(anyString(m.Metadata["conversation_title"]))
+	rec.Source = "gateway"
+	rec.Metadata = userAccessMetadata(m)
+	st.UserAccess[key] = rec
+	return st
+}
+
+func (l *Loop) unauthorizedNotice(m InboundMessage, status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "blocked":
+		return "当前账号已被网关拒绝访问，请联系管理员在 GUI 的 Access Requests 中调整状态。"
+	default:
+		return "当前账号尚未通过网关授权，消息已记录。请提醒管理员在 GUI 的 Access Requests 中允许后再重试。"
+	}
+}
+
 func shortText(s string, n int) string {
 	t := strings.TrimSpace(s)
 	if n <= 0 || len(t) <= n {
 		return t
 	}
 	return t[:n-3] + "..."
+}
+
+func (l *Loop) ensureSessionWorkdir(st storage.StateData, sessionKey string) (storage.StateData, string, error) {
+	if st.SessionMeta == nil {
+		st.SessionMeta = map[string]storage.SessionMetaRecord{}
+	}
+	meta := st.SessionMeta[sessionKey]
+	workdir := strings.TrimSpace(meta.Workdir)
+	if workdir == "" {
+		defaultWorkdir, err := defaultSessionWorkdir()
+		if err != nil {
+			return st, "", err
+		}
+		workdir = defaultWorkdir
+	}
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		return st, "", fmt.Errorf("create session workdir failed: %w", err)
+	}
+	info, err := os.Stat(workdir)
+	if err != nil {
+		return st, "", fmt.Errorf("stat session workdir failed: %w", err)
+	}
+	if !info.IsDir() {
+		return st, "", fmt.Errorf("invalid session workdir (not a directory): %s", workdir)
+	}
+	meta.Workdir = workdir
+	if strings.TrimSpace(meta.Status) == "" {
+		meta.Status = "ready"
+	}
+	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	st.SessionMeta[sessionKey] = meta
+	return st, workdir, nil
+}
+
+func defaultSessionWorkdir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir failed: %w", err)
+	}
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return "", fmt.Errorf("resolve home dir failed: empty")
+	}
+	path := filepath.Join(home, ".cag", "workspace", "default")
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve default workdir failed: %w", err)
+	}
+	return resolved, nil
 }
 
 func progressIntervalSec() int {
