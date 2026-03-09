@@ -24,6 +24,7 @@ import (
 	"cli-agent-gateway/internal/infra/envfile"
 	"cli-agent-gateway/internal/infra/lockfile"
 	"cli-agent-gateway/internal/storage"
+	"cli-agent-gateway/internal/utils/sessionctl"
 
 	_ "modernc.org/sqlite"
 )
@@ -130,10 +131,18 @@ func main() {
 		os.Exit(runDoctor(repoRoot, args))
 	case "send":
 		os.Exit(runSend(repoRoot, args))
+	case "session":
+		os.Exit(runSessionCommand(repoRoot, args))
+	case "channel":
+		os.Exit(runChannelCommand(repoRoot, args))
+	case "binding":
+		os.Exit(runBindingCommand(repoRoot, args))
+	case "runtime":
+		os.Exit(runRuntimeCommand(repoRoot, args))
 	case "sessions":
-		os.Exit(runSessions(repoRoot, args))
+		os.Exit(runDeprecatedCLI("sessions", "session list", hasFlag(args, "--json")))
 	case "messages":
-		os.Exit(runMessages(repoRoot, args))
+		os.Exit(runDeprecatedCLI("messages", "session messages --key <session_key>", hasFlag(args, "--json")))
 	case "users":
 		os.Exit(runUsers(repoRoot, args))
 	case "user-allow":
@@ -141,13 +150,13 @@ func main() {
 	case "user-block":
 		os.Exit(runUserBlock(repoRoot, args))
 	case "session-clear":
-		os.Exit(runSessionClear(repoRoot, args))
+		os.Exit(runDeprecatedCLI("session-clear", "session clear --key <session_key>", hasFlag(args, "--json")))
 	case "session-new":
-		os.Exit(runSessionNew(repoRoot, args))
+		os.Exit(runDeprecatedCLI("session-new", "session create --key <session_key> --workdir <path>", hasFlag(args, "--json")))
 	case "session-delete":
-		os.Exit(runSessionDelete(repoRoot, args))
+		os.Exit(runDeprecatedCLI("session-delete", "session delete --key <session_key>", hasFlag(args, "--json")))
 	case "sessions-delete-all":
-		os.Exit(runSessionsDeleteAll(repoRoot, args))
+		os.Exit(runDeprecatedCLI("sessions-delete-all", "session delete --key <session_key> (repeat as needed)", hasFlag(args, "--json")))
 	case "gatewayd":
 		os.Exit(runGatewayd(repoRoot, args))
 	case "gatewayd-up":
@@ -175,15 +184,13 @@ func printActions(out *os.File) {
 	fmt.Fprintln(out, "health")
 	fmt.Fprintln(out, "doctor")
 	fmt.Fprintln(out, "send")
-	fmt.Fprintln(out, "sessions")
-	fmt.Fprintln(out, "messages")
+	fmt.Fprintln(out, "session")
+	fmt.Fprintln(out, "channel")
+	fmt.Fprintln(out, "binding")
+	fmt.Fprintln(out, "runtime")
 	fmt.Fprintln(out, "users")
 	fmt.Fprintln(out, "user-allow")
 	fmt.Fprintln(out, "user-block")
-	fmt.Fprintln(out, "session-new")
-	fmt.Fprintln(out, "session-clear")
-	fmt.Fprintln(out, "session-delete")
-	fmt.Fprintln(out, "sessions-delete-all")
 	fmt.Fprintln(out, "gatewayd")
 	fmt.Fprintln(out, "gatewayd-up")
 	fmt.Fprintln(out, "gatewayd-down")
@@ -210,15 +217,13 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
 	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run, --workdir optional for --session-key)")
-	fmt.Fprintln(out, "  sessions [--json]   List sessions for GUI")
-	fmt.Fprintln(out, "  messages [--json]   List messages for a session (--session-key)")
+	fmt.Fprintln(out, "  session <subcmd>    Manage session-first task contexts")
+	fmt.Fprintln(out, "  channel <subcmd>    Inspect channel conversations and inbox")
+	fmt.Fprintln(out, "  binding <subcmd>    Manage explicit conversation -> session bindings")
+	fmt.Fprintln(out, "  runtime <subcmd>    Inspect live session runtimes")
 	fmt.Fprintln(out, "  users [--json]      List pending/allowed/blocked gateway users")
 	fmt.Fprintln(out, "  user-allow          Mark a user as allowed (--channel --user-id)")
 	fmt.Fprintln(out, "  user-block          Mark a user as blocked (--channel --user-id)")
-	fmt.Fprintln(out, "  session-new         Create/update session metadata (--session-key --workdir)")
-	fmt.Fprintln(out, "  session-clear       Clear session map entry (--session-key)")
-	fmt.Fprintln(out, "  session-delete      Delete session map entry (--session-key)")
-	fmt.Fprintln(out, "  sessions-delete-all Delete all session map entries")
 	fmt.Fprintln(out, "  gatewayd [opts]     Run gRPC control plane server")
 	fmt.Fprintln(out, "  gatewayd-up         Ensure gRPC control plane is running")
 	fmt.Fprintln(out, "  gatewayd-down       Stop managed gRPC control plane process")
@@ -278,17 +283,13 @@ func runGoMain(repoRoot string, args []string) int {
 	fmt.Printf("[%s] startup channel=%s workdir=%s\n", time.Now().UTC().Format(time.RFC3339), cfg.ChannelType, cfg.Workdir)
 	fmt.Printf("[%s] startup acp_cmd=%s permission_policy=%s\n", time.Now().UTC().Format(time.RFC3339), cfg.ACPAgentCmd, cfg.PermissionPolicy)
 
+	if err := ensureGatewaydRunning(repoRoot); err != nil {
+		fmt.Fprintf(os.Stderr, "ensure gatewayd failed: %v\n", err)
+		return 1
+	}
+
 	channel := buildChannelAdapter(cfg)
-	agent := acp.NewAdapter(
-		cfg.ACPAgentCmd,
-		cfg.Workdir,
-		cfg.PermissionPolicy,
-		cfg.TimeoutSec,
-		cfg.InitializeTimeoutSec,
-		cfg.SessionNewTimeoutSec,
-		cfg.SessionNewRetries,
-		cfg.SessionNewBackoffSec,
-	)
+	agent := &gatewaySessionProxyAgent{repoRoot: repoRoot}
 	defer agent.Close()
 
 	store, err := storage.NewBackend(
@@ -534,6 +535,14 @@ func runStatus(repoRoot string, args []string) int {
 func runStart(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
 	if !grpcDisabled() {
+		if err := ensureGatewaydRunning(repoRoot); err != nil {
+			if jsonOut {
+				printJSONActionError("start", "gateway_unreachable", formatGatewayUnavailable(err))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "start failed: %s\n", formatGatewayUnavailable(err))
+			return 1
+		}
 		requestedLog := strings.TrimSpace(flagValue(args, "--log-file"))
 		grpcRes, gerr := tryStartViaGRPC(repoRoot, requestedLog)
 		if gerr != nil {
@@ -627,7 +636,7 @@ func runStart(repoRoot string, args []string) int {
 	proc.Dir = repoRoot
 	proc.Stdout = logFile
 	proc.Stderr = logFile
-	proc.Env = managedChildEnv("GATEWAY_LOG_FILE=" + logPath)
+	proc.Env = managedChildEnv("GATEWAY_LOG_FILE="+logPath, "CAG_GRPC_DISABLE=")
 	configureDetachedProcess(proc)
 
 	if err := proc.Start(); err != nil {
@@ -812,6 +821,14 @@ func runStop(repoRoot string, args []string) int {
 func runRestart(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
 	if !grpcDisabled() {
+		if err := ensureGatewaydRunning(repoRoot); err != nil {
+			if jsonOut {
+				printJSONActionError("restart", "gateway_unreachable", formatGatewayUnavailable(err))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "restart failed: %s\n", formatGatewayUnavailable(err))
+			return 1
+		}
 		requestedLog := strings.TrimSpace(flagValue(args, "--log-file"))
 		grpcRes, gerr := tryRestartViaGRPC(repoRoot, requestedLog)
 		if gerr != nil {
@@ -918,7 +935,7 @@ func runRestart(repoRoot string, args []string) int {
 	p.Dir = repoRoot
 	p.Stdout = logFile
 	p.Stderr = logFile
-	p.Env = managedChildEnv("GATEWAY_LOG_FILE=" + logPath)
+	p.Env = managedChildEnv("GATEWAY_LOG_FILE="+logPath, "CAG_GRPC_DISABLE=")
 	configureDetachedProcess(p)
 	if err := p.Start(); err != nil {
 		printJSONActionError("restart", "start_process_failed", err.Error())
@@ -1174,50 +1191,7 @@ func runSend(repoRoot string, args []string) int {
 		return 2
 	}
 	if key != "" {
-		key = normalizeSessionKey(key)
-		msgID := strings.TrimSpace(*messageID)
-		if msgID == "" {
-			msgID = fmt.Sprintf("manual-%d", time.Now().UnixMilli())
-		}
-		grpcRes, gerr := trySendToSessionViaGRPC(repoRoot, key, body, msgID, mt, *dryRun, source, strings.TrimSpace(*workdirArg))
-		if gerr != nil {
-			if *jsonOut {
-				printJSONActionError("send", "gateway_unreachable", formatGatewayUnavailable(gerr))
-				return 1
-			}
-			fmt.Fprintf(os.Stderr, "send failed: %s\n", formatGatewayUnavailable(gerr))
-			return 1
-		}
-		payload := SendPayload{
-			OK:             grpcRes.GetOk(),
-			Channel:        grpcRes.GetChannel(),
-			To:             grpcRes.GetTo(),
-			MessageID:      grpcRes.GetMessageId(),
-			MsgType:        grpcRes.GetMsgType(),
-			DryRun:         grpcRes.GetDryRun(),
-			Source:         grpcRes.GetSource(),
-			SessionKey:     grpcRes.GetSessionKey(),
-			SessionID:      grpcRes.GetSessionId(),
-			Result:         grpcRes.GetResult(),
-			RawOutput:      grpcRes.GetRawOutput(),
-			TerminalReason: grpcRes.GetTerminalReason(),
-			ElapsedSec:     int(grpcRes.GetElapsedSec()),
-			Error:          grpcRes.GetError(),
-		}
-		if node, ok := parseResultJSON(grpcRes.GetResultJson()); ok {
-			payload.ResultJSON = node
-		}
-		if *jsonOut {
-			printJSON(payload)
-		} else if payload.OK {
-			fmt.Printf("session-sent key=%s message_id=%s status=%s elapsed=%ds\n", payload.SessionKey, payload.MessageID, nonEmpty(payload.Result, "ok"), payload.ElapsedSec)
-		} else {
-			fmt.Fprintf(os.Stderr, "send failed: %s\n", payload.Error)
-		}
-		if payload.OK {
-			return 0
-		}
-		return 1
+		return runDeprecatedCLI("send --session-key", "session send --key <session_key> --text <text>", *jsonOut)
 	}
 
 	cfg, err := config.Load(repoRoot, "")
@@ -1779,18 +1753,18 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 		kind := strings.TrimSpace(fmt.Sprint(rec["kind"]))
 		switch kind {
 		case "inbound_received":
-			msgID := cleanAnyString(rec["msg_id"])
+			msgID := sessionctl.CleanString(rec["msg_id"])
 			if msgID == "" {
 				continue
 			}
 			profile, _ := rec["user_profile"].(map[string]any)
-			channel := cleanAnyString(profile["channel"])
-			threadID := cleanAnyString(profile["thread_id"])
-			senderName := cleanAnyString(profile["sender_name"])
-			sender := cleanAnyString(rec["sender"])
-			text := cleanAnyString(rec["text"])
-			ts := cleanAnyString(rec["time"])
-			explicitKey := cleanAnyString(rec["session_key"])
+			channel := sessionctl.CleanString(profile["channel"])
+			threadID := sessionctl.CleanString(profile["thread_id"])
+			senderName := sessionctl.CleanString(profile["sender_name"])
+			sender := sessionctl.CleanString(rec["sender"])
+			text := sessionctl.CleanString(rec["text"])
+			ts := sessionctl.CleanString(rec["time"])
+			explicitKey := sessionctl.CleanString(rec["session_key"])
 			in := inbound{
 				msgID:      msgID,
 				sender:     sender,
@@ -1825,12 +1799,12 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 				}
 			}
 		case "trace":
-			stage := cleanAnyString(rec["stage"])
+			stage := sessionctl.CleanString(rec["stage"])
 			if stage != "session_resolved" {
 				continue
 			}
-			msgID := cleanAnyString(rec["msg_id"])
-			key := cleanAnyString(rec["session_key"])
+			msgID := sessionctl.CleanString(rec["msg_id"])
+			key := sessionctl.CleanString(rec["session_key"])
 			if msgID != "" && key != "" {
 				if isSessionDeleted(sessionDeleted, key, "") {
 					continue

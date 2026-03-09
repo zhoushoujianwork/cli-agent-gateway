@@ -1,326 +1,277 @@
-# CLI Spec (Go Runtime)
+# CLI Spec Preview (Session / Channel / Binding / Runtime)
 
-This document freezes the external CLI contract for `cag` (gateway-cli) used by GUI and automation.
+This document is the vNext command preview.
 
-## Version
+It defines the target command tree and command purpose.
 
-- Spec version: `v1`
-- Scope: Go runtime only (`src/cmd/gateway-cli`)
-- Compatibility rule: additive changes only for `--json` outputs. Existing keys and meanings must not be broken.
+Status:
 
-## Commands
+- design target only
+- not a claim that all commands already exist
+- old flat commands are legacy and should be sunset
 
-- `run`
-- `start`
-- `stop`
-- `restart`
-- `config`
-- `config --global [--gatewayd-addr <addr>]`
-- `status [--json]`
-- `gatewayd [--listen <addr>]`
-- `gatewayd-up [--json]`
-- `gatewayd-down [--json]`
-- `health [--json]`
-- `send (--to <id> | --session-key <key>) (--text <msg> | --file <path>) [--msgtype text|markdown] [--channel <name>] [--message-id <id>] [--report-file <path>] [--dry-run] [--workdir <path>] [--json]`
-- `sessions [--limit <n>] [--json]`
-- `messages --session-key <key> [--json]`
-- `session-new --session-key <key> --workdir <path> [--json]`
-- `session-clear --session-key <key> [--json]`
-- `session-delete --session-key <key> [--json]`
-- `sessions-delete-all [--json]`
-- `actions`
-- `help`
+## Command Tree
 
-## Global behavior
+```text
+cag session create
+cag session delete
+cag session list
+cag session show
+cag session send
+cag session messages
+cag session clear
+cag session attach
+cag session detach
 
-- Repository root resolution:
-  - If current dir is `src/`, use parent as repo root.
-  - Else prefer current dir when `.env` exists.
-  - Else use parent when parent has `.env`.
-- Config source precedence:
-  - 1) process env
-  - 2) repo `.env`
-  - 3) user global `~/.cag/.env`
-  - 4) built-in defaults
-- Repo `.env` is optional; effective config is resolved from user global `~/.cag/.env` plus built-in defaults when repo `.env` is absent.
-- `run` does not accept positional workdir arg.
-- `status/start/stop/restart/health/doctor/sessions/send(--session-key)/messages/session-*` 仅通过 gRPC 控制面访问 `gatewayd`。
-- CLI 会在 gRPC 调用前自动确保 `gatewayd` 在线（必要时自动拉起）；若控制面不可用则直接报错，不做本地业务回退，也不保留兼容路径。
+cag channel list
+cag channel inbox
+cag channel show
 
-## Exit codes
+cag binding create
+cag binding delete
+cag binding list
+cag binding show
 
-- `0`: success
-- `1`: runtime/validation failure
-- `2`: CLI usage error (unknown action, missing required arg, parse failure)
-
-## JSON contract
-
-### `status --json`
-
-Output object:
-
-```json
-{
-  "running": true,
-  "pid": 12345,
-  "started_at": "2026-03-05T04:54:08Z",
-  "lock_file": "/abs/path/gateway.lock",
-  "metadata": {
-    "channel": "dingtalk",
-    "workdir": "/abs/path"
-  }
-}
+cag runtime status
+cag runtime ps
+cag runtime logs
 ```
 
-Field rules:
+## Command Registry
 
-- `running` (`bool`, required)
-- `lock_file` (`string`, required, absolute path)
-- `pid` (`number`, optional)
-- `started_at` (`string`, optional, RFC3339 UTC)
-- `metadata` (`object`, optional, extra runtime metadata)
+Each command must keep four annotations:
 
-Semantics:
+- `path`
+- `purpose`
+- `feature_group`
+- `sunset_group`
 
-- `running=true` means lock is currently held by an active process.
-- `running=false` may still include historical `metadata` from prior runs.
+These annotations exist so an obsolete command family can be removed in one pass.
 
-Plain output:
+## Session Commands
 
-- `status`（非 `--json`）必须打印当前 `lock` 与 `log` 路径。
-- 当 `running=true` 时，`status` 额外打印最近几行运行日志，作为快速诊断视图。
-- 默认当前日志文件是可见文件名：`~/.cag/gatewayd/gatewayd.log`。
-- `gatewayd` 与其管理的 gateway runtime 默认共享这一份日志文件，供 GUI 展示“最新日志”。
+### `cag session create`
 
-### `health --json`
+- `path`: `session create`
+- `purpose`: create a new task session
+- `feature_group`: `session-lifecycle`
+- `sunset_group`: `session-v2`
+- inputs:
+  - `--key <session_key>`
+  - `--workdir <abs-or-normalized-path>`
+- result:
+  - creates session metadata
+  - does not require a channel binding yet
 
-Output object:
+### `cag session delete`
 
-```json
-{
-  "ok": true,
-  "channel": "dingtalk",
-  "items": [
-    {"key":"env","ok":true,"detail":".env loaded"},
-    {"key":"acp","ok":true,"detail":"acp command ready: codex-acp"}
-  ]
-}
-```
+- `path`: `session delete`
+- `purpose`: delete a task session
+- `feature_group`: `session-lifecycle`
+- `sunset_group`: `session-v2`
+- inputs:
+  - `--key <session_key>`
+- result:
+  - removes the session
+  - removes or invalidates related bindings
+  - stops its runtime if attached
 
-Field rules:
+### `cag session list`
 
-- `ok` (`bool`, required): aggregate of all `items[].ok`
-- `channel` (`string`, optional)
-- `items` (`array`, required, non-empty on normal execution)
-- `items[].key` (`string`, required)
-- `items[].ok` (`bool`, required)
-- `items[].detail` (`string`, required)
+- `path`: `session list`
+- `purpose`: list sessions for GUI and CLI
+- `feature_group`: `session-read-model`
+- `sunset_group`: `session-v2`
+- result:
+  - summary rows for all sessions
+  - may mark one row as `latest` for UI default selection only
 
-Channel-specific checks:
+### `cag session show`
 
-- `imessage`: checks `imsg` in `PATH`
-- `dingtalk`:
-  - ingress is fixed to DingTalk Stream
-  - stream ingress always requires `DINGTALK_APP_KEY` and `DINGTALK_APP_SECRET`
-  - `webhook` send mode requires `DINGTALK_BOT_WEBHOOK`
-  - `api` send mode additionally requires `DINGTALK_AGENT_ID`
+- `path`: `session show`
+- `purpose`: inspect one session
+- `feature_group`: `session-read-model`
+- `sunset_group`: `session-v2`
+- inputs:
+  - `--key <session_key>`
+- result:
+  - workdir
+  - status
+  - runtime status
+  - recent activity
+  - current bindings
 
-### `send --json`
+### `cag session send`
 
-Output object:
+- `path`: `session send`
+- `purpose`: send one message to one explicit session
+- `feature_group`: `session-io`
+- `sunset_group`: `session-v2`
+- inputs:
+  - `--key <session_key>`
+  - exactly one of `--text` or `--file`
+- rules:
+  - must not default to `latest`
+  - must not infer session from channel metadata
 
-```json
-{
-  "ok": true,
-  "channel": "command",
-  "to": "tester",
-  "message_id": "manual-1772688340592",
-  "msg_type": "text",
-  "dry_run": false,
-  "source": "text",
-  "error": ""
-}
-```
+### `cag session messages`
 
-Field rules:
+- `path`: `session messages`
+- `purpose`: read message history for one session
+- `feature_group`: `session-read-model`
+- `sunset_group`: `session-v2`
+- inputs:
+  - `--key <session_key>`
 
-- `ok` (`bool`, required)
-- `channel` (`string`, required)
-- `to` (`string`, required)
-- `message_id` (`string`, required)
-- `msg_type` (`string`, required; `text` or `markdown`)
-- `dry_run` (`bool`, required)
-- `source` (`string`, required; `text` or `file`)
-- `error` (`string`, optional; present on failure)
-- `session_key` (`string`, optional; present when using `--session-key`)
-- `session_id` (`string`, optional; gateway does not guarantee ACP live-session reuse, typically omitted for `--session-key` sends)
-- `result` (`string`, optional; agent summary for session-path send)
-- `raw_output` (`string`, optional; agent raw output, 不做空格/格式重写)
-- `result_json` (`object|array|scalar`, optional; `raw_output` 可解析 JSON 时返回)
-- `terminal_reason` (`string`, optional; `completed|timeout|idle_after_chunk|error|cancelled|dry_run|...`)
-- `elapsed_sec` (`number`, optional; session-path execution elapsed)
+### `cag session clear`
 
-Semantics:
+- `path`: `session clear`
+- `purpose`: reset the live context of one session while keeping the session identity
+- `feature_group`: `session-runtime`
+- `sunset_group`: `session-v2`
+- inputs:
+  - `--key <session_key>`
 
-- `ok=false` pairs with process exit code `1`.
-- `message_id` is auto-generated when `--message-id` is absent.
+### `cag session attach`
 
-## Command-specific flags
+- `path`: `session attach`
+- `purpose`: attach or start a live runtime for one session
+- `feature_group`: `session-runtime`
+- `sunset_group`: `session-v2`
+- inputs:
+  - `--key <session_key>`
 
-### `config`
+### `cag session detach`
 
-- `config`: 写仓库级 `.env`（默认运行目录固定为 `~/.cag`）。
-- `config --global`: 写用户级 `~/.cag/.env`（默认写入 `GATEWAYD_ADDR=127.0.0.1:58473`）。
-- `config --global --gatewayd-addr <addr>`: 覆盖用户级 `GATEWAYD_ADDR`。
-- 默认运行态文件（lock/state/db/reports/interactions）位于 `~/.cag/runtime/repos/<repo-id>/`。
+- `path`: `session detach`
+- `purpose`: detach the live runtime from one session while keeping metadata and history
+- `feature_group`: `session-runtime`
+- `sunset_group`: `session-v2`
+- inputs:
+  - `--key <session_key>`
 
-### `start`
+## Channel Commands
 
-- `--json`: print `status` payload after start attempt.
-- `--log-file`: override log output file path for background runtime.
-  - Precedence: `--log-file` > `GATEWAY_LOG_FILE` > default `~/.cag/gatewayd/gatewayd.log`.
+### `cag channel list`
 
-### `stop`
+- `path`: `channel list`
+- `purpose`: list supported channel types and configured channel backends
+- `feature_group`: `channel-read-model`
+- `sunset_group`: `channel-v2`
 
-- `--json`: print `status` payload after stop attempt.
-- `--quiet`: suppress normal output (used internally by `restart`).
+### `cag channel inbox`
 
-### `restart`
+- `path`: `channel inbox`
+- `purpose`: list unassigned channel conversations
+- `feature_group`: `channel-routing`
+- `sunset_group`: `channel-v2`
+- rules:
+  - inbox items are visible but not executable until bound
 
-- Supports `--json` and `--log-file` (forwarded to `start`).
-- Must emit a single JSON payload when `--json` is set.
+### `cag channel show`
 
-### `send`
+- `path`: `channel show`
+- `purpose`: inspect one channel conversation
+- `feature_group`: `channel-read-model`
+- `sunset_group`: `channel-v2`
+- inputs:
+  - `--channel <name>`
+  - `--conversation-id <id>`
+  - optional `--thread-id <id>`
 
-Required:
+## Binding Commands
 
-- `--to` 或 `--session-key`（二选一，`--session-key` 用于 GUI/会话内执行）
-- exactly one source: `--text` or `--file`
+### `cag binding create`
 
-Optional:
+- `path`: `binding create`
+- `purpose`: bind one channel conversation to one session
+- `feature_group`: `binding-routing`
+- `sunset_group`: `binding-v2`
+- inputs:
+  - `--channel <name>`
+  - `--conversation-id <id>`
+  - optional `--thread-id <id>`
+  - `--session-key <session_key>`
 
-- `--msgtype` (`text` default, `markdown` supported)
-- `--channel`
-- `--message-id`
-- `--report-file`
-- `--dry-run` (validate + emit result, skip real send)
-- `--json`
+### `cag binding delete`
 
-Defaulting:
+- `path`: `binding delete`
+- `purpose`: remove an explicit conversation-to-session binding
+- `feature_group`: `binding-routing`
+- `sunset_group`: `binding-v2`
+- inputs:
+  - `--channel <name>`
+  - `--conversation-id <id>`
+  - optional `--thread-id <id>`
 
-- For `dingtalk`, omitting `--to` requires `DINGTALK_DEFAULT_TO_USER` to be configured.
-- `send --session-key` 的 `workdir` 优先级：
-  1) 显式 `--workdir`
-  2) 已保存的 `session metadata.workdir`（由 `session-new` 或历史执行写入）
-  3) 若仍为空：自动初始化并使用 `~/.cag/workspace/default`
-- `send --session-key` 只复用 gateway session 的 `session_key/workdir`，不复用 ACP live session。
-- 每次 `send --session-key` 都会创建一次新的 ACP session 执行。
-- 长期复用 agent 对话上下文不属于 gateway contract；应直接通过 agent 自身的 session CLI 管理。
+### `cag binding list`
 
-### `gatewayd`
+- `path`: `binding list`
+- `purpose`: list all bindings
+- `feature_group`: `binding-read-model`
+- `sunset_group`: `binding-v2`
+- filters:
+  - optional `--session-key`
+  - optional `--channel`
 
-- `--listen`: gRPC 监听地址（默认读取 `GATEWAYD_ADDR`；若未设置则使用 `127.0.0.1:58473`）。
-- 当前开放 RPC：
-  - `Status`
-  - `Start`
-  - `Stop`
-  - `Restart`
-  - `Health`
-  - `Doctor`
-  - `Sessions`
-  - `SessionNew`
-  - `SendToSession`
-  - `SessionMessages`
-  - `ClearSession`
-  - `DeleteSession`
-  - `DeleteAllSessions`
+### `cag binding show`
 
-### 会话一致性约束
+- `path`: `binding show`
+- `purpose`: inspect one binding
+- `feature_group`: `binding-read-model`
+- `sunset_group`: `binding-v2`
+- inputs:
+  - `--channel <name>`
+  - `--conversation-id <id>`
+  - optional `--thread-id <id>`
 
-- GUI 依赖的会话读写命令（`sessions/messages/send --session-key/session-*`）必须在 `gatewayd` 运行时执行。
-- 若 `gatewayd` 不可达，CLI 返回非 0，并在 JSON 中输出 `error.code=gateway_unreachable`。
-- 当前属于开发阶段：控制面与配置行为允许按设计直接收敛，不要求保留旧 fallback 或 backward-compatibility 语义。
+## Runtime Commands
 
-### `messages --json`
+### `cag runtime status`
 
-Output object:
+- `path`: `runtime status`
+- `purpose`: inspect global runtime health
+- `feature_group`: `runtime-ops`
+- `sunset_group`: `runtime-v2`
 
-```json
-{
-  "ok": true,
-  "action": "messages",
-  "session_key": "sess_xxx",
-  "messages": [],
-  "timeline": []
-}
-```
+### `cag runtime ps`
 
-Field rules:
+- `path`: `runtime ps`
+- `purpose`: list currently attached session runtimes
+- `feature_group`: `runtime-ops`
+- `sunset_group`: `runtime-v2`
 
-- `ok` (`bool`, required)
-- `action` (`string`, required, fixed `messages`)
-- `session_key` (`string`, required)
-- `messages` (`array`, required)
-- `timeline` (`array`, required)
+### `cag runtime logs`
 
-### `sessions --json`
+- `path`: `runtime logs`
+- `purpose`: inspect runtime logs globally or for one session
+- `feature_group`: `runtime-ops`
+- `sunset_group`: `runtime-v2`
+- inputs:
+  - optional `--key <session_key>`
+  - optional `--follow`
 
-`items[]` 在原字段基础上新增：
+## Routing Contract
 
-- `workdir` (`string`, optional)
-- `updated_at` (`string`, optional, RFC3339 UTC)
-- `status` (`string`, optional)
+- `session send` must always target an explicit `--key`.
+- `channel inbox` items are not auto-routed.
+- binding is the only write-routing rule for channel ingress.
+- `latest` is read-model only.
 
-### `session-new --json`
+## Legacy Surface
 
-Output object:
+Legacy flat commands include:
 
-```json
-{
-  "ok": true,
-  "action": "session-new",
-  "session_key": "sess_xxx",
-  "workdir": "/abs/path",
-  "updated_at": "2026-03-06T03:26:39Z",
-  "status": "ready"
-}
-```
+- `sessions`
+- `messages`
+- `session-new`
+- `session-clear`
+- `session-delete`
+- `sessions-delete-all`
+- `send --session-key`
 
-Semantics:
+Rules:
 
-- 幂等：同一 `session_key` 重复执行不会创建重复记录。
-- `--workdir` 必填；缺失时返回 `error.code=workdir_required`。
-- `session-new` 只更新 gateway session 元数据，不会创建或保留 ACP live session。
-
-### `session-clear` / `session-delete` / `sessions-delete-all --json`
-
-Output object:
-
-```json
-{
-  "ok": true,
-  "action": "session-clear",
-  "session_key": "sess_xxx"
-}
-```
-
-Field rules:
-
-- `ok` (`bool`, required)
-- `action` (`string`, required)
-- `session_key` (`string`, optional for `sessions-delete-all`)
-
-## Compatibility policy
-
-- Do not rename or remove existing JSON fields in v1.
-- New fields must be optional.
-- Existing exit code meanings are frozen.
-- `actions` output remains line-based action names (no JSON requirement in v1).
-
-## Validation
-
-Current CI/local contract checks are implemented in:
-
-- `src/cmd/gateway-cli/contract_integration_test.go`
-
-This test is the executable contract for v1.
+- keep them stable only as needed during migration
+- do not add new product semantics there
+- all new product behavior must land in grouped commands

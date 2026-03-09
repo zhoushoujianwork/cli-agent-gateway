@@ -94,23 +94,25 @@ func (l *Loop) RunForever() error {
 				"user_profile": buildUserProfile(m),
 			})
 
-			cmd := strings.TrimSpace(m.Text)
-			baseSessionKey := l.sessionKeyFor(m)
-			sessionKey := baseSessionKey
-			if deletedAt := strings.TrimSpace(st.SessionDeleted[baseSessionKey]); deletedAt != "" {
-				sessionKey = deriveReopenedSessionKey(baseSessionKey, deletedAt)
-			}
-			if cmd == "/clear" || cmd == "/new" {
-				delete(st.SessionMap, sessionKey)
+			sessionKey, convKey := l.boundSessionForInbound(st, m)
+			if strings.TrimSpace(sessionKey) == "" {
+				st = l.recordUnassignedConversation(st, m, convKey)
+				l.saveState(st)
 				processed[m.ID] = struct{}{}
 				st.ProcessedIDs = append(st.ProcessedIDs, m.ID)
-				l.saveState(st)
-				fmt.Fprintf(os.Stderr, "[INFO] session reset msg_id=%s session_key=%s sender=%s\n", m.ID, sessionKey, m.Sender)
-				if err := l.Channel.Send("会话已重置。", m.Sender, m.ID, ""); err != nil {
-					fmt.Fprintf(os.Stderr, "[WARN] send clear reply failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
+				if err := l.Channel.Send("当前对话尚未绑定到本地 session，请先在 GUI/CLI 完成绑定。", m.Sender, "unbound-"+m.ID, ""); err != nil {
+					fmt.Fprintf(os.Stderr, "[WARN] send unbound notice failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
 				} else {
-					fmt.Fprintf(os.Stderr, "[INFO] send clear reply ok msg_id=%s to=%s\n", m.ID, m.Sender)
+					fmt.Fprintf(os.Stderr, "[INFO] send unbound notice ok msg_id=%s conversation=%s\n", m.ID, convKey)
 				}
+				l.appendInteraction(map[string]any{
+					"kind":             "channel_unassigned",
+					"msg_id":           m.ID,
+					"conversation_key": convKey,
+					"text":             m.Text,
+					"sender":           m.Sender,
+					"ts":               time.Now().UTC().Format(time.RFC3339),
+				})
 				continue
 			}
 
@@ -139,27 +141,6 @@ func (l *Loop) RunForever() error {
 			if l.ReplyStyleEnabled && strings.TrimSpace(l.ReplyStylePrompt) != "" {
 				userText = l.ReplyStylePrompt + "\n\n用户请求：\n" + userText
 			}
-			var workdirErr error
-			var resolvedWorkdir string
-			st, resolvedWorkdir, workdirErr = l.ensureSessionWorkdir(st, sessionKey)
-			if workdirErr != nil {
-				errText := fmt.Sprintf("执行失败: workdir 初始化失败: %v", workdirErr)
-				if err := l.Channel.Send(errText, m.Sender, m.ID, ""); err != nil {
-					fmt.Fprintf(os.Stderr, "[WARN] send workdir error reply failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
-				}
-				l.appendInteraction(map[string]any{
-					"msg_id":       m.ID,
-					"error":        errText,
-					"ts":           time.Now().UTC().Format(time.RFC3339),
-					"user_profile": buildUserProfile(m),
-				})
-				fmt.Fprintf(os.Stderr, "[WARN] execute skipped msg_id=%s reason=workdir_init_failed err=%v\n", m.ID, workdirErr)
-				processed[m.ID] = struct{}{}
-				st.ProcessedIDs = append(st.ProcessedIDs, m.ID)
-				l.saveState(st)
-				continue
-			}
-
 			req := TaskRequest{
 				TraceID:    traceID(m.ID),
 				SessionKey: sessionKey,
@@ -168,19 +149,19 @@ func (l *Loop) RunForever() error {
 				Channel:    nonEmpty(m.Channel, "command"),
 				ThreadID:   m.ThreadID,
 				Metadata: mergeMetadata(m.Metadata, map[string]any{
-					"received_ts": m.TS,
-					"message_id":  m.ID,
-					"workdir":     resolvedWorkdir,
+					"received_ts":      m.TS,
+					"message_id":       m.ID,
+					"conversation_key": convKey,
 				}),
 			}
-			fmt.Fprintf(os.Stderr, "[INFO] session resolved msg_id=%s session_key=%s workdir=%s\n", m.ID, sessionKey, resolvedWorkdir)
+			fmt.Fprintf(os.Stderr, "[INFO] session resolved msg_id=%s session_key=%s conversation=%s\n", m.ID, sessionKey, convKey)
 			l.appendInteraction(map[string]any{
-				"kind":        "trace",
-				"stage":       "session_resolved",
-				"msg_id":      m.ID,
-				"session_key": sessionKey,
-				"workdir":     resolvedWorkdir,
-				"ts":          now,
+				"kind":             "trace",
+				"stage":            "session_resolved",
+				"msg_id":           m.ID,
+				"session_key":      sessionKey,
+				"conversation_key": convKey,
+				"ts":               now,
 			})
 			fmt.Fprintf(os.Stderr, "[INFO] execute start msg_id=%s session_key=%s sender=%s\n", m.ID, sessionKey, m.Sender)
 			l.appendInteraction(map[string]any{
@@ -271,12 +252,6 @@ func (l *Loop) RunForever() error {
 			fmt.Fprintf(os.Stderr, "[INFO] execute done msg_id=%s status=%s elapsed=%ds\n", m.ID, result.Status, result.ElapsedSec)
 			l.logACPEvents(m.ID, result.RawEvents)
 
-			delete(st.SessionMap, sessionKey)
-			meta := st.SessionMeta[sessionKey]
-			meta.Workdir = resolvedWorkdir
-			meta.Status = "ready"
-			meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			st.SessionMeta[sessionKey] = meta
 			reportPath := l.writeReport(m, req, result)
 			fmt.Fprintf(os.Stderr, "[INFO] report written msg_id=%s path=%s\n", m.ID, nonEmpty(reportPath, "-"))
 			finalText := formatFinal(result)
@@ -351,6 +326,57 @@ func (l *Loop) accessDecision(st storage.StateData, m InboundMessage) (bool, str
 		return true, "allowed"
 	}
 	return false, "pending"
+}
+
+func (l *Loop) boundSessionForInbound(st storage.StateData, m InboundMessage) (string, string) {
+	channel := strings.ToLower(strings.TrimSpace(nonEmpty(m.Channel, "command")))
+	conversationID := strings.TrimSpace(anyString(m.Metadata["conversation_id"]))
+	if conversationID == "" {
+		conversationID = strings.TrimSpace(m.Sender)
+	}
+	threadID := strings.TrimSpace(anyString(m.Metadata["thread_id"]))
+	if threadID == "" {
+		threadID = parseThreadID(conversationID, strings.TrimSpace(m.ThreadID))
+	}
+	key := canonicalConversationKey(channel, conversationID, threadID)
+	if key == "" {
+		return "", ""
+	}
+	binding, ok := st.Bindings[key]
+	if !ok {
+		return "", key
+	}
+	return strings.TrimSpace(binding.SessionKey), key
+}
+
+func (l *Loop) recordUnassignedConversation(st storage.StateData, m InboundMessage, conversationKey string) storage.StateData {
+	if st.Unassigned == nil {
+		st.Unassigned = map[string]storage.ConversationRecord{}
+	}
+	channel := strings.ToLower(strings.TrimSpace(nonEmpty(m.Channel, "command")))
+	conversationID := strings.TrimSpace(anyString(m.Metadata["conversation_id"]))
+	if conversationID == "" {
+		conversationID = strings.TrimSpace(m.Sender)
+	}
+	threadID := strings.TrimSpace(anyString(m.Metadata["thread_id"]))
+	if threadID == "" {
+		threadID = parseThreadID(conversationID, strings.TrimSpace(m.ThreadID))
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	st.Unassigned[conversationKey] = storage.ConversationRecord{
+		ConversationKey:   conversationKey,
+		Channel:           channel,
+		ConversationID:    conversationID,
+		ThreadID:          threadID,
+		ConversationTitle: strings.TrimSpace(anyString(m.Metadata["conversation_title"])),
+		LastMessageID:     strings.TrimSpace(m.ID),
+		LastText:          strings.TrimSpace(m.Text),
+		LastSender:        strings.TrimSpace(m.Sender),
+		LastSeenAt:        nonEmpty(strings.TrimSpace(m.TS), now),
+		UpdatedAt:         now,
+		Metadata:          buildUserProfile(m),
+	}
+	return st
 }
 
 func (l *Loop) sessionKeyFor(m InboundMessage) string {
@@ -474,6 +500,31 @@ func buildUserProfile(m InboundMessage) map[string]any {
 func anyString(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func canonicalConversationKey(channel, conversationID, threadID string) string {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	conversationID = strings.TrimSpace(conversationID)
+	threadID = strings.TrimSpace(threadID)
+	if channel == "" || conversationID == "" {
+		return ""
+	}
+	if threadID == "" {
+		return channel + "/" + conversationID
+	}
+	return channel + "/" + conversationID + "/" + threadID
+}
+
+func parseThreadID(conversationID, threadID string) string {
+	conversationID = strings.TrimSpace(conversationID)
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" || threadID == conversationID {
+		return ""
+	}
+	if strings.HasPrefix(threadID, conversationID+":") {
+		return strings.TrimPrefix(threadID, conversationID+":")
+	}
+	return threadID
 }
 
 func userAccessKey(channel, userID string) string {

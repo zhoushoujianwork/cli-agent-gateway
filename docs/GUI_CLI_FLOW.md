@@ -1,69 +1,153 @@
-# GUI <-> CLI Flow (vNext)
+# GUI <-> CLI Flow (Session-First vNext)
 
-## 目标
+This document defines the target GUI behavior for the new session-first design.
 
-macOS GUI 不直接读写网关内部文件，只通过 `gateway` CLI 获取数据与执行动作。
+## GUI Role
 
-> 注：GUI 相关命令仅经 `gatewayd` gRPC；CLI 不走本地业务回退。若控制面不可用，则直接返回错误。
+The GUI is a session manager and operator console.
 
-## 读模型（Read）
+It should help the user:
 
-GUI 周期轮询：
+- create and delete sessions
+- select the active session
+- set session workdir
+- inspect session history
+- inspect runtime state
+- inspect channel inbox
+- create or remove bindings
 
-1. `gateway status --json`
-2. `gateway sessions --json`
-3. `gateway messages --session-key <key> --json`（选中会话时）
-4. `gateway view tasks --json`（可选）
+The GUI does not own routing logic or runtime truth.
 
-日志展示规则：
+## Read Model
 
-- GUI 当前日志路径必须来自 `status --json` 返回的 `log_file`。
-- GUI 不应硬编码 repo 内日志路径或自行推导 `gatewayd.log` 路径作为业务真源。
-- GUI “Open Current Log” 仅打开该 `log_file` 指向的文件或其父目录，不自行推导替代路径。
+Primary reads:
 
-GUI 生命周期：
+1. `cag runtime status --json`
+2. `cag session list --json`
+3. `cag session show --key <session_key> --json`
+4. `cag session messages --key <session_key> --json`
+5. `cag binding list --json`
+6. `cag channel inbox --json`
 
-1. 启动时执行 `gatewayd-up --json`
-2. 退出时执行 `gatewayd-down --json`
+Rules:
 
-## 动作模型（Write）
+- GUI uses machine-readable CLI output only.
+- GUI does not read state files directly as product behavior.
+- GUI may use `latest` only to choose an initial selected session.
 
-GUI 用户操作映射：
+## Write Model
 
-- 创建会话：
-  - `gateway session-new --session-key <generated_key> --workdir <path> --json`
-- 更新已选会话 workdir：
-  - `gateway session-new --session-key <existing_key> --workdir <path> --json`
-- 点击 Send：
-  - `gateway send --session-key <key> --text "<text>" --json`
-- 输入 `/clear`：
-  - `gateway session-clear --session-key <key> --json`
-- 输入 `/new`：
-  - `gateway session-clear --session-key <key> --json`
-- 输入 `/new hello`：
-  - `gateway session-clear --session-key <key> --json`
-  - `gateway send --session-key <key> --text "hello" --json`
-- 删除会话：
-  - `gateway session-delete --session-key <key> --json`
+### Session Operations
 
-明确约束：
+- create session
+  - `cag session create --key <generated_key> --workdir <path> --json`
+- delete session
+  - `cag session delete --key <session_key> --json`
+- clear session context
+  - `cag session clear --key <session_key> --json`
+- attach runtime
+  - `cag session attach --key <session_key> --json`
+- detach runtime
+  - `cag session detach --key <session_key> --json`
+- send message
+  - `cag session send --key <session_key> --text "<text>" --json`
 
-- GUI session 是 gateway 自己的会话条目，不是 ACP agent 的长期会话句柄。
-- `session-new` 只管理 gateway session 元数据，不创建 ACP live session。
-- `send --session-key` 每次都是新的 ACP 执行；GUI 不应把 `session_id` 理解为可长期复用的 agent 对话上下文。
-- 若用户需要长期复用 agent 对话，应离开 GUI/gateway 流程，改走 agent 自身的 session CLI。
+### Binding Operations
 
-## 消息状态映射
+- list bindings
+  - `cag binding list --json`
+- bind a channel conversation
+  - `cag binding create --channel <name> --conversation-id <id> --session-key <session_key> --json`
+- unbind a channel conversation
+  - `cag binding delete --channel <name> --conversation-id <id> --json`
 
-- GUI 发送前：本地显示 `sending`
-- 消息写入系统（`messages` 可见 `status=sent`）：更新为 `sent`
-- 服务端处理中（`messages` 可见 `status=processing`）：更新为 `processing`
-- CLI 闭环完成且 `ok=true`：保留 `sent`，并刷新会话/消息
-- CLI 返回 `ok=false` 或非 0 退出码：更新为 `failed`
-- `failed` 时展示 `error.code` 与 `error.message`
+### Channel Inbox Operations
 
-## 约束
+- list unassigned conversations
+  - `cag channel inbox --json`
+- inspect one conversation
+  - `cag channel show --channel <name> --conversation-id <id> --json`
 
-- GUI 所有调用都必须加 `--json`
-- `stdout` 只解析一个 JSON 对象
-- 不解析 `stderr` 作为业务结果
+## GUI Panels
+
+### Sessions Panel
+
+Shows:
+
+- session key
+- title or last message summary
+- workdir
+- runtime status
+- latest activity time
+
+Actions:
+
+- create
+- delete
+- clear
+- attach
+- detach
+- select
+
+### Chat Panel
+
+Shows:
+
+- message history for the selected session
+- send box targeting the selected session only
+- runtime status for the selected session
+
+Rules:
+
+- if no session is selected, send must be disabled
+- send must never auto-route to `latest`
+
+### Channel Inbox Panel
+
+Shows:
+
+- channel conversations that currently have no binding
+- last message preview
+- channel metadata
+
+Actions:
+
+- bind to existing session
+- create session and bind
+- ignore or archive later if needed
+
+### Bindings Panel
+
+Shows:
+
+- all current conversation-to-session bindings
+- filters by channel or session
+
+Actions:
+
+- remove binding
+- jump to session
+- jump to conversation detail
+
+## Routing UX Rules
+
+- GUI-selected session is explicit write target.
+- `latest` is only a convenience for initial selection after refresh.
+- Unassigned channel conversations are visible but must not execute.
+- The GUI should clearly show whether a conversation is:
+  - bound
+  - unassigned
+  - attached to a live runtime
+
+## Command Design Constraints For GUI
+
+- Use grouped commands only.
+- Do not build new GUI behavior on top of legacy flat commands.
+- Do not interpret stderr as business result.
+- Parse one JSON object per command invocation.
+
+## Non-Goals
+
+- no heuristic auto-merge by sender/thread
+- no default write to latest session
+- no hidden recovery path that creates or reroutes a session silently

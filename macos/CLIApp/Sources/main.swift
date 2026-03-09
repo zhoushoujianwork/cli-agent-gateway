@@ -697,7 +697,7 @@ final class GatewayController: ObservableObject {
 
     private func upsertSessionWorkdir(sessionKey: String, workdir: String, completion: @escaping (Bool, String) -> Void) {
         let targetSessionKey = baseSessionKey(sessionKey)
-        cagJSONAsync("session-new", args: ["--session-key", targetSessionKey, "--workdir", workdir]) { [weak self] result in
+        cagJSONAsync("session", args: ["create", "--key", targetSessionKey, "--workdir", workdir]) { [weak self] result in
             guard let self else { return }
             let ok = (result.json?["ok"] as? Bool) ?? false
             if ok {
@@ -1316,7 +1316,7 @@ final class GatewayController: ObservableObject {
         let overlay = localOverlayMessagesBySession[sessionKey, default: []]
         runInBackground { [weak self] in
             guard let self else { return }
-            let res = self.cagJSON("messages", args: ["--session-key", baseSessionKey], timeoutSec: 8)
+            let res = self.cagJSON("session", args: ["messages", "--key", baseSessionKey], timeoutSec: 8)
             var persisted: [ChatMessage] = []
             var timeline: [String: [ProcessEvent]] = [:]
             if let node = res.json,
@@ -1467,7 +1467,7 @@ final class GatewayController: ObservableObject {
 
     func refreshSessions() {
         let t0 = Date()
-        let sessionsResult = cagJSON("sessions", args: ["--limit", "200"])
+        let sessionsResult = cagJSON("session", args: ["list"])
         if let node = sessionsResult.json,
            let ok = node["ok"] as? Bool, ok,
            let items = node["items"] as? [[String: Any]] {
@@ -1475,19 +1475,17 @@ final class GatewayController: ObservableObject {
             for item in items {
                 let sessionKey = (item["session_key"] as? String) ?? ""
                 if sessionKey.isEmpty { continue }
-                let senderName = ((item["sender_name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                let senderID = ((item["sender"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 built.append(
                     SessionEntry(
                         sessionKey: sessionKey,
-                        channel: (item["channel"] as? String) ?? "-",
-                        senderId: senderID.isEmpty ? "-" : senderID,
-                        sender: senderName.isEmpty ? (senderID.isEmpty ? "-" : senderID) : senderName,
-                        threadId: (item["thread_id"] as? String) ?? "-",
-                        lastText: (item["last_message"] as? String) ?? "",
-                        lastTime: (item["last_time"] as? String) ?? "",
+                        channel: "session",
+                        senderId: "-",
+                        sender: ((item["status"] as? String) ?? "session").trimmingCharacters(in: .whitespacesAndNewlines),
+                        threadId: "-",
+                        lastText: "",
+                        lastTime: (item["updated_at"] as? String) ?? "",
                         workdir: (item["workdir"] as? String) ?? "",
-                        latest: (item["latest"] as? Bool) ?? false
+                        latest: built.isEmpty
                     )
                 )
             }
@@ -1498,7 +1496,7 @@ final class GatewayController: ObservableObject {
                     self.selectedSessionKey = nil
                 }
                 if self.selectedSessionKey == nil {
-                    self.selectedSessionKey = self.sessions.first(where: { $0.latest })?.sessionKey ?? self.sessions.first?.sessionKey
+                    self.selectedSessionKey = self.sessions.first?.sessionKey
                 }
                 self.refreshSelectedSessionWorkdir()
                 self.refreshSelectedSessionChat()
@@ -1748,11 +1746,8 @@ final class GatewayController: ObservableObject {
         userMsgId: String,
         timeout: TimeInterval
     ) {
-        var sendArgs = ["--session-key", baseSessionKey, "--message-id", userMsgId, "--text", text]
-        if !sessionWorkdir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            sendArgs.append(contentsOf: ["--workdir", sessionWorkdir])
-        }
-        cagJSONAsync("send", args: sendArgs, timeoutSec: timeout) { [weak self] result in
+        let sendArgs = ["send", "--key", baseSessionKey, "--message-id", userMsgId, "--text", text]
+        cagJSONAsync("session", args: sendArgs, timeoutSec: timeout) { [weak self] result in
             guard let self else { return }
             self.localSending = false
             guard let node = result.json else {
@@ -1795,7 +1790,7 @@ final class GatewayController: ObservableObject {
     }
 
     private func clearSessionMappingAsync(baseSessionKey: String, completion: @escaping (Bool) -> Void) {
-        cagJSONAsync("session-clear", args: ["--session-key", baseSessionKey]) { result in
+        cagJSONAsync("session", args: ["clear", "--key", baseSessionKey]) { result in
             let ok = (result.json?["ok"] as? Bool) ?? false
             completion(ok)
         }
@@ -1913,8 +1908,16 @@ final class GatewayController: ObservableObject {
     }
 
     func deleteAllSessions() {
-        let res = cagJSON("sessions-delete-all")
-        if ((res.json?["ok"] as? Bool) ?? false) {
+        let uniqueKeys = Array(Set(sessions.map { baseSessionKey($0.sessionKey) })).sorted()
+        var allOK = true
+        for key in uniqueKeys {
+            let res = cagJSON("session", args: ["delete", "--key", key])
+            if ((res.json?["ok"] as? Bool) ?? false) == false {
+                allOK = false
+                break
+            }
+        }
+        if allOK {
             sessionWorkdirByKey.removeAll()
             saveSessionWorkdirByKey()
             selectedSessionKey = nil
@@ -1928,7 +1931,7 @@ final class GatewayController: ObservableObject {
 
     func deleteSession(key: String) {
         let targetKey = baseSessionKey(key)
-        let res = cagJSON("session-delete", args: ["--session-key", targetKey])
+        let res = cagJSON("session", args: ["delete", "--key", targetKey])
         if ((res.json?["ok"] as? Bool) ?? false) {
             if selectedSessionKey == key {
                 selectedSessionKey = nil

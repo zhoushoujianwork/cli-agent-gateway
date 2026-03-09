@@ -43,12 +43,15 @@ func (a *Adapter) Execute(req core.TaskRequest) (core.TaskResult, error) {
 		return core.TaskResult{}, wrapACPError("initialize", err)
 	}
 
-	start := time.Now()
 	sessionID, err := a.createSession(req)
 	if err != nil {
 		return core.TaskResult{}, wrapACPError("session/new", err)
 	}
+	return a.runPrompt(req, sessionID)
+}
 
+func (a *Adapter) runPrompt(req core.TaskRequest, sessionID string) (core.TaskResult, error) {
+	start := time.Now()
 	deadline := time.Now().Add(time.Duration(a.timeoutSec) * time.Second)
 	summary := ""
 	status := "timeout"

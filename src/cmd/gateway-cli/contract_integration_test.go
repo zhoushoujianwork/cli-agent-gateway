@@ -589,244 +589,120 @@ func TestCLISessionDeleteAndRecreateClosedLoop(t *testing.T) {
 	bin := buildGatewayBinary(t)
 	repo := createTempRepo(t)
 	setStorageBackend(t, repo, "localfile")
-	msgID := "msg-delete-1"
-	sender := "u-test"
-	channel := "command"
-	threadID := "-"
-	key := buildSessionKey(channel, sender, threadID)
-	ts := "2026-03-06T03:00:00Z"
-	interactionPath := sharedRuntimeInteractionPath()
-	lines := []map[string]any{
-		{
-			"kind":   "inbound_received",
-			"msg_id": msgID,
-			"sender": sender,
-			"text":   "hello",
-			"time":   ts,
-			"user_profile": map[string]any{
-				"channel":     channel,
-				"sender":      sender,
-				"sender_name": "UTest",
-				"thread_id":   threadID,
-			},
-		},
-		{
-			"kind":        "trace",
-			"stage":       "session_resolved",
-			"msg_id":      msgID,
-			"session_key": key,
-			"session_id":  "sid-delete-1",
-			"ts":          ts,
-		},
-	}
-	writeJSONL(t, interactionPath, lines)
+	key := "sess-delete-recreate"
 
-	res := runBin(t, bin, repo, "sessions", "--json")
+	res := runBin(t, bin, repo, "session", "create", "--key", key, "--workdir", repo, "--json")
 	if res.Code != 0 {
-		t.Fatalf("sessions before delete failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("session create failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
-	before := parseSessionsJSON(t, res.Stdout)
-	if !containsSessionKey(before.Items, key) {
-		t.Fatalf("expected key present before delete: key=%s items=%+v", key, before.Items)
-	}
-	if workdirForKey(before.Items, key) != "" {
-		t.Fatalf("expected empty workdir before first send, key=%s items=%+v", key, before.Items)
+	created := parseSessionMutationJSON(t, res.Stdout)
+	if !created.OK || created.Action != "session.create" || created.SessionKey != key {
+		t.Fatalf("unexpected session.create payload: %+v", created)
 	}
 
-	res = runBin(t, bin, repo, "send", "--session-key", key, "--text", "ping-with-default-workdir", "--dry-run", "--json")
+	res = runBin(t, bin, repo, "session", "list", "--json")
 	if res.Code != 0 {
-		t.Fatalf("send dry-run with default workdir failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("session list before delete failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
-	sendWithDefault := parseSendJSON(t, res.Stdout)
-	if !sendWithDefault.OK {
-		t.Fatalf("expected send ok with default workdir fallback, got: %+v", sendWithDefault)
+	beforeDelete := parseSessionsJSON(t, res.Stdout)
+	if !containsSessionKey(beforeDelete.Items, key) {
+		t.Fatalf("expected key present before delete: key=%s items=%+v", key, beforeDelete.Items)
 	}
-	defaultWorkdir := filepath.Join(sharedTestHome, ".cag", "workspace", "default")
-	if err := waitForPath(defaultWorkdir, 2*time.Second); err != nil {
-		t.Fatalf("expected default workdir created at %s: %v", defaultWorkdir, err)
-	}
-	res = runBin(t, bin, repo, "sessions", "--json")
-	if res.Code != 0 {
-		t.Fatalf("sessions after default send failed: code=%d stderr=%s", res.Code, res.Stderr)
-	}
-	afterDefaultSend := parseSessionsJSON(t, res.Stdout)
-	gotDefaultWorkdir := workdirForKey(afterDefaultSend.Items, key)
-	if filepath.Clean(gotDefaultWorkdir) != filepath.Clean(defaultWorkdir) {
-		t.Fatalf("expected default workdir=%s got=%s", defaultWorkdir, gotDefaultWorkdir)
+	if filepath.Clean(workdirForKey(beforeDelete.Items, key)) != filepath.Clean(repo) {
+		t.Fatalf("expected workdir=%s got items=%+v", repo, beforeDelete.Items)
 	}
 
-	res = runBin(t, bin, repo, "session-delete", "--session-key", key, "--json")
+	res = runBin(t, bin, repo, "session", "delete", "--key", key, "--json")
 	if res.Code != 0 {
-		t.Fatalf("session-delete failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("session delete failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
-	del := parseSessionMutationJSON(t, res.Stdout)
-	if !del.OK || del.Action != "session-delete" || del.SessionKey != key {
-		t.Fatalf("unexpected session-delete payload: %+v", del)
+	deleted := parseSessionMutationJSON(t, res.Stdout)
+	if !deleted.OK || deleted.Action != "session.delete" || deleted.SessionKey != key {
+		t.Fatalf("unexpected session.delete payload: %+v", deleted)
 	}
 
-	res = runBin(t, bin, repo, "sessions", "--json")
+	res = runBin(t, bin, repo, "session", "list", "--json")
 	if res.Code != 0 {
-		t.Fatalf("sessions after delete failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("session list after delete failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
 	afterDelete := parseSessionsJSON(t, res.Stdout)
 	if containsSessionKey(afterDelete.Items, key) {
 		t.Fatalf("expected key hidden after delete: key=%s items=%+v", key, afterDelete.Items)
 	}
 
-	res = runBin(t, bin, repo, "session-new", "--session-key", key, "--workdir", repo, "--json")
+	res = runBin(t, bin, repo, "session", "create", "--key", key, "--workdir", repo, "--json")
 	if res.Code != 0 {
-		t.Fatalf("session-new failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("session recreate failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
-	created := parseSessionMutationJSON(t, res.Stdout)
-	if !created.OK || created.Action != "session-new" || created.SessionKey != key {
-		t.Fatalf("unexpected session-new payload: %+v", created)
+	recreated := parseSessionMutationJSON(t, res.Stdout)
+	if !recreated.OK || recreated.Action != "session.create" || recreated.SessionKey != key {
+		t.Fatalf("unexpected session recreate payload: %+v", recreated)
 	}
-	if strings.TrimSpace(created.SessionID) != "" {
-		t.Fatalf("expected session-new to omit ACP session id, got=%+v", created)
-	}
-	if filepath.Clean(created.Workdir) != filepath.Clean(repo) {
-		t.Fatalf("expected session-new workdir=%s got=%s", repo, created.Workdir)
-	}
-	res = runBin(t, bin, repo, "messages", "--session-key", key, "--json")
+
+	res = runBin(t, bin, repo, "session", "messages", "--key", key, "--json")
 	if res.Code != 0 {
-		t.Fatalf("messages after recreate failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("session messages after recreate failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
 	msgAfterRecreate := parseMessagesJSON(t, res.Stdout)
 	if len(msgAfterRecreate.Messages) != 0 {
 		t.Fatalf("expected no old messages after session recreate, got=%+v", msgAfterRecreate.Messages)
 	}
 
-	res = runBin(t, bin, repo, "send", "--session-key", key, "--text", "ping", "--dry-run", "--json")
+	res = runBin(t, bin, repo, "session", "list", "--json")
 	if res.Code != 0 {
-		t.Fatalf("send dry-run failed: code=%d stderr=%s", res.Code, res.Stderr)
-	}
-	send := parseSendJSON(t, res.Stdout)
-	if !send.OK {
-		t.Fatalf("expected send ok after session-new, got: %+v", send)
-	}
-	if send.TerminalReason != "dry_run" {
-		t.Fatalf("expected terminal_reason=dry_run, got: %+v", send)
-	}
-
-	res = runBin(t, bin, repo, "sessions", "--json")
-	if res.Code != 0 {
-		t.Fatalf("sessions after recreate failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("session list after recreate failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
 	afterCreate := parseSessionsJSON(t, res.Stdout)
 	if !containsSessionKey(afterCreate.Items, key) {
-		t.Fatalf("expected key present after session-new: key=%s items=%+v", key, afterCreate.Items)
-	}
-	for _, item := range afterCreate.Items {
-		if strings.TrimSpace(item.SessionKey) == key && strings.TrimSpace(item.SessionID) != "" {
-			t.Fatalf("expected sessions item to omit ACP session id, got=%+v", item)
-		}
+		t.Fatalf("expected key present after recreate: key=%s items=%+v", key, afterCreate.Items)
 	}
 }
 
-func TestCLISessionDeleteThenInboundCreatesNewSessionSegment(t *testing.T) {
+func TestCLIBindingLifecycle(t *testing.T) {
 	resetSharedTestGatewayd(t)
 
 	bin := buildGatewayBinary(t)
 	repo := createTempRepo(t)
 	setStorageBackend(t, repo, "localfile")
-	msgID := "msg-segment-1"
-	sender := "u-test-segment"
-	channel := "dingtalk"
-	threadID := "-"
-	key := buildSessionKey(channel, sender, threadID)
-	ts := "2026-03-06T03:00:00Z"
-
-	res := runBin(t, bin, repo, "user-allow", "--channel", channel, "--user-id", sender, "--json")
+	key := "sess-bound"
+	res := runBin(t, bin, repo, "session", "create", "--key", key, "--workdir", repo, "--json")
 	if res.Code != 0 {
-		t.Fatalf("user-allow failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("session create failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
-
-	interactionPath := sharedRuntimeInteractionPath()
-	lines := []map[string]any{
-		{
-			"kind":   "inbound_received",
-			"msg_id": msgID,
-			"sender": sender,
-			"text":   "hello-1",
-			"time":   ts,
-			"user_profile": map[string]any{
-				"channel":     channel,
-				"sender":      sender,
-				"sender_name": "UTest",
-				"thread_id":   threadID,
-			},
-		},
-		{
-			"kind":        "trace",
-			"stage":       "session_resolved",
-			"msg_id":      msgID,
-			"session_key": key,
-			"session_id":  "sid-segment-1",
-			"ts":          ts,
-		},
-	}
-	writeJSONL(t, interactionPath, lines)
-
-	res = runBin(t, bin, repo, "session-delete", "--session-key", key, "--json")
+	res = runBin(t, bin, repo, "binding", "create", "--channel", "dingtalk", "--conversation-id", "conv-1", "--thread-id", "thread-1", "--session-key", key, "--json")
 	if res.Code != 0 {
-		t.Fatalf("session-delete failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("binding create failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
-	res = runBin(t, bin, repo, "users", "--json")
+	res = runBin(t, bin, repo, "binding", "list", "--session-key", key, "--json")
 	if res.Code != 0 {
-		t.Fatalf("users after delete failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("binding list failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
-	usersAfterDelete := parseUsersJSON(t, res.Stdout)
-	if !containsUserWithStatus(usersAfterDelete.Items, channel, sender, "allowed") {
-		t.Fatalf("expected user access unchanged after session-delete, users=%+v", usersAfterDelete.Items)
+	listed := parseSessionsJSON(t, res.Stdout)
+	if len(listed.Items) != 1 {
+		t.Fatalf("expected one binding item, got=%+v", listed.Items)
 	}
-	newInboundTS := time.Now().UTC().Add(2 * time.Second).Format(time.RFC3339Nano)
-
-	appendJSONL(t, interactionPath, map[string]any{
-		"kind":   "inbound_received",
-		"msg_id": "msg-segment-2",
-		"sender": sender,
-		"text":   "hello-2",
-		"time":   newInboundTS,
-		"user_profile": map[string]any{
-			"channel":     channel,
-			"sender":      sender,
-			"sender_name": "UTest",
-			"thread_id":   threadID,
-		},
-	})
-
-	res = runBin(t, bin, repo, "sessions", "--json")
+	res = runBin(t, bin, repo, "channel", "show", "--channel", "dingtalk", "--conversation-id", "conv-1", "--thread-id", "thread-1", "--json")
 	if res.Code != 0 {
-		t.Fatalf("sessions failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("channel show failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
-	items := parseSessionsJSON(t, res.Stdout).Items
-	if len(items) == 0 {
-		t.Fatalf("expected reopened session segment, got empty items")
+	var channelNode map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(res.Stdout)), &channelNode); err != nil {
+		t.Fatalf("invalid channel show json: %v raw=%q", err, res.Stdout)
 	}
-	if containsSessionKey(items, key) {
-		t.Fatalf("expected old session key to stay deleted, key=%s items=%+v", key, items)
+	if strings.TrimSpace(fmt.Sprint(channelNode["bound_session_key"])) != key {
+		t.Fatalf("expected bound_session_key=%s got=%+v", key, channelNode)
 	}
-	newKey := strings.TrimSpace(items[0].SessionKey)
-	if !strings.HasPrefix(newKey, key+"_r") {
-		t.Fatalf("expected reopened key prefix=%s_r got=%s", key, newKey)
-	}
-
-	res = runBin(t, bin, repo, "messages", "--session-key", key, "--json")
+	res = runBin(t, bin, repo, "binding", "delete", "--channel", "dingtalk", "--conversation-id", "conv-1", "--thread-id", "thread-1", "--json")
 	if res.Code != 0 {
-		t.Fatalf("messages old key failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("binding delete failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
-	oldMsgs := parseMessagesJSON(t, res.Stdout)
-	if len(oldMsgs.Messages) != 0 {
-		t.Fatalf("expected no messages for deleted key, got=%+v", oldMsgs.Messages)
-	}
-
-	res = runBin(t, bin, repo, "messages", "--session-key", newKey, "--json")
+	res = runBin(t, bin, repo, "binding", "list", "--session-key", key, "--json")
 	if res.Code != 0 {
-		t.Fatalf("messages new key failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("binding list after delete failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
-	newMsgs := parseMessagesJSON(t, res.Stdout)
-	if len(newMsgs.Messages) == 0 {
-		t.Fatalf("expected messages for reopened key, got empty")
+	listAfterDelete := parseSessionsJSON(t, res.Stdout)
+	if len(listAfterDelete.Items) != 0 {
+		t.Fatalf("expected no bindings after delete, got=%+v", listAfterDelete.Items)
 	}
 }
 
@@ -838,44 +714,14 @@ func TestCLIGUISessionInteractionsDoNotForkHashedSession(t *testing.T) {
 	setStorageBackend(t, repo, "localfile")
 
 	key := "gui-lcaieda-1773030734608"
-	res := runBin(t, bin, repo, "session-new", "--session-key", key, "--workdir", repo, "--json")
+	res := runBin(t, bin, repo, "session", "create", "--key", key, "--workdir", repo, "--json")
 	if res.Code != 0 {
-		t.Fatalf("session-new failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("session create failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
 
-	ts := "2026-03-09T04:32:19Z"
-	interactionPath := sharedRuntimeInteractionPath()
-	writeJSONL(t, interactionPath, []map[string]any{
-		{
-			"kind":        "inbound_received",
-			"msg_id":      "local-u-1",
-			"session_key": key,
-			"sender":      "-",
-			"text":        "1",
-			"time":        ts,
-			"user_profile": map[string]any{
-				"channel":     "-",
-				"sender":      "-",
-				"sender_name": "-",
-				"thread_id":   "",
-			},
-			"message_metadata": map[string]any{
-				"source": "gui",
-			},
-		},
-		{
-			"kind":        "trace",
-			"stage":       "session_resolved",
-			"msg_id":      "local-u-1",
-			"session_key": key,
-			"session_id":  "-",
-			"ts":          ts,
-		},
-	})
-
-	res = runBin(t, bin, repo, "sessions", "--json")
+	res = runBin(t, bin, repo, "session", "list", "--json")
 	if res.Code != 0 {
-		t.Fatalf("sessions failed: code=%d stderr=%s", res.Code, res.Stderr)
+		t.Fatalf("session list failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
 	items := parseSessionsJSON(t, res.Stdout).Items
 	if len(items) != 1 {

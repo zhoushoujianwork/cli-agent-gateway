@@ -1,129 +1,171 @@
-# Go Backend Architecture Proposal
+# Go Backend Architecture (Session Manager / Binding Manager / Runtime Manager)
 
-This document describes the target architecture for running `cli-agent-gateway` as a cross-platform Go backend service, while keeping the macOS app as a UI/controller layer.
+This document describes the backend design that supports the new session-first product model.
 
-## Decision
+## Objective
 
-Use **Go** for the gateway backend service.
+Support one user working on the same task session from multiple entrypoints while preserving one shared live task context.
 
-Rationale:
-- Better cross-platform distribution via single binary.
-- Good fit for long-running process + concurrent channel/agent I/O.
-- Easier deployment for Linux/macOS/Windows environments.
-- Keep ACP-first protocol boundary unchanged to preserve current behavior and agent compatibility.
+## New Backend Managers
 
-## Target architecture
+### Session Manager
+
+Responsibilities:
+
+- create sessions
+- delete sessions
+- clear session context
+- load session metadata
+- expose session list and session detail
+
+Owns:
+
+- `session_key`
+- `workdir`
+- session status
+- created/updated timestamps
+
+### Binding Manager
+
+Responsibilities:
+
+- bind a channel conversation to a session
+- unbind a channel conversation
+- list bindings
+- expose unassigned conversations
+
+Owns:
+
+- `channel`
+- `conversation_id`
+- optional `thread_id`
+- target `session_key`
+
+### Runtime Manager
+
+Responsibilities:
+
+- attach live ACP runtime to a session
+- detach runtime from a session
+- keep runtime registry
+- serialize writes into one session runtime
+- expose runtime status and process list
+
+Owns:
+
+- live runtime handle
+- process/session health
+- current attached ACP session identity as internal-only data
+
+## Internal Rule
+
+User-facing `session` identity and internal ACP session identity must be treated as different things.
+
+- `session_key` is stable product identity
+- ACP `session_id` is runtime-private implementation detail
+
+ACP `session_id` should not define routing semantics.
+
+## Suggested Backend Shape
 
 ```mermaid
 flowchart TD
-    U["User / Chat App"] --> C["Channel Adapter (Go)"]
-    C --> L["Gateway Loop (Go)"]
-    L --> R["Session Router (Go)"]
-    R --> A["ACP Adapter (Go)"]
-    A --> J["JSON-RPC over stdio (Go)"]
-    J --> P["CLI Agent Process (codex-acp / others)"]
-    L --> S["State Store (json)"]
-    L --> I["Interaction Log (jsonl)"]
-    L --> T["Task Reports (json)"]
-    M["macOS GUI App"] --> G["gateway-cli (start/stop/status/config)"]
-    G --> L
+    CLI["CLI"] --> API["Command Handlers"]
+    GUI["GUI"] --> API
+    CH["Channel Adapters"] --> RT["Router"]
+    API --> SM["Session Manager"]
+    API --> BM["Binding Manager"]
+    API --> RM["Runtime Manager"]
+    RT --> BM
+    RT --> RM
+    RM --> ACP["ACP Adapter"]
+    ACP --> AG["Agent Process"]
+    SM --> ST["State Store"]
+    BM --> ST
+    RM --> ST
+    RT --> IL["Interaction Log"]
+    RM --> RP["Reports"]
 ```
 
-## Component boundaries
+## Ingress Flow
 
-- `channels/`: ingress/egress implementations for iMessage, DingTalk, command mode, and future channels.
-- `core/`: message dedup, auth/allowlist, session routing, progress replies, and task lifecycle.
-- `agents/`: ACP protocol adapter only (initialize/session/new/session/prompt, updates, permissions).
-- `infra/`: process lock, config/env loading, JSON state, logs/reports, retries/timeouts.
-- `cmd/gateway-cli`: executable entrypoint and operational commands (`run`, `status`, `config`).
+### GUI Send
 
-## macOS app integration
+1. GUI selects one explicit session.
+2. GUI calls `session send`.
+3. Runtime manager finds or creates the live runtime for that session.
+4. Message is delivered into that session runtime.
 
-The macOS app should not embed gateway business logic. It should:
-- Launch/stop/restart `gateway-cli`.
-- Read status/health/log files from defined paths.
-- Edit `.env` (or config file) via a controlled config flow.
-- Display sessions/interactions based on machine-readable outputs (`state.json`, `interactions.jsonl`, reports).
+### Channel Ingress
 
-For operator-facing observability, the current managed log should converge to a single visible file at `~/.cag/gatewayd/gatewayd.log` so GUI and CLI status read the same source of truth.
+1. Channel adapter normalizes incoming conversation identity.
+2. Router asks binding manager for a binding.
+3. If binding exists:
+   - send to that bound session runtime
+4. If binding does not exist:
+   - record as unassigned
+   - do not execute
 
-This keeps UI and backend independently releasable.
+## Runtime Policy
 
-## Compatibility contract
+For each session:
 
-To minimize migration risk, keep these contracts stable:
-- Existing env keys in `.env.example` (or provide migration aliases).
-- State/report file schemas used by macOS app and tooling.
-- ACP message handling semantics and timeout/retry behavior.
-- Channel message normalization format (`id/from/text/ts/thread_id` + metadata).
+- at most one attached runtime
+- ordered writes into that runtime
+- explicit attach/detach lifecycle
 
-## Migration plan (staged)
+Allowed transitions:
 
-1. `infra` port
-- Process lock semantics (`~/.cag/runtime/repos/<repo-id>/gateway.lock` by default).
-- Config loader and defaults.
-- JSON state/log/report persistence.
+- `created -> attached`
+- `attached -> detached`
+- `attached -> cleared`
+- `attached -> deleted`
+- `detached -> attached`
 
-2. `agents` port
-- JSON-RPC stdio client.
-- ACP adapter and event loop behavior.
+## Storage Model Preview
 
-3. `core` port
-- Main loop: dedup, allowlist, session map, progress notifications.
-- Preserve special commands like `/new`, `/clear`.
+Suggested persisted structure:
 
-4. `channels` port
-- Command channel first (lowest risk).
-- DingTalk and iMessage adapters next.
-
-5. Shadow validation
-- Run Go gateway alongside Python on mirrored input.
-- Compare summaries, states, and reports.
-
-6. Cutover
-- Make Go gateway default runtime.
-- Remove obsolete Python-side runtime paths instead of keeping parallel fallback behavior.
-
-## Risks and mitigations
-
-- Behavior drift in `core` logic:
-  - Mitigation: golden tests from captured real interaction logs.
-- Channel-specific edge cases:
-  - Mitigation: adapter-level integration tests with mock scripts.
-- Config/state convergence risk during development-stage cleanup:
-  - Mitigation: document the target layout first, then fail fast on invalid legacy inputs instead of preserving silent compatibility layers.
-
-## Next engineering priorities (Go core)
-
-1. Stability baseline
-- Add integration tests for `run/start/stop/restart/status/health`.
-- Add lock-contention and crash-recovery smoke cases.
-- Add long-run and duplicate-message checks.
-
-2. ACP reliability
-- Classify ACP failures into `timeout`, `transport`, `protocol`.
-- Keep method-level context (`initialize`, `session/new`, `session/prompt`) in errors.
-- Standardize retry/backoff behavior and expose config knobs.
-
-3. Storage hardening (sqlite default)
-- Introduce schema version and migrations for state/report metadata.
-- Tune sqlite runtime (`WAL`, `busy_timeout`, indexes).
-- Define corruption recovery behavior and explicit failure mode.
-
-4. Observability
-- Keep structured logs with trace/session/message IDs.
-- Add simple metrics export (at least counters/latency/error-rate).
-- Make status/health JSON contract stable for GUI consumers.
-
-## Suggested repository structure for Go implementation
-
-```text
-cmd/gateway-cli/main.go
-internal/core/
-internal/agents/
-internal/channels/
-internal/infra/
-docs/
+```json
+{
+  "sessions": {},
+  "bindings": {},
+  "runtime_index": {},
+  "unassigned_conversations": []
+}
 ```
 
-Keep docs, scripts, and macOS app in this repository. If needed, keep Python and Go runtimes side-by-side during migration.
+Suggested split:
+
+- `sessions`
+  - durable product objects
+- `bindings`
+  - durable routing map
+- `runtime_index`
+  - operational runtime metadata
+- `unassigned_conversations`
+  - actionable routing inbox
+
+## Migration Principle
+
+The old behavior used:
+
+- flat session commands
+- heuristic routing
+- stateless send execution
+
+The new behavior must converge to:
+
+- grouped commands
+- explicit binding
+- long-lived runtime per session
+
+Do not preserve both models indefinitely.
+
+## Testing Priorities
+
+1. same session receives GUI and DingTalk messages in order
+2. unbound channel conversations do not execute
+3. deleting a session tears down bindings and runtime
+4. clearing a session resets live context but preserves session identity
+5. attach/detach is explicit and observable

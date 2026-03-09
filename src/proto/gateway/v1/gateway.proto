@@ -167,6 +167,28 @@ message HealthCheckResponse {
   repeated HealthCheckItem items = 6;
 }
 
+message ActionRequest {
+  string repo_root = 1;
+  string action = 2;
+  string session_key = 3;
+  string workdir = 4;
+  string text = 5;
+  string message_id = 6;
+  string source = 7;
+  string channel = 8;
+  string conversation_id = 9;
+  string thread_id = 10;
+  bool include_archived = 11;
+  int32 limit = 12;
+}
+
+message ActionResponse {
+  bool ok = 1;
+  string error = 2;
+  string action = 3;
+  string payload_json = 4;
+}
+
 service GatewayControl {
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc Sessions(SessionsRequest) returns (SessionsResponse);
@@ -181,4 +203,5 @@ service GatewayControl {
   rpc ClearSession(SessionKeyRequest) returns (SessionMutationResponse);
   rpc DeleteSession(SessionKeyRequest) returns (SessionMutationResponse);
   rpc DeleteAllSessions(EmptyRepoRequest) returns (SessionMutationResponse);
+  rpc Action(ActionRequest) returns (ActionResponse);
 }

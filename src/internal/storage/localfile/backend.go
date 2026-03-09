@@ -131,6 +131,10 @@ func emptyState() storageapi.StateData {
 		SessionMap:     map[string]string{},
 		SessionMeta:    map[string]storageapi.SessionMetaRecord{},
 		SessionDeleted: map[string]string{},
+		Sessions:       map[string]storageapi.SessionRecord{},
+		Bindings:       map[string]storageapi.BindingRecord{},
+		RuntimeIndex:   map[string]storageapi.RuntimeRecord{},
+		Unassigned:     map[string]storageapi.ConversationRecord{},
 		UserAccess:     map[string]storageapi.UserAccessRecord{},
 		Inflight:       map[string]any{},
 	}
@@ -148,6 +152,18 @@ func normalizeState(d *storageapi.StateData) {
 	}
 	if d.SessionDeleted == nil {
 		d.SessionDeleted = map[string]string{}
+	}
+	if d.Sessions == nil {
+		d.Sessions = map[string]storageapi.SessionRecord{}
+	}
+	if d.Bindings == nil {
+		d.Bindings = map[string]storageapi.BindingRecord{}
+	}
+	if d.RuntimeIndex == nil {
+		d.RuntimeIndex = map[string]storageapi.RuntimeRecord{}
+	}
+	if d.Unassigned == nil {
+		d.Unassigned = map[string]storageapi.ConversationRecord{}
 	}
 	if d.UserAccess == nil {
 		d.UserAccess = map[string]storageapi.UserAccessRecord{}

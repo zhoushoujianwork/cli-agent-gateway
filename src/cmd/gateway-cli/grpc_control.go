@@ -18,6 +18,7 @@ import (
 	"cli-agent-gateway/internal/config"
 	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
 	"cli-agent-gateway/internal/infra/envfile"
+	"cli-agent-gateway/internal/utils/sessionctl"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -39,6 +40,8 @@ type gatewaydState struct {
 type gatewayControlServer struct {
 	gatewayv1.UnimplementedGatewayControlServer
 	repoRoot string
+	mu       sync.Mutex
+	managers map[string]*sessionctl.RuntimeManager
 }
 
 func (s *gatewayControlServer) Status(_ context.Context, req *gatewayv1.StatusRequest) (*gatewayv1.StatusResponse, error) {
@@ -78,78 +81,11 @@ func (s *gatewayControlServer) Status(_ context.Context, req *gatewayv1.StatusRe
 }
 
 func (s *gatewayControlServer) Sessions(_ context.Context, req *gatewayv1.SessionsRequest) (*gatewayv1.SessionsResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
-	cfg, err := config.Load(root, "")
-	if err != nil {
-		return &gatewayv1.SessionsResponse{Ok: false, Error: err.Error()}, nil
-	}
-	items, err := collectSessions(cfg)
-	if err != nil {
-		return &gatewayv1.SessionsResponse{Ok: false, Error: err.Error()}, nil
-	}
-	limit := int(req.GetLimit())
-	if limit > 0 && len(items) > limit {
-		items = items[:limit]
-	}
-	out := &gatewayv1.SessionsResponse{
-		Ok:    true,
-		Items: make([]*gatewayv1.SessionItem, 0, len(items)),
-	}
-	for _, it := range items {
-		out.Items = append(out.Items, &gatewayv1.SessionItem{
-			SessionKey:  it.SessionKey,
-			SessionId:   it.SessionID,
-			Channel:     it.Channel,
-			Sender:      it.Sender,
-			SenderName:  it.SenderName,
-			ThreadId:    it.ThreadID,
-			LastMessage: it.LastMessage,
-			LastTime:    it.LastTime,
-			Workdir:     it.Workdir,
-			UpdatedAt:   it.UpdatedAt,
-			Status:      it.Status,
-			Latest:      it.Latest,
-		})
-	}
-	return out, nil
+	return &gatewayv1.SessionsResponse{Ok: false, Error: "deprecated RPC: use action RPC session.list"}, nil
 }
 
 func (s *gatewayControlServer) SessionNew(_ context.Context, req *gatewayv1.SessionNewRequest) (*gatewayv1.SessionNewResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
-	cfg, err := config.Load(root, "")
-	if err != nil {
-		return &gatewayv1.SessionNewResponse{Ok: false, Error: err.Error()}, nil
-	}
-	key := normalizeSessionKey(req.GetSessionKey())
-	if key == "" {
-		return &gatewayv1.SessionNewResponse{Ok: false, Error: "session key required"}, nil
-	}
-	workdir, err := normalizeWorkdirPath(root, req.GetWorkdir())
-	if err != nil {
-		return &gatewayv1.SessionNewResponse{Ok: false, Error: err.Error()}, nil
-	}
-	if strings.TrimSpace(workdir) == "" {
-		return &gatewayv1.SessionNewResponse{Ok: false, Error: "workdir required"}, nil
-	}
-	info, err := os.Stat(workdir)
-	if err != nil {
-		return &gatewayv1.SessionNewResponse{Ok: false, Error: fmt.Sprintf("invalid workdir: %s", workdir)}, nil
-	}
-	if !info.IsDir() {
-		return &gatewayv1.SessionNewResponse{Ok: false, Error: fmt.Sprintf("invalid workdir (not a directory): %s", workdir)}, nil
-	}
-	payload, err := upsertSessionMetadata(cfg, key, workdir)
-	if err != nil {
-		return &gatewayv1.SessionNewResponse{Ok: false, Error: err.Error(), SessionKey: key}, nil
-	}
-	return &gatewayv1.SessionNewResponse{
-		Ok:         true,
-		SessionKey: payload.SessionKey,
-		SessionId:  payload.SessionID,
-		Workdir:    payload.Workdir,
-		UpdatedAt:  payload.UpdatedAt,
-		Status:     payload.Status,
-	}, nil
+	return &gatewayv1.SessionNewResponse{Ok: false, Error: "deprecated RPC: use action RPC session.create"}, nil
 }
 
 func (s *gatewayControlServer) Start(_ context.Context, req *gatewayv1.StatusRequest) (*gatewayv1.StatusResponse, error) {
@@ -214,135 +150,23 @@ func (s *gatewayControlServer) Doctor(_ context.Context, req *gatewayv1.HealthCh
 }
 
 func (s *gatewayControlServer) SendToSession(_ context.Context, req *gatewayv1.SendToSessionRequest) (*gatewayv1.SendToSessionResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
-	cfg, err := config.Load(root, "")
-	if err != nil {
-		return &gatewayv1.SendToSessionResponse{Ok: false, Error: err.Error()}, nil
-	}
-	key := normalizeSessionKey(req.GetSessionKey())
-	if key == "" {
-		return &gatewayv1.SendToSessionResponse{Ok: false, Error: "session key required"}, nil
-	}
-	msgID := strings.TrimSpace(req.GetMessageId())
-	if msgID == "" {
-		msgID = fmt.Sprintf("manual-%d", time.Now().UnixMilli())
-	}
-	mt := strings.TrimSpace(req.GetMsgType())
-	if mt == "" {
-		mt = "text"
-	}
-	source := strings.TrimSpace(req.GetSource())
-	if source == "" {
-		source = "text"
-	}
-	payload, execErr := sendViaSessionKey(
-		cfg,
-		key,
-		strings.TrimSpace(req.GetText()),
-		mt,
-		source,
-		msgID,
-		req.GetDryRun(),
-		strings.TrimSpace(req.GetWorkdir()),
-	)
-	resultJSON := ""
-	if payload.ResultJSON != nil {
-		if raw, err := json.Marshal(payload.ResultJSON); err == nil {
-			resultJSON = string(raw)
-		}
-	}
-	resp := &gatewayv1.SendToSessionResponse{
-		Ok:             payload.OK,
-		Error:          payload.Error,
-		Channel:        payload.Channel,
-		To:             payload.To,
-		MessageId:      payload.MessageID,
-		MsgType:        payload.MsgType,
-		DryRun:         payload.DryRun,
-		Source:         payload.Source,
-		SessionKey:     payload.SessionKey,
-		SessionId:      payload.SessionID,
-		Result:         payload.Result,
-		ElapsedSec:     int32(payload.ElapsedSec),
-		RawOutput:      payload.RawOutput,
-		ResultJson:     resultJSON,
-		TerminalReason: payload.TerminalReason,
-	}
-	if execErr != nil {
-		resp.Ok = false
-		if resp.Error == "" {
-			resp.Error = execErr.Error()
-		}
-	}
-	return resp, nil
+	return &gatewayv1.SendToSessionResponse{Ok: false, Error: "deprecated RPC: use action RPC session.send"}, nil
 }
 
 func (s *gatewayControlServer) SessionMessages(_ context.Context, req *gatewayv1.SessionMessagesRequest) (*gatewayv1.SessionMessagesResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
-	cfg, err := config.Load(root, "")
-	if err != nil {
-		return &gatewayv1.SessionMessagesResponse{Ok: false, Error: err.Error()}, nil
-	}
-	key := normalizeSessionKey(req.GetSessionKey())
-	if key == "" {
-		return &gatewayv1.SessionMessagesResponse{Ok: false, Error: "session key required"}, nil
-	}
-	msgs, timeline, err := collectSessionMessages(cfg, key)
-	if err != nil {
-		return &gatewayv1.SessionMessagesResponse{Ok: false, Error: err.Error()}, nil
-	}
-	resp := &gatewayv1.SessionMessagesResponse{
-		Ok:       true,
-		Messages: make([]*gatewayv1.ChatMessage, 0, len(msgs)),
-		Timeline: make([]*gatewayv1.TimelineEntry, 0, len(timeline)),
-	}
-	for _, m := range msgs {
-		resp.Messages = append(resp.Messages, &gatewayv1.ChatMessage{
-			Id:           m.ID,
-			SourceMsgId:  m.SourceMsgID,
-			Role:         m.Role,
-			Text:         m.Text,
-			Time:         m.Time,
-			Status:       m.Status,
-			StatusDetail: m.StatusDetail,
-		})
-	}
-	for _, t := range timeline {
-		entry := &gatewayv1.TimelineEntry{
-			MsgId:  t.MsgID,
-			Events: make([]*gatewayv1.ProcessEvent, 0, len(t.Events)),
-		}
-		for _, ev := range t.Events {
-			entry.Events = append(entry.Events, &gatewayv1.ProcessEvent{
-				Id:     ev.ID,
-				Time:   ev.Time,
-				Title:  ev.Title,
-				Detail: ev.Detail,
-			})
-		}
-		resp.Timeline = append(resp.Timeline, entry)
-	}
-	return resp, nil
+	return &gatewayv1.SessionMessagesResponse{Ok: false, Error: "deprecated RPC: use action RPC session.messages"}, nil
 }
 
 func (s *gatewayControlServer) ClearSession(_ context.Context, req *gatewayv1.SessionKeyRequest) (*gatewayv1.SessionMutationResponse, error) {
-	return s.mutateSession(req.GetRepoRoot(), req.GetSessionKey(), clearSessionMapping)
+	return &gatewayv1.SessionMutationResponse{Ok: false, Error: "deprecated RPC: use action RPC session.clear"}, nil
 }
 
 func (s *gatewayControlServer) DeleteSession(_ context.Context, req *gatewayv1.SessionKeyRequest) (*gatewayv1.SessionMutationResponse, error) {
-	return s.mutateSession(req.GetRepoRoot(), req.GetSessionKey(), deleteSessionMapping)
+	return &gatewayv1.SessionMutationResponse{Ok: false, Error: "deprecated RPC: use action RPC session.delete"}, nil
 }
 
 func (s *gatewayControlServer) DeleteAllSessions(_ context.Context, req *gatewayv1.EmptyRepoRequest) (*gatewayv1.SessionMutationResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
-	cfg, err := config.Load(root, "")
-	if err != nil {
-		return &gatewayv1.SessionMutationResponse{Ok: false, Error: err.Error()}, nil
-	}
-	if err := deleteAllSessionMappings(cfg); err != nil {
-		return &gatewayv1.SessionMutationResponse{Ok: false, Error: err.Error()}, nil
-	}
-	return &gatewayv1.SessionMutationResponse{Ok: true}, nil
+	return &gatewayv1.SessionMutationResponse{Ok: false, Error: "deprecated RPC: no bulk-delete in grouped commands"}, nil
 }
 
 func (s *gatewayControlServer) mutateSession(repoRoot, sessionKey string, fn func(config.AppConfig, string) error) (*gatewayv1.SessionMutationResponse, error) {
@@ -351,7 +175,7 @@ func (s *gatewayControlServer) mutateSession(repoRoot, sessionKey string, fn fun
 	if err != nil {
 		return &gatewayv1.SessionMutationResponse{Ok: false, Error: err.Error()}, nil
 	}
-	key := normalizeSessionKey(sessionKey)
+	key := sessionctl.NormalizeSessionKey(sessionKey)
 	if key == "" {
 		return &gatewayv1.SessionMutationResponse{Ok: false, Error: "session key required"}, nil
 	}
@@ -530,7 +354,7 @@ func runGatewayd(repoRoot string, args []string) int {
 	defer ln.Close()
 
 	srv := grpc.NewServer()
-	gatewayv1.RegisterGatewayControlServer(srv, &gatewayControlServer{repoRoot: root})
+	gatewayv1.RegisterGatewayControlServer(srv, &gatewayControlServer{repoRoot: root, managers: map[string]*sessionctl.RuntimeManager{}})
 	fmt.Printf("gatewayd listening=%s\n", addr)
 	if err := srv.Serve(ln); err != nil {
 		fmt.Fprintf(os.Stderr, "gatewayd serve failed: %v\n", err)

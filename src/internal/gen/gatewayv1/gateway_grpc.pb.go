@@ -35,6 +35,7 @@ type GatewayControlClient interface {
 	ClearSession(ctx context.Context, in *SessionKeyRequest, opts ...grpc.CallOption) (*SessionMutationResponse, error)
 	DeleteSession(ctx context.Context, in *SessionKeyRequest, opts ...grpc.CallOption) (*SessionMutationResponse, error)
 	DeleteAllSessions(ctx context.Context, in *EmptyRepoRequest, opts ...grpc.CallOption) (*SessionMutationResponse, error)
+	Action(ctx context.Context, in *ActionRequest, opts ...grpc.CallOption) (*ActionResponse, error)
 }
 
 type gatewayControlClient struct {
@@ -162,6 +163,15 @@ func (c *gatewayControlClient) DeleteAllSessions(ctx context.Context, in *EmptyR
 	return out, nil
 }
 
+func (c *gatewayControlClient) Action(ctx context.Context, in *ActionRequest, opts ...grpc.CallOption) (*ActionResponse, error) {
+	out := new(ActionResponse)
+	err := c.cc.Invoke(ctx, "/gateway.v1.GatewayControl/Action", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GatewayControlServer is the server API for GatewayControl service.
 // All implementations must embed UnimplementedGatewayControlServer
 // for forward compatibility
@@ -179,6 +189,7 @@ type GatewayControlServer interface {
 	ClearSession(context.Context, *SessionKeyRequest) (*SessionMutationResponse, error)
 	DeleteSession(context.Context, *SessionKeyRequest) (*SessionMutationResponse, error)
 	DeleteAllSessions(context.Context, *EmptyRepoRequest) (*SessionMutationResponse, error)
+	Action(context.Context, *ActionRequest) (*ActionResponse, error)
 	mustEmbedUnimplementedGatewayControlServer()
 }
 
@@ -224,6 +235,9 @@ func (UnimplementedGatewayControlServer) DeleteSession(context.Context, *Session
 }
 func (UnimplementedGatewayControlServer) DeleteAllSessions(context.Context, *EmptyRepoRequest) (*SessionMutationResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteAllSessions not implemented")
+}
+func (UnimplementedGatewayControlServer) Action(context.Context, *ActionRequest) (*ActionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Action not implemented")
 }
 func (UnimplementedGatewayControlServer) mustEmbedUnimplementedGatewayControlServer() {}
 
@@ -472,6 +486,24 @@ func _GatewayControl_DeleteAllSessions_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GatewayControl_Action_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayControlServer).Action(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/gateway.v1.GatewayControl/Action",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayControlServer).Action(ctx, req.(*ActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GatewayControl_ServiceDesc is the grpc.ServiceDesc for GatewayControl service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -530,6 +562,10 @@ var GatewayControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteAllSessions",
 			Handler:    _GatewayControl_DeleteAllSessions_Handler,
+		},
+		{
+			MethodName: "Action",
+			Handler:    _GatewayControl_Action_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
