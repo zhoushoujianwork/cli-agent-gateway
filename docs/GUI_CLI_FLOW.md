@@ -83,7 +83,8 @@ Shows:
 Actions:
 
 - create
-- delete
+- delete one session from the session row context menu
+- delete all listed sessions from the sessions toolbar only after explicit confirmation
 - clear
 - attach
 - detach
@@ -96,11 +97,14 @@ Shows:
 - message history for the selected session
 - send box targeting the selected session only
 - runtime status for the selected session
+- a transient processing indicator while `cag session send --json` is still waiting on the agent reply
 
 Rules:
 
 - if no session is selected, send must be disabled
 - send must never auto-route to `latest`
+- while a send is in flight, the GUI should keep a visible local processing state until the assistant reply is persisted
+- send progress is scoped to the target session only; one session's in-flight send must not block another session's chat UI
 
 ### Channel Inbox Panel
 
@@ -143,8 +147,29 @@ Actions:
 
 - Use grouped commands only.
 - Do not build new GUI behavior on top of legacy flat commands.
+- GUI may still use hidden/internal control-plane commands during migration only.
+- Hidden/internal commands should be treated as operator APIs, not as end-user navigation.
 - Do not interpret stderr as business result.
 - Parse one JSON object per command invocation.
+
+## Migration Note
+
+During the Cobra transition:
+
+- GUI reads and writes should continue to prefer:
+  - `cag session ...`
+  - `cag channel ...`
+  - `cag binding ...`
+  - `cag runtime ...`
+- GUI bootstrap and operator actions may temporarily continue to call hidden/internal commands such as:
+  - `cag doctor`
+  - `cag gatewayd-up`
+  - `cag gatewayd-down`
+  - `cag users`
+  - `cag user-allow`
+  - `cag user-block`
+
+These internal commands are migration support only and should not receive new product semantics.
 
 ## Non-Goals
 

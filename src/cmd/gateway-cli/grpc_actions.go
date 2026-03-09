@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -13,6 +14,8 @@ import (
 	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
 	"cli-agent-gateway/internal/storage"
 	"cli-agent-gateway/internal/utils/sessionctl"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func (s *gatewayControlServer) getRuntimeManager(root string) *sessionctl.RuntimeManager {
@@ -31,8 +34,7 @@ func (s *gatewayControlServer) getRuntimeManager(root string) *sessionctl.Runtim
 }
 
 func (s *gatewayControlServer) Action(_ context.Context, req *gatewayv1.ActionRequest) (*gatewayv1.ActionResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
-	payload, err := s.handleAction(root, req)
+	payload, err := s.handleAction(s.repoRoot, req)
 	if err != nil {
 		return &gatewayv1.ActionResponse{
 			Ok:     false,
@@ -115,12 +117,14 @@ func handleSessionCreate(store *sessionctl.Store, req *gatewayv1.ActionRequest) 
 	if key == "" {
 		return nil, fmt.Errorf("session key required")
 	}
-	workdir, err := normalizeWorkdirPath(store.Config().RepoRoot, req.GetWorkdir())
-	if err != nil {
-		return nil, err
-	}
+	workdir := strings.TrimSpace(req.GetWorkdir())
 	if strings.TrimSpace(workdir) == "" {
 		return nil, fmt.Errorf("workdir required")
+	}
+	if !filepath.IsAbs(workdir) {
+		if abs, err := filepath.Abs(workdir); err == nil {
+			workdir = abs
+		}
 	}
 	info, err := os.Stat(workdir)
 	if err != nil {
@@ -625,22 +629,35 @@ func handleRuntimeStatus(store *sessionctl.Store, manager *sessionctl.RuntimeMan
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := config.Load(root, "")
+	if err != nil {
+		return nil, err
+	}
+	statusPayload, err := getStatusPayload(root)
+	if err != nil {
+		statusPayload = StatusPayload{
+			Running:  false,
+			LockFile: strings.TrimSpace(cfg.LockFile),
+			Metadata: map[string]any{
+				"channel":  strings.TrimSpace(cfg.ChannelType),
+				"workdir":  strings.TrimSpace(cfg.Workdir),
+				"log_file": strings.TrimSpace(resolveLogPath(root, nil)),
+			},
+		}
+	}
 	attached := 0
 	for _, rt := range st.RuntimeIndex {
 		if rt.Attached {
 			attached++
 		}
 	}
-	return map[string]any{
-		"ok":               true,
-		"action":           "runtime.status",
-		"attached_count":   attached,
-		"runtime_count":    len(manager.Snapshot()),
-		"log_file":         sessionctl.ResolveRuntimeLogPath(root),
-		"session_count":    len(st.Sessions),
-		"binding_count":    len(st.Bindings),
-		"unassigned_count": len(st.Unassigned),
-	}, nil
+	payload := statusJSON("runtime.status", statusPayload, cfg, sessionctl.ResolveRuntimeLogPath(root))
+	payload["attached_count"] = attached
+	payload["runtime_count"] = len(manager.Snapshot())
+	payload["session_count"] = len(st.Sessions)
+	payload["binding_count"] = len(st.Bindings)
+	payload["unassigned_count"] = len(st.Unassigned)
+	return payload, nil
 }
 
 func handleRuntimePS(store *sessionctl.Store, manager *sessionctl.RuntimeManager, req *gatewayv1.ActionRequest) (map[string]any, error) {
@@ -751,8 +768,39 @@ func tryActionViaGRPC(repoRoot string, req *gatewayv1.ActionRequest) (*gatewayv1
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout())
 	defer cancel()
-	req.RepoRoot = repoRoot
+	resp, err := cli.Action(ctx, req)
+	if err == nil {
+		return resp, nil
+	}
+	if !shouldRefreshGatewaydForAction(err) {
+		return nil, err
+	}
+	if _, shutdownErr := shutdownManagedGatewayd(repoRoot); shutdownErr != nil {
+		return nil, err
+	}
+	if ensureErr := ensureGatewaydRunning(repoRoot); ensureErr != nil {
+		return nil, err
+	}
+	cli, conn, dialErr := grpcGatewayClient(repoRoot)
+	if dialErr != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	ctx, cancel = context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout())
+	defer cancel()
 	return cli.Action(ctx, req)
+}
+
+func shouldRefreshGatewaydForAction(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	if st.Code() != codes.Unimplemented {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(st.Message()))
+	return strings.Contains(msg, "unknown method action") || strings.Contains(msg, "/action")
 }
 
 func decodeActionPayload(resp *gatewayv1.ActionResponse) (map[string]any, error) {

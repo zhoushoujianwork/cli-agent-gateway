@@ -260,7 +260,7 @@ func (a *Adapter) ensureReady() error {
 	_, err := a.client.SendRequest("initialize", map[string]any{
 		"protocolVersion":    "0.2",
 		"clientCapabilities": map[string]any{},
-		"clientInfo":         map[string]any{"name": "cli-agent-gateway-go", "version": "0.1.0"},
+		"clientInfo":         map[string]any{"name": "cli-agent-gateway-go", "version": "0.2.0"},
 	}, time.Duration(a.initializeTimeoutSec)*time.Second)
 	if err != nil {
 		return wrapACPError("initialize", err)

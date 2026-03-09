@@ -98,137 +98,13 @@ type SessionsPayload struct {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage(os.Stderr)
-		os.Exit(2)
-	}
-
-	cmd := strings.ToLower(strings.TrimSpace(os.Args[1]))
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to resolve cwd: %v\n", err)
 		os.Exit(1)
 	}
 	repoRoot := detectRepoRoot(cwd)
-	args := os.Args[2:]
-
-	switch cmd {
-	case "run":
-		os.Exit(runGoMain(repoRoot, args))
-	case "start":
-		os.Exit(runStart(repoRoot, args))
-	case "stop":
-		os.Exit(runStop(repoRoot, args))
-	case "restart":
-		os.Exit(runRestart(repoRoot, args))
-	case "config":
-		os.Exit(runGoConfig(repoRoot, args))
-	case "status":
-		os.Exit(runStatus(repoRoot, args))
-	case "health":
-		os.Exit(runHealth(repoRoot, args))
-	case "doctor":
-		os.Exit(runDoctor(repoRoot, args))
-	case "send":
-		os.Exit(runSend(repoRoot, args))
-	case "session":
-		os.Exit(runSessionCommand(repoRoot, args))
-	case "channel":
-		os.Exit(runChannelCommand(repoRoot, args))
-	case "binding":
-		os.Exit(runBindingCommand(repoRoot, args))
-	case "runtime":
-		os.Exit(runRuntimeCommand(repoRoot, args))
-	case "sessions":
-		os.Exit(runDeprecatedCLI("sessions", "session list", hasFlag(args, "--json")))
-	case "messages":
-		os.Exit(runDeprecatedCLI("messages", "session messages --key <session_key>", hasFlag(args, "--json")))
-	case "users":
-		os.Exit(runUsers(repoRoot, args))
-	case "user-allow":
-		os.Exit(runUserAllow(repoRoot, args))
-	case "user-block":
-		os.Exit(runUserBlock(repoRoot, args))
-	case "session-clear":
-		os.Exit(runDeprecatedCLI("session-clear", "session clear --key <session_key>", hasFlag(args, "--json")))
-	case "session-new":
-		os.Exit(runDeprecatedCLI("session-new", "session create --key <session_key> --workdir <path>", hasFlag(args, "--json")))
-	case "session-delete":
-		os.Exit(runDeprecatedCLI("session-delete", "session delete --key <session_key>", hasFlag(args, "--json")))
-	case "sessions-delete-all":
-		os.Exit(runDeprecatedCLI("sessions-delete-all", "session delete --key <session_key> (repeat as needed)", hasFlag(args, "--json")))
-	case "gatewayd":
-		os.Exit(runGatewayd(repoRoot, args))
-	case "gatewayd-up":
-		os.Exit(runGatewaydUp(repoRoot, args))
-	case "gatewayd-down":
-		os.Exit(runGatewaydDown(repoRoot, args))
-	case "actions":
-		printActions(os.Stdout)
-	case "help", "-h", "--help":
-		printUsage(os.Stdout)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown action: %s\n", cmd)
-		printUsage(os.Stderr)
-		os.Exit(2)
-	}
-}
-
-func printActions(out *os.File) {
-	fmt.Fprintln(out, "run")
-	fmt.Fprintln(out, "start")
-	fmt.Fprintln(out, "stop")
-	fmt.Fprintln(out, "restart")
-	fmt.Fprintln(out, "config")
-	fmt.Fprintln(out, "status")
-	fmt.Fprintln(out, "health")
-	fmt.Fprintln(out, "doctor")
-	fmt.Fprintln(out, "send")
-	fmt.Fprintln(out, "session")
-	fmt.Fprintln(out, "channel")
-	fmt.Fprintln(out, "binding")
-	fmt.Fprintln(out, "runtime")
-	fmt.Fprintln(out, "users")
-	fmt.Fprintln(out, "user-allow")
-	fmt.Fprintln(out, "user-block")
-	fmt.Fprintln(out, "gatewayd")
-	fmt.Fprintln(out, "gatewayd-up")
-	fmt.Fprintln(out, "gatewayd-down")
-	fmt.Fprintln(out, "actions")
-	fmt.Fprintln(out, "help")
-}
-
-func printUsage(out *os.File) {
-	fmt.Fprintln(out, "Usage: cag <action> [options]")
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Actions:")
-	fmt.Fprintln(out, "  run                 Start gateway runtime in foreground")
-	fmt.Fprintln(out, "  start               Start gateway runtime in background (dashboard-friendly)")
-	fmt.Fprintln(out, "  stop                Stop running gateway process by lock owner pid")
-	fmt.Fprintln(out, "  restart             Stop then start")
-	fmt.Fprintln(out, "  start --log-file    Optional server log path for background runtime")
-	fmt.Fprintln(out, "  config [workdir]    Generate/update repo .env with startup-only defaults")
-	fmt.Fprintln(out, "  config --global     Generate/update ~/.cag/.env (gatewayd defaults)")
-	fmt.Fprintln(out, "  config show         Alias of `config list`")
-	fmt.Fprintln(out, "  config list         Show effective config with source and scope")
-	fmt.Fprintln(out, "  config get <key>    Show a single effective config value")
-	fmt.Fprintln(out, "  config set <k> <v>  Persist config to repo .env / ~/.cag/.env / runtime DB")
-	fmt.Fprintln(out, "  config unset <key>  Remove persisted override and fall back to defaults")
-	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
-	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
-	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run, --workdir optional for --session-key)")
-	fmt.Fprintln(out, "  session <subcmd>    Manage session-first task contexts")
-	fmt.Fprintln(out, "  channel <subcmd>    Inspect channel conversations and inbox")
-	fmt.Fprintln(out, "  binding <subcmd>    Manage explicit conversation -> session bindings")
-	fmt.Fprintln(out, "  runtime <subcmd>    Inspect live session runtimes")
-	fmt.Fprintln(out, "  users [--json]      List pending/allowed/blocked gateway users")
-	fmt.Fprintln(out, "  user-allow          Mark a user as allowed (--channel --user-id)")
-	fmt.Fprintln(out, "  user-block          Mark a user as blocked (--channel --user-id)")
-	fmt.Fprintln(out, "  gatewayd [opts]     Run gRPC control plane server")
-	fmt.Fprintln(out, "  gatewayd-up         Ensure gRPC control plane is running")
-	fmt.Fprintln(out, "  gatewayd-down       Stop managed gRPC control plane process")
-	fmt.Fprintln(out, "  actions             Print supported action names")
-	fmt.Fprintln(out, "  help                Show this message")
+	os.Exit(executeRoot(repoRoot, os.Args[1:]))
 }
 
 func runGoMain(repoRoot string, args []string) int {
@@ -332,123 +208,6 @@ func runGoMain(repoRoot string, args []string) int {
 		fmt.Fprintf(os.Stderr, "gateway loop failed: %v\n", err)
 		return 1
 	}
-	return 0
-}
-
-func runGoConfig(repoRoot string, args []string) int {
-	fs := flag.NewFlagSet("config", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	global := fs.Bool("global", false, "write user-level config to ~/.cag/.env")
-	gatewayAddr := fs.String("gatewayd-addr", "", "gatewayd address for ~/.cag/.env (used with --global)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	rest := fs.Args()
-	if len(rest) > 0 {
-		filtered := make([]string, 0, len(rest))
-		for _, arg := range rest {
-			if arg == "--global" {
-				*global = true
-				continue
-			}
-			filtered = append(filtered, arg)
-		}
-		rest = filtered
-	}
-	if len(rest) > 0 {
-		switch strings.ToLower(strings.TrimSpace(rest[0])) {
-		case "show":
-			if len(rest) == 1 {
-				entries, err := config.List(repoRoot)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "show config failed: %v\n", err)
-					return 1
-				}
-				for _, entry := range entries {
-					fmt.Printf("%s=%s\t(scope=%s source=%s)\n", entry.Key, entry.Value, entry.Scope, entry.Source)
-				}
-				return 0
-			}
-			if len(rest) == 2 {
-				entry, err := config.Get(repoRoot, rest[1])
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "show config failed: %v\n", err)
-					return 1
-				}
-				fmt.Printf("%s=%s\t(scope=%s source=%s)\n", entry.Key, entry.Value, entry.Scope, entry.Source)
-				return 0
-			}
-			fmt.Fprintln(os.Stderr, "usage: cag config show [key]")
-			return 2
-		case "list":
-			entries, err := config.List(repoRoot)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "list config failed: %v\n", err)
-				return 1
-			}
-			for _, entry := range entries {
-				fmt.Printf("%s=%s\t(scope=%s source=%s)\n", entry.Key, entry.Value, entry.Scope, entry.Source)
-			}
-			return 0
-		case "get":
-			if len(rest) != 2 {
-				fmt.Fprintln(os.Stderr, "usage: cag config get <key>")
-				return 2
-			}
-			entry, err := config.Get(repoRoot, rest[1])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "get config failed: %v\n", err)
-				return 1
-			}
-			fmt.Printf("%s=%s\t(scope=%s source=%s)\n", entry.Key, entry.Value, entry.Scope, entry.Source)
-			return 0
-		case "set":
-			if len(rest) != 3 {
-				fmt.Fprintln(os.Stderr, "usage: cag config set <key> <value> [--global]")
-				return 2
-			}
-			entry, path, err := config.Set(repoRoot, rest[1], rest[2], *global)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "set config failed: %v\n", err)
-				return 1
-			}
-			fmt.Printf("configured %s in %s: %s=%s\n", entry.Scope, path, entry.Key, entry.Value)
-			return 0
-		case "unset":
-			if len(rest) != 2 {
-				fmt.Fprintln(os.Stderr, "usage: cag config unset <key> [--global]")
-				return 2
-			}
-			entry, path, err := config.Unset(repoRoot, rest[1], *global)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "unset config failed: %v\n", err)
-				return 1
-			}
-			fmt.Printf("removed override from %s: %s=%s (source=%s)\n", path, entry.Key, entry.Value, entry.Source)
-			return 0
-		}
-	}
-
-	if *global {
-		if len(rest) > 0 {
-			fmt.Fprintln(os.Stderr, "config --global does not accept workdir argument")
-			return 2
-		}
-		path, err := config.WriteUserEnv(strings.TrimSpace(*gatewayAddr))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "write ~/.cag/.env failed: %v\n", err)
-			return 1
-		}
-		fmt.Printf("configured user env file: %s\n", path)
-		return 0
-	}
-	workdir := resolveWorkdir(repoRoot, rest)
-	path, err := config.WriteDefaultEnv(repoRoot, workdir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "write .env failed: %v\n", err)
-		return 1
-	}
-	fmt.Printf("configured env file: %s\n", path)
 	return 0
 }
 
@@ -831,6 +590,12 @@ func runRestart(repoRoot string, args []string) int {
 		}
 		requestedLog := strings.TrimSpace(flagValue(args, "--log-file"))
 		grpcRes, gerr := tryRestartViaGRPC(repoRoot, requestedLog)
+		if gerr == nil && grpcRes != nil && !grpcRes.GetOk() && shouldRefreshGatewaydForRestart(grpcRes.GetError()) {
+			_, _ = shutdownManagedGatewayd(repoRoot)
+			if ensureErr := ensureGatewaydRunning(repoRoot); ensureErr == nil {
+				grpcRes, gerr = tryRestartViaGRPC(repoRoot, requestedLog)
+			}
+		}
 		if gerr != nil {
 			if jsonOut {
 				printJSONActionError("restart", "gateway_unreachable", formatGatewayUnavailable(gerr))
@@ -951,6 +716,11 @@ func runRestart(repoRoot string, args []string) int {
 	}
 	printJSON(statusJSON("restart", after, cfg, logPath))
 	return 0
+}
+
+func shouldRefreshGatewaydForRestart(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(lower, "fork/exec") && strings.Contains(lower, "no such file or directory")
 }
 
 func runHealth(repoRoot string, args []string) int {
@@ -1359,7 +1129,7 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	}
 	meta := st.SessionMeta[key]
 	resolvedWorkdir := ""
-	if wd, err := normalizeWorkdirPath(cfg.RepoRoot, workdirOverride); err != nil {
+	if wd, err := normalizeWorkdirPath("", workdirOverride); err != nil {
 		payload.OK = false
 		payload.Error = err.Error()
 		fmt.Fprintf(os.Stderr, "[WARN] cli send invalid workdir msg_id=%s session_key=%s err=%v\n", msgID, key, err)
@@ -2243,7 +2013,6 @@ func buildChannelAdapter(cfg config.AppConfig) core.ChannelAdapter {
 	switch strings.ToLower(strings.TrimSpace(cfg.ChannelType)) {
 	case "dingtalk":
 		return dingtalk.NewAdapter(dingtalk.Options{
-			RepoRoot:              cfg.RepoRoot,
 			FetchMaxEvents:        cfg.DingTalkFetchMax,
 			DMPolicy:              cfg.DingTalkDMPolicy,
 			GroupPolicy:           cfg.DingTalkGroupPolicy,
@@ -2371,7 +2140,7 @@ func waitForRunningStatus(repoRoot string, timeout time.Duration) (StatusPayload
 }
 
 func loadEnvDefaults(repoRoot string) {
-	_ = envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env"))
+	_ = repoRoot
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
 		return
@@ -2430,13 +2199,19 @@ func statusMetadataString(p StatusPayload, key string) string {
 }
 
 func effectiveStatusChannel(p StatusPayload, cfg config.AppConfig) string {
-	_ = cfg
-	return statusMetadataString(p, "channel")
+	channel := statusMetadataString(p, "channel")
+	if channel != "" {
+		return channel
+	}
+	return strings.TrimSpace(cfg.ChannelType)
 }
 
 func effectiveStatusWorkdir(p StatusPayload, cfg config.AppConfig) string {
-	_ = cfg
-	return statusMetadataString(p, "workdir")
+	workdir := statusMetadataString(p, "workdir")
+	if workdir != "" {
+		return workdir
+	}
+	return strings.TrimSpace(cfg.Workdir)
 }
 
 func effectiveStatusLockFile(p StatusPayload, cfg config.AppConfig) string {
@@ -2528,16 +2303,16 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 		})
 	}
 
-	envPath := filepath.Join(repoRoot, ".env")
+	envPath := filepath.Join(config.CAGHomeDir(), ".env")
 	if _, err := os.Stat(envPath); err != nil {
-		add("env", false, ".env missing", "run `cag config` first")
+		add("env", false, "~/.cag/.env missing", "run `cag config` first")
 		return p
 	}
-	add("env", true, ".env loaded", "")
+	add("env", true, "~/.cag/.env loaded", "")
 
 	cfg, err := config.Load(repoRoot, "")
 	if err != nil {
-		add("config", false, err.Error(), "fix .env values and re-run")
+		add("config", false, err.Error(), "fix ~/.cag/.env values and re-run")
 		return p
 	}
 	p.Channel = cfg.ChannelType
@@ -2567,12 +2342,12 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 			add("imessage.binary", true, "imsg ready", "")
 		}
 		if strings.TrimSpace(cfg.IMessageFetchCmd) == "" {
-			add("imessage.fetch_cmd", false, "IMESSAGE_FETCH_CMD is empty", "set IMESSAGE_FETCH_CMD in .env")
+			add("imessage.fetch_cmd", false, "IMESSAGE_FETCH_CMD is empty", "set IMESSAGE_FETCH_CMD in ~/.cag/.env")
 		} else {
 			add("imessage.fetch_cmd", true, "IMESSAGE_FETCH_CMD configured", "")
 		}
 		if strings.TrimSpace(cfg.IMessageSendCmd) == "" {
-			add("imessage.send_cmd", false, "IMESSAGE_SEND_CMD is empty", "set IMESSAGE_SEND_CMD in .env")
+			add("imessage.send_cmd", false, "IMESSAGE_SEND_CMD is empty", "set IMESSAGE_SEND_CMD in ~/.cag/.env")
 		} else {
 			add("imessage.send_cmd", true, "IMESSAGE_SEND_CMD configured", "")
 		}

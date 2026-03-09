@@ -19,6 +19,8 @@ Example:
 - `channel` is only an ingress/egress endpoint.
 - `binding` is explicit.
 - `runtime` is long-lived per session.
+- control-plane config and runtime state live under `~/.cag`.
+- `session.workdir` is the only task working directory concept.
 - No routing by heuristic derivation.
 - No implicit write routing to `latest`.
 
@@ -130,6 +132,14 @@ This is the key change from the old stateless-per-send model.
 - `storage`
   - persists sessions, bindings, interactions, reports
 
+## Control-Plane Home
+
+- `gatewayd` is user-scoped, not repo-scoped.
+- Runtime state, logs, SQLite, and operator config live under `~/.cag/`.
+- Managed `gatewayd` state is recorded in one global file under `~/.cag/gatewayd/`; it must not fork by repo.
+- Control-plane RPCs must not accept per-request `repo_root` overrides.
+- Relative session workdirs should be normalized in the CLI before the request is sent.
+
 ## Observability
 
 The system should expose:
@@ -150,8 +160,11 @@ The product command tree should converge to:
 - `cag channel ...`
 - `cag binding ...`
 - `cag runtime ...`
+- `cag config`
 
 Old flat commands are legacy and should not receive new behavior.
+
+Migration-only control-plane commands may still exist, but they should be hidden from the primary help surface and treated as internal operator entrypoints.
 
 ## Design Constraints
 

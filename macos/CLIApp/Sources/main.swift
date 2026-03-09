@@ -291,7 +291,7 @@ final class GatewayController: ObservableObject {
     @Published var accessUsers: [AccessUserEntry] = []
     @Published var timelineByMsgId: [String: [ProcessEvent]] = [:]
     @Published var localDraftText: String = ""
-    @Published var localSending: Bool = false
+    @Published private var sendingSessionKeys: Set<String> = []
     @Published var componentChecks: [ComponentStatus] = []
     @Published var currentLogFile: String = ""
     @Published var gatewayAddressText: String = ""
@@ -308,6 +308,7 @@ final class GatewayController: ObservableObject {
     private let sessionWorkdirDefaultsPrefix = "gateway.session_workdir"
     private var sessionWorkdirByKey: [String: String] = [:]
     private var localOverlayMessagesBySession: [String: [ChatMessage]] = [:]
+    private var localSendStartedAtBySession: [String: Date] = [:]
     private var lastLocalSendFingerprint: String = ""
     private var lastLocalSendAt: Date = .distantPast
     private var didAutoStartOnLaunch = false
@@ -970,6 +971,36 @@ final class GatewayController: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async(execute: block)
     }
 
+    private func setSessionSending(_ sending: Bool, sessionKey: String, startedAt: Date? = nil) {
+        let key = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        if sending {
+            sendingSessionKeys.insert(key)
+            localSendStartedAtBySession[key] = startedAt ?? localSendStartedAtBySession[key] ?? Date()
+        } else {
+            sendingSessionKeys.remove(key)
+            localSendStartedAtBySession.removeValue(forKey: key)
+        }
+    }
+
+    func isSessionSending(_ sessionKey: String?) -> Bool {
+        let key = sessionKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !key.isEmpty else { return false }
+        return sendingSessionKeys.contains(key)
+    }
+
+    func activeSendDetailText(for sessionKey: String?, now: Date = Date()) -> String? {
+        let key = sessionKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !key.isEmpty, sendingSessionKeys.contains(key) else { return nil }
+        let base = "Agent is thinking..."
+        guard let startedAt = localSendStartedAtBySession[key] else { return base }
+        let elapsed = max(0, Int(now.timeIntervalSince(startedAt)))
+        if elapsed < 5 {
+            return base
+        }
+        return "\(base) \(elapsed)s"
+    }
+
     private func beginRefresh(kind: String) -> Bool {
         refreshLock.lock()
         defer { refreshLock.unlock() }
@@ -1402,13 +1433,23 @@ final class GatewayController: ObservableObject {
 
     func refreshStatus() {
         let t0 = Date()
-        let res = cagJSON("status")
-        guard let node = res.json else {
+        let primary = cagJSON("runtime", args: ["status"])
+        let fallback = cagJSON("status")
+        let node = primary.json.flatMap { payload -> [String: Any]? in
+            if payload["status"] != nil || payload["running"] != nil {
+                return payload
+            }
+            return nil
+        } ?? fallback.json
+
+        guard let node else {
             onMain { [weak self] in
                 guard let self else { return }
                 self.statusText = "Unknown"
                 self.activeChannelText = self.selectedChannel.title
-                self.detailText = "Status command failed.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
+                let raw = primary.raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                let fallbackRaw = fallback.raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.detailText = "Status command failed.\n\((raw.isEmpty ? fallbackRaw : raw))"
             }
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
             log("refresh result kind=status status=parse_failed elapsed_ms=\(ms)")
@@ -1533,13 +1574,26 @@ final class GatewayController: ObservableObject {
     private func mergedMessages(persisted: [ChatMessage], overlay: [ChatMessage]) -> [ChatMessage] {
         var merged = persisted
         for msg in overlay {
-            if !merged.contains(where: { $0.id == msg.id }) {
-                if !msg.sourceMsgId.isEmpty &&
-                    merged.contains(where: { $0.sourceMsgId == msg.sourceMsgId && $0.role == msg.role }) {
-                    continue
+            if let idx = merged.firstIndex(where: { existing in
+                if existing.id == msg.id {
+                    return true
                 }
-                merged.append(msg)
+                if msg.sourceMsgId.isEmpty {
+                    return false
+                }
+                return existing.sourceMsgId == msg.sourceMsgId && existing.role == msg.role
+            }) {
+                let existing = merged[idx]
+                let shouldPreferOverlay =
+                    msg.deliveryStatus == .processing ||
+                    msg.deliveryStatus == .failed ||
+                    (existing.deliveryStatus == nil && msg.deliveryStatus != nil)
+                if shouldPreferOverlay {
+                    merged[idx] = msg
+                }
+                continue
             }
+            merged.append(msg)
         }
         return renderMessages(merged)
     }
@@ -1749,7 +1803,7 @@ final class GatewayController: ObservableObject {
         let sendArgs = ["send", "--key", baseSessionKey, "--message-id", userMsgId, "--text", text]
         cagJSONAsync("session", args: sendArgs, timeoutSec: timeout) { [weak self] result in
             guard let self else { return }
-            self.localSending = false
+            self.setSessionSending(false, sessionKey: selectedSessionKey)
             guard let node = result.json else {
                 self.updateOverlayMessage(
                     sessionKey: selectedSessionKey,
@@ -1799,12 +1853,12 @@ final class GatewayController: ObservableObject {
     func sendLocalChat() {
         var text = localDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        guard !localSending else { return }
         guard let session = selectedSessionEntry() else {
             detailText = "Select a gateway session first."
             return
         }
         let selectedSessionKey = session.sessionKey
+        guard !isSessionSending(selectedSessionKey) else { return }
         let sendFingerprint = "\(selectedSessionKey)|\(text)"
         let now = Date()
         if sendFingerprint == lastLocalSendFingerprint, now.timeIntervalSince(lastLocalSendAt) < 1.2 {
@@ -1818,11 +1872,11 @@ final class GatewayController: ObservableObject {
 
         if let cmd = command {
             if cmd.cmd == "/clear" {
-                localSending = true
+                setSessionSending(true, sessionKey: selectedSessionKey, startedAt: Date())
                 localDraftText = ""
                 clearSessionMappingAsync(baseSessionKey: baseSessionKey) { [weak self] cleared in
                     guard let self else { return }
-                    self.localSending = false
+                    self.setSessionSending(false, sessionKey: selectedSessionKey)
                     self.appendLocalActionMessage(
                         cleared ? "Action /clear: session mapping reset." : "Action /clear failed: cannot update state file.",
                         sessionKey: selectedSessionKey
@@ -1833,11 +1887,11 @@ final class GatewayController: ObservableObject {
                 return
             }
             if cmd.payload.isEmpty {
-                localSending = true
+                setSessionSending(true, sessionKey: selectedSessionKey, startedAt: Date())
                 localDraftText = ""
                 clearSessionMappingAsync(baseSessionKey: baseSessionKey) { [weak self] cleared in
                     guard let self else { return }
-                    self.localSending = false
+                    self.setSessionSending(false, sessionKey: selectedSessionKey)
                     self.appendLocalActionMessage(
                         cleared ? "Action /new: session reset." : "Action /new warning: reset failed.",
                         sessionKey: selectedSessionKey
@@ -1860,14 +1914,14 @@ final class GatewayController: ObservableObject {
             role: "user",
             text: text,
             time: nowIso,
-            deliveryStatus: .sending,
+            deliveryStatus: .processing,
             statusDetail: ""
         )
         appendOverlayMessage(localUser, sessionKey: selectedSessionKey)
         localDraftText = ""
-        localSending = true
+        setSessionSending(true, sessionKey: selectedSessionKey, startedAt: Date())
         if baseSessionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            localSending = false
+            setSessionSending(false, sessionKey: selectedSessionKey)
             detailText = "Send failed: missing session key."
             updateOverlayMessage(
                 sessionKey: selectedSessionKey,
@@ -2409,6 +2463,9 @@ struct ChatBubble: View {
             Text(isUser ? "You" : "Assistant")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
+            if !isUser, message.deliveryStatus == .processing {
+                ProcessingIndicator()
+            }
             if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(message.text)
                     .font(.system(size: 12))
@@ -2417,11 +2474,6 @@ struct ChatBubble: View {
             if isUser, message.deliveryStatus != .processing, !deliveryText.isEmpty {
                 Text(deliveryText)
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(deliveryColor)
-            }
-            if !isUser, message.deliveryStatus == .processing {
-                Text(deliveryText)
-                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(deliveryColor)
             }
             if isUser, message.deliveryStatus == .failed, !message.statusDetail.isEmpty {
@@ -2481,6 +2533,25 @@ struct ChatBubble: View {
                     }
                     if !isUser { Spacer(minLength: 30) }
                 }
+            }
+        }
+    }
+}
+
+struct ProcessingIndicator: View {
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.35)) { context in
+            let phase = Int(context.date.timeIntervalSinceReferenceDate / 0.35) % 3
+            HStack(spacing: 6) {
+                ForEach(0..<3, id: \.self) { idx in
+                    Circle()
+                        .fill(idx == phase ? Color.accentColor : Color.accentColor.opacity(0.24))
+                        .frame(width: 7, height: 7)
+                        .scaleEffect(idx == phase ? 1.0 : 0.78)
+                }
+                Text("Processing...")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
             }
         }
     }
@@ -3165,6 +3236,7 @@ struct ContentView: View {
     @State private var showLogDrawer = false
     @State private var timelineMessage: ChatMessage?
     @State private var refreshTick: Int = 0
+    @State private var showDeleteAllConfirmation = false
 
     init(controller: GatewayController) {
         _controller = StateObject(wrappedValue: controller)
@@ -3174,6 +3246,14 @@ struct ContentView: View {
 
     private var statusColor: Color {
         controller.statusText == "Running" ? .green : (controller.statusText == "Blocked" ? .orange : .gray)
+    }
+
+    private var selectedSessionSending: Bool {
+        controller.isSessionSending(controller.selectedSessionKey)
+    }
+
+    private var detailBannerText: String {
+        controller.activeSendDetailText(for: controller.selectedSessionKey) ?? controller.detailText
     }
 
     private func scrollChatToLatest(_ proxy: ScrollViewProxy) {
@@ -3244,10 +3324,14 @@ struct ContentView: View {
                         IconActionButton(systemName: "folder", helpText: "Set selected gateway session workdir", tint: .secondary, disabled: controller.selectedSessionKey == nil) {
                             controller.updateSelectedSessionWorkdir()
                         }
-                        IconActionButton(systemName: "trash", helpText: "Delete all gateway sessions", tint: .red) {
-                            controller.deleteAllSessions()
+                        IconActionButton(systemName: "trash", helpText: "Delete all listed gateway sessions", tint: .red) {
+                            showDeleteAllConfirmation = true
                         }
                     }
+                    Text("Trash deletes all listed sessions. To delete only the selected session, use that row's context menu.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                     Text("Gateway Session Workdir: \(controller.selectedSessionWorkdir.isEmpty ? "(not set)" : controller.selectedSessionWorkdir)")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
@@ -3289,7 +3373,7 @@ struct ContentView: View {
                         Text("Chat")
                             .font(.title3.weight(.semibold))
                         Spacer()
-                        Text(controller.detailText)
+                        Text(detailBannerText)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
@@ -3330,11 +3414,11 @@ struct ContentView: View {
                                 controller.sendLocalChat()
                             }
                         IconActionButton(
-                            systemName: controller.localSending ? "hourglass" : "paperplane.fill",
-                            helpText: controller.localSending ? "Sending message" : "Send message",
+                            systemName: selectedSessionSending ? "hourglass" : "paperplane.fill",
+                            helpText: selectedSessionSending ? "Sending message" : "Send message",
                             tint: .blue,
                             disabled: controller.selectedSessionKey == nil
-                                || controller.localSending
+                                || selectedSessionSending
                                 || controller.localDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         ) {
                             controller.sendLocalChat()
@@ -3368,7 +3452,7 @@ struct ContentView: View {
         .onReceive(refreshTimer) { _ in
             refreshTick += 1
             controller.refreshStatusAsync()
-            if controller.localSending {
+            if controller.isSessionSending(controller.selectedSessionKey) {
                 controller.refreshSelectedSessionChatAsync()
             }
             if refreshTick % 3 == 0 {
@@ -3380,6 +3464,14 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showConfig) {
             ConfigView(controller: controller, initialChannel: configInitialChannel)
+        }
+        .alert("Delete All Gateway Sessions?", isPresented: $showDeleteAllConfirmation) {
+            Button("Delete All", role: .destructive) {
+                controller.deleteAllSessions()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes every listed session, not just the selected one. To delete a single session, use that session row's context menu.")
         }
         .sheet(item: $timelineMessage) { msg in
             ProcessTimelineView(message: msg, events: controller.timeline(for: msg))
@@ -3412,13 +3504,17 @@ struct ContentView: View {
 
 final class AppBootstrap: ObservableObject {
     let controller: GatewayController?
+    let initErrorText: String?
 
     init() {
-        controller = try? GatewayController()
-        if controller == nil {
-            GUILogger.shared.log("bootstrap controller init failed")
-        } else {
+        do {
+            controller = try GatewayController()
+            initErrorText = nil
             GUILogger.shared.log("bootstrap controller init ok")
+        } catch {
+            controller = nil
+            initErrorText = error.localizedDescription
+            GUILogger.shared.log("bootstrap controller init failed err=\(error.localizedDescription)")
         }
     }
 }
@@ -3434,9 +3530,10 @@ struct CLIAppMain: App {
             } else {
                 VStack(spacing: 10) {
                     Text("Failed to load app configuration.")
-                    Text("Rebuild app from repository scripts.")
+                    Text(bootstrap.initErrorText ?? "Rebuild app from repository scripts.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                 }
                 .padding(20)
                 .frame(width: 420, height: 160)

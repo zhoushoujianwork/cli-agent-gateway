@@ -1,18 +1,23 @@
-# CLI Spec Preview (Session / Channel / Binding / Runtime)
+# CLI Spec Preview (Cobra Transition)
 
 This document is the vNext command preview.
 
-It defines the target command tree and command purpose.
+It defines the target Cobra command tree, command purpose, and migration policy.
 
 Status:
 
-- design target only
-- not a claim that all commands already exist
-- old flat commands are legacy and should be sunset
+- design target for the current refactor
+- grouped commands are the only user-facing product surface
+- flat compatibility commands are legacy and should be sunset
+- internal control-plane commands may still exist during migration
+- control-plane config lives under `~/.cag`
+- `session.workdir` is explicit per session
 
 ## Command Tree
 
 ```text
+cag config
+
 cag session create
 cag session delete
 cag session list
@@ -37,6 +42,55 @@ cag runtime ps
 cag runtime logs
 ```
 
+## Root-Level Policy
+
+The Cobra root should expose only these user-facing top-level commands:
+
+- `cag config`
+- `cag session`
+- `cag channel`
+- `cag binding`
+- `cag runtime`
+
+These five commands are the stable product surface.
+
+Other commands fall into migration-only categories:
+
+- `internal` commands
+  - used by GUI bootstrap, gatewayd lifecycle, or operator workflows
+  - may remain callable during migration
+  - should be hidden from normal help output
+- `legacy` commands
+  - compatibility shims for old flat names
+  - must not gain new product behavior
+  - should print actionable migration guidance
+
+Recommended hidden/internal command set during migration:
+
+- `cag doctor`
+- `cag health`
+- `cag gatewayd`
+- `cag gatewayd-up`
+- `cag gatewayd-down`
+- `cag users`
+- `cag user-allow`
+- `cag user-block`
+- `cag run`
+- `cag start`
+- `cag stop`
+- `cag restart`
+
+Recommended legacy compatibility set during migration:
+
+- `cag send`
+- `cag sessions`
+- `cag messages`
+- `cag session-new`
+- `cag session-clear`
+- `cag session-delete`
+- `cag sessions-delete-all`
+- `cag actions`
+
 ## Command Registry
 
 Each command must keep four annotations:
@@ -47,6 +101,14 @@ Each command must keep four annotations:
 - `sunset_group`
 
 These annotations exist so an obsolete command family can be removed in one pass.
+
+## Control-Plane Rules
+
+- grouped commands talk to one user-scoped `gatewayd`
+- command RPCs must not carry `repo_root`
+- control-plane state/log/config live under `~/.cag`
+- a repo checkout may be the shell cwd, but it is not a control-plane identity
+- hidden/internal commands should not be described as the primary product workflow
 
 ## Session Commands
 
@@ -62,6 +124,7 @@ These annotations exist so an obsolete command family can be removed in one pass
 - result:
   - creates session metadata
   - does not require a channel binding yet
+  - `--workdir` should be normalized before the request is sent
 
 ### `cag session delete`
 
@@ -275,3 +338,4 @@ Rules:
 - keep them stable only as needed during migration
 - do not add new product semantics there
 - all new product behavior must land in grouped commands
+- Cobra help should de-emphasize or hide them

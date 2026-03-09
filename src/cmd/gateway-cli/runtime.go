@@ -2,80 +2,107 @@ package main
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
 	"cli-agent-gateway/internal/utils/sessionctl"
+	"github.com/spf13/cobra"
 )
 
-func runRuntimeCommand(repoRoot string, args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "runtime requires a subcommand")
-		return 2
+func newRuntimeCmd(repoRoot string) *cobra.Command {
+	cmd := newGroupCmd("runtime", "Inspect live session runtimes")
+	cmd.AddCommand(
+		newRuntimeStatusCmd(repoRoot),
+		newRuntimePSCmd(repoRoot),
+		newRuntimeLogsCmd(repoRoot),
+	)
+	return cmd
+}
+
+func newRuntimeStatusCmd(repoRoot string) *cobra.Command {
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:          "status",
+		Short:        "Show global runtime status",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "runtime.status", jsonOut, &gatewayv1.ActionRequest{}))
+		},
 	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "status":
-		fs := flag.NewFlagSet("runtime status", flag.ContinueOnError)
-		jsonOut := fs.Bool("json", false, "json output")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		return runAction(repoRoot, "runtime.status", *jsonOut, &gatewayv1.ActionRequest{})
-	case "ps":
-		fs := flag.NewFlagSet("runtime ps", flag.ContinueOnError)
-		jsonOut := fs.Bool("json", false, "json output")
-		sessionKey := fs.String("session-key", "", "session filter")
-		includeDetached := fs.Bool("include-detached", false, "include detached entries")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		return runAction(repoRoot, "runtime.ps", *jsonOut, &gatewayv1.ActionRequest{
-			SessionKey:      *sessionKey,
-			IncludeArchived: *includeDetached,
-		})
-	case "logs":
-		fs := flag.NewFlagSet("runtime logs", flag.ContinueOnError)
-		jsonOut := fs.Bool("json", false, "json output")
-		follow := fs.Bool("follow", false, "follow logs")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		resp, err := tryActionViaGRPC(repoRoot, &gatewayv1.ActionRequest{Action: "runtime.logs"})
-		if err != nil {
-			if *jsonOut {
-				printJSONActionError("runtime.logs", "gateway_unreachable", formatGatewayUnavailable(err))
-			} else {
-				fmt.Fprintf(os.Stderr, "runtime logs failed: %s\n", formatGatewayUnavailable(err))
-			}
-			return 1
-		}
-		payload, err := decodeActionPayload(resp)
-		if err != nil {
-			if *jsonOut {
-				printJSONActionError("runtime.logs", "decode_failed", err.Error())
-			} else {
-				fmt.Fprintf(os.Stderr, "runtime logs failed: %v\n", err)
-			}
-			return 1
-		}
-		if *jsonOut {
-			printJSON(payload)
-			return 0
-		}
-		logFile := sessionctl.CleanString(payload["log_file"])
-		if !*follow {
-			fmt.Println(logFile)
-			return 0
-		}
-		return followFile(logFile)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown runtime subcommand: %s\n", args[0])
-		return 2
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	return cmd
+}
+
+func newRuntimePSCmd(repoRoot string) *cobra.Command {
+	var jsonOut bool
+	var sessionKey string
+	var includeDetached bool
+
+	cmd := &cobra.Command{
+		Use:          "ps",
+		Short:        "List live session runtimes",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "runtime.ps", jsonOut, &gatewayv1.ActionRequest{
+				SessionKey:      sessionKey,
+				IncludeArchived: includeDetached,
+			}))
+		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	cmd.Flags().StringVar(&sessionKey, "session-key", "", "session filter")
+	cmd.Flags().BoolVar(&includeDetached, "include-detached", false, "include detached entries")
+	return cmd
+}
+
+func newRuntimeLogsCmd(repoRoot string) *cobra.Command {
+	var jsonOut bool
+	var follow bool
+
+	cmd := &cobra.Command{
+		Use:          "logs",
+		Short:        "Show runtime logs",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := tryActionViaGRPC(repoRoot, &gatewayv1.ActionRequest{Action: "runtime.logs"})
+			if err != nil {
+				if jsonOut {
+					printJSONActionError("runtime.logs", "gateway_unreachable", formatGatewayUnavailable(err))
+				} else {
+					fmt.Fprintf(cmd.ErrOrStderr(), "runtime logs failed: %s\n", formatGatewayUnavailable(err))
+				}
+				return cliExitError{code: 1}
+			}
+			payload, err := decodeActionPayload(resp)
+			if err != nil {
+				if jsonOut {
+					printJSONActionError("runtime.logs", "decode_failed", err.Error())
+				} else {
+					fmt.Fprintf(cmd.ErrOrStderr(), "runtime logs failed: %v\n", err)
+				}
+				return cliExitError{code: 1}
+			}
+			if jsonOut {
+				printJSON(payload)
+				return nil
+			}
+			logFile := sessionctl.CleanString(payload["log_file"])
+			if !follow {
+				fmt.Fprintln(cmd.OutOrStdout(), logFile)
+				return nil
+			}
+			return exitCodeToError(followFile(logFile))
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	cmd.Flags().BoolVar(&follow, "follow", false, "follow logs")
+	return cmd
 }
 
 func followFile(path string) int {

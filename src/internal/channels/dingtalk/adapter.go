@@ -25,7 +25,6 @@ import (
 )
 
 type Options struct {
-	RepoRoot              string
 	FetchMaxEvents        int
 	DMPolicy              string
 	GroupPolicy           string

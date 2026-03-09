@@ -34,7 +34,6 @@ type gatewaydState struct {
 	PID       int    `json:"pid"`
 	Listen    string `json:"listen"`
 	StartedAt string `json:"started_at"`
-	RepoRoot  string `json:"repo_root"`
 }
 
 type gatewayControlServer struct {
@@ -45,16 +44,15 @@ type gatewayControlServer struct {
 }
 
 func (s *gatewayControlServer) Status(_ context.Context, req *gatewayv1.StatusRequest) (*gatewayv1.StatusResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
-	payload, err := getStatusPayload(root)
+	payload, err := getStatusPayload(s.repoRoot)
 	if err != nil {
 		return &gatewayv1.StatusResponse{Ok: false, Error: err.Error()}, nil
 	}
-	cfg, err := config.Load(root, "")
+	cfg, err := config.Load(s.repoRoot, "")
 	if err != nil {
 		return &gatewayv1.StatusResponse{Ok: false, Error: err.Error()}, nil
 	}
-	logFile := strings.TrimSpace(resolveLogPath(root, nil))
+	logFile := strings.TrimSpace(resolveLogPath(s.repoRoot, nil))
 	if v, ok := payload.Metadata["log_file"].(string); ok && strings.TrimSpace(v) != "" {
 		logFile = strings.TrimSpace(v)
 	}
@@ -89,12 +87,11 @@ func (s *gatewayControlServer) SessionNew(_ context.Context, req *gatewayv1.Sess
 }
 
 func (s *gatewayControlServer) Start(_ context.Context, req *gatewayv1.StatusRequest) (*gatewayv1.StatusResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
 	args := []string{"start", "--json"}
 	if logFile := strings.TrimSpace(req.GetLogFile()); logFile != "" {
 		args = append(args, "--log-file", logFile)
 	}
-	node, err := runLocalJSONAction(root, args...)
+	node, err := runLocalJSONAction(s.repoRoot, args...)
 	if err != nil {
 		return &gatewayv1.StatusResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -102,12 +99,11 @@ func (s *gatewayControlServer) Start(_ context.Context, req *gatewayv1.StatusReq
 }
 
 func (s *gatewayControlServer) Stop(_ context.Context, req *gatewayv1.StatusRequest) (*gatewayv1.StatusResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
 	args := []string{"stop", "--json"}
 	if req.GetQuiet() {
 		args = append(args, "--quiet")
 	}
-	node, err := runLocalJSONAction(root, args...)
+	node, err := runLocalJSONAction(s.repoRoot, args...)
 	if err != nil {
 		return &gatewayv1.StatusResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -115,12 +111,11 @@ func (s *gatewayControlServer) Stop(_ context.Context, req *gatewayv1.StatusRequ
 }
 
 func (s *gatewayControlServer) Restart(_ context.Context, req *gatewayv1.StatusRequest) (*gatewayv1.StatusResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
 	args := []string{"restart", "--json"}
 	if logFile := strings.TrimSpace(req.GetLogFile()); logFile != "" {
 		args = append(args, "--log-file", logFile)
 	}
-	node, err := runLocalJSONAction(root, args...)
+	node, err := runLocalJSONAction(s.repoRoot, args...)
 	if err != nil {
 		return &gatewayv1.StatusResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -128,12 +123,11 @@ func (s *gatewayControlServer) Restart(_ context.Context, req *gatewayv1.StatusR
 }
 
 func (s *gatewayControlServer) Health(_ context.Context, req *gatewayv1.HealthCheckRequest) (*gatewayv1.HealthCheckResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
 	args := []string{"health", "--json"}
 	if req.GetIncludePaths() {
 		args[0] = "doctor"
 	}
-	node, err := runLocalJSONAction(root, args...)
+	node, err := runLocalJSONAction(s.repoRoot, args...)
 	if err != nil {
 		return &gatewayv1.HealthCheckResponse{Ok: false, Error: err.Error(), Action: "health", Status: "failed"}, nil
 	}
@@ -141,8 +135,7 @@ func (s *gatewayControlServer) Health(_ context.Context, req *gatewayv1.HealthCh
 }
 
 func (s *gatewayControlServer) Doctor(_ context.Context, req *gatewayv1.HealthCheckRequest) (*gatewayv1.HealthCheckResponse, error) {
-	root := resolveReqRoot(s.repoRoot, req.GetRepoRoot())
-	node, err := runLocalJSONAction(root, "doctor", "--json")
+	node, err := runLocalJSONAction(s.repoRoot, "doctor", "--json")
 	if err != nil {
 		return &gatewayv1.HealthCheckResponse{Ok: false, Error: err.Error(), Action: "doctor", Status: "failed"}, nil
 	}
@@ -170,8 +163,8 @@ func (s *gatewayControlServer) DeleteAllSessions(_ context.Context, req *gateway
 }
 
 func (s *gatewayControlServer) mutateSession(repoRoot, sessionKey string, fn func(config.AppConfig, string) error) (*gatewayv1.SessionMutationResponse, error) {
-	root := resolveReqRoot(s.repoRoot, repoRoot)
-	cfg, err := config.Load(root, "")
+	_ = repoRoot
+	cfg, err := config.Load(s.repoRoot, "")
 	if err != nil {
 		return &gatewayv1.SessionMutationResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -334,17 +327,12 @@ func runGatewayd(repoRoot string, args []string) int {
 	fs := flag.NewFlagSet("gatewayd", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	listen := fs.String("listen", gatewaydAddr(), "gRPC listen address")
-	defaultRoot := fs.String("repo-root", repoRoot, "default repository root")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	addr := strings.TrimSpace(*listen)
 	if addr == "" {
 		addr = defaultGatewaydAddr
-	}
-	root := strings.TrimSpace(*defaultRoot)
-	if root == "" {
-		root = repoRoot
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -354,7 +342,7 @@ func runGatewayd(repoRoot string, args []string) int {
 	defer ln.Close()
 
 	srv := grpc.NewServer()
-	gatewayv1.RegisterGatewayControlServer(srv, &gatewayControlServer{repoRoot: root, managers: map[string]*sessionctl.RuntimeManager{}})
+	gatewayv1.RegisterGatewayControlServer(srv, &gatewayControlServer{repoRoot: repoRoot, managers: map[string]*sessionctl.RuntimeManager{}})
 	fmt.Printf("gatewayd listening=%s\n", addr)
 	if err := srv.Serve(ln); err != nil {
 		fmt.Fprintf(os.Stderr, "gatewayd serve failed: %v\n", err)
@@ -478,7 +466,7 @@ func startManagedGatewayd(repoRoot, addr string) error {
 	}
 	defer logFile.Close()
 
-	cmd := exec.Command(exe, "gatewayd", "--listen", addr, "--repo-root", repoRoot)
+	cmd := exec.Command(exe, "gatewayd", "--listen", addr)
 	cmd.Dir = managedGatewaydWorkdir()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -493,7 +481,6 @@ func startManagedGatewayd(repoRoot, addr string) error {
 		PID:       pid,
 		Listen:    addr,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
-		RepoRoot:  repoRoot,
 	}); err != nil {
 		return err
 	}
@@ -550,12 +537,86 @@ func gatewaydStatePathForHome(home, repoRoot string) string {
 	return filepath.Join(home, ".cag", "gatewayd", gatewaydStateFileName)
 }
 
-func legacyGatewaydStatePath(repoRoot string) string {
+func loadGatewaydState(repoRoot string) (gatewaydState, error) {
+	path := gatewaydStatePath(repoRoot)
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		var state gatewaydState
+		if err := json.Unmarshal(raw, &state); err != nil {
+			return gatewaydState{}, err
+		}
+		return state, nil
+	}
+	if !os.IsNotExist(err) {
+		return gatewaydState{}, err
+	}
+	if migrated, migrateErr := migrateLegacyGatewaydState(repoRoot); migrateErr != nil {
+		return gatewaydState{}, migrateErr
+	} else if migrated {
+		raw, err = os.ReadFile(path)
+		if err != nil {
+			return gatewaydState{}, err
+		}
+		var state gatewaydState
+		if err := json.Unmarshal(raw, &state); err != nil {
+			return gatewaydState{}, err
+		}
+		return state, nil
+	}
+	return gatewaydState{}, os.ErrNotExist
+}
+
+func saveGatewaydState(repoRoot string, state gatewaydState) error {
+	path := gatewaydStatePath(repoRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return nil
+}
+
+func removeGatewaydState(repoRoot string) error {
+	path := gatewaydStatePath(repoRoot)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func migrateLegacyGatewaydState(repoRoot string) (bool, error) {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
 		home = os.TempDir()
 	}
-	return legacyGatewaydStatePathForHome(home, repoRoot)
+	legacyPath := legacyGatewaydStatePathForHome(home, repoRoot)
+	raw, err := os.ReadFile(legacyPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	var state gatewaydState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return false, err
+	}
+	if err := saveGatewaydState(repoRoot, state); err != nil {
+		return false, err
+	}
+	_ = os.Remove(legacyPath)
+	_ = os.Remove(filepath.Dir(legacyPath))
+	return true, nil
 }
 
 func legacyGatewaydStatePathForHome(home, repoRoot string) string {
@@ -588,62 +649,6 @@ func sanitizeStateToken(v string) string {
 	return out
 }
 
-func loadGatewaydState(repoRoot string) (gatewaydState, error) {
-	for _, path := range []string{gatewaydStatePath(repoRoot), legacyGatewaydStatePath(repoRoot)} {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return gatewaydState{}, err
-		}
-		var state gatewaydState
-		if err := json.Unmarshal(raw, &state); err != nil {
-			return gatewaydState{}, err
-		}
-		return state, nil
-	}
-	return gatewaydState{}, os.ErrNotExist
-}
-
-func saveGatewaydState(repoRoot string, state gatewaydState) error {
-	path := gatewaydStatePath(repoRoot)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	raw, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	raw = append(raw, '\n')
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	_ = removeLegacyGatewaydState(repoRoot)
-	return nil
-}
-
-func removeGatewaydState(repoRoot string) error {
-	path := gatewaydStatePath(repoRoot)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return removeLegacyGatewaydState(repoRoot)
-}
-
-func removeLegacyGatewaydState(repoRoot string) error {
-	path := legacyGatewaydStatePath(repoRoot)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	_ = os.Remove(filepath.Dir(path))
-	return nil
-}
-
 func resolveGatewaydLogPath(repoRoot string) string {
 	_ = repoRoot
 	baseDir := filepath.Join(config.CAGHomeDir(), "gatewayd")
@@ -671,7 +676,7 @@ func tryStatusViaGRPC(repoRoot string) (*gatewayv1.StatusResponse, error) {
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
 	defer cancel()
-	return cli.Status(ctx, &gatewayv1.StatusRequest{RepoRoot: repoRoot})
+	return cli.Status(ctx, &gatewayv1.StatusRequest{})
 }
 
 func tryStartViaGRPC(repoRoot, logFile string) (*gatewayv1.StatusResponse, error) {
@@ -682,10 +687,7 @@ func tryStartViaGRPC(repoRoot, logFile string) (*gatewayv1.StatusResponse, error
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	return cli.Start(ctx, &gatewayv1.StatusRequest{
-		RepoRoot: repoRoot,
-		LogFile:  strings.TrimSpace(logFile),
-	})
+	return cli.Start(ctx, &gatewayv1.StatusRequest{LogFile: strings.TrimSpace(logFile)})
 }
 
 func tryStopViaGRPC(repoRoot string, quiet bool) (*gatewayv1.StatusResponse, error) {
@@ -696,10 +698,7 @@ func tryStopViaGRPC(repoRoot string, quiet bool) (*gatewayv1.StatusResponse, err
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	return cli.Stop(ctx, &gatewayv1.StatusRequest{
-		RepoRoot: repoRoot,
-		Quiet:    quiet,
-	})
+	return cli.Stop(ctx, &gatewayv1.StatusRequest{Quiet: quiet})
 }
 
 func tryRestartViaGRPC(repoRoot, logFile string) (*gatewayv1.StatusResponse, error) {
@@ -710,10 +709,7 @@ func tryRestartViaGRPC(repoRoot, logFile string) (*gatewayv1.StatusResponse, err
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
 	defer cancel()
-	return cli.Restart(ctx, &gatewayv1.StatusRequest{
-		RepoRoot: repoRoot,
-		LogFile:  strings.TrimSpace(logFile),
-	})
+	return cli.Restart(ctx, &gatewayv1.StatusRequest{LogFile: strings.TrimSpace(logFile)})
 }
 
 func tryHealthViaGRPC(repoRoot string, includePaths bool) (*gatewayv1.HealthCheckResponse, error) {
@@ -724,10 +720,7 @@ func tryHealthViaGRPC(repoRoot string, includePaths bool) (*gatewayv1.HealthChec
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 	defer cancel()
-	return cli.Health(ctx, &gatewayv1.HealthCheckRequest{
-		RepoRoot:     repoRoot,
-		IncludePaths: includePaths,
-	})
+	return cli.Health(ctx, &gatewayv1.HealthCheckRequest{IncludePaths: includePaths})
 }
 
 func tryDoctorViaGRPC(repoRoot string, includePaths bool) (*gatewayv1.HealthCheckResponse, error) {
@@ -738,10 +731,7 @@ func tryDoctorViaGRPC(repoRoot string, includePaths bool) (*gatewayv1.HealthChec
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 	defer cancel()
-	return cli.Doctor(ctx, &gatewayv1.HealthCheckRequest{
-		RepoRoot:     repoRoot,
-		IncludePaths: includePaths,
-	})
+	return cli.Doctor(ctx, &gatewayv1.HealthCheckRequest{IncludePaths: includePaths})
 }
 
 func trySessionsViaGRPC(repoRoot string, limit int) (*gatewayv1.SessionsResponse, error) {
@@ -752,10 +742,7 @@ func trySessionsViaGRPC(repoRoot string, limit int) (*gatewayv1.SessionsResponse
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 	defer cancel()
-	return cli.Sessions(ctx, &gatewayv1.SessionsRequest{
-		RepoRoot: repoRoot,
-		Limit:    int32(limit),
-	})
+	return cli.Sessions(ctx, &gatewayv1.SessionsRequest{Limit: int32(limit)})
 }
 
 func trySendToSessionViaGRPC(repoRoot, sessionKey, text, messageID, msgType string, dryRun bool, source, workdir string) (*gatewayv1.SendToSessionResponse, error) {
@@ -767,7 +754,6 @@ func trySendToSessionViaGRPC(repoRoot, sessionKey, text, messageID, msgType stri
 	ctx, cancel := context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout())
 	defer cancel()
 	return cli.SendToSession(ctx, &gatewayv1.SendToSessionRequest{
-		RepoRoot:   repoRoot,
 		SessionKey: sessionKey,
 		Text:       text,
 		MessageId:  messageID,
@@ -787,7 +773,6 @@ func trySessionNewViaGRPC(repoRoot, sessionKey, workdir string) (*gatewayv1.Sess
 	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 	defer cancel()
 	return cli.SessionNew(ctx, &gatewayv1.SessionNewRequest{
-		RepoRoot:   repoRoot,
 		SessionKey: sessionKey,
 		Workdir:    workdir,
 	})
@@ -802,7 +787,6 @@ func trySessionMessagesViaGRPC(repoRoot, sessionKey string) (*gatewayv1.SessionM
 	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 	defer cancel()
 	return cli.SessionMessages(ctx, &gatewayv1.SessionMessagesRequest{
-		RepoRoot:   repoRoot,
 		SessionKey: sessionKey,
 	})
 }
@@ -824,7 +808,6 @@ func trySessionMutationViaGRPC(repoRoot, sessionKey, mode string) (*gatewayv1.Se
 	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 	defer cancel()
 	req := &gatewayv1.SessionKeyRequest{
-		RepoRoot:   repoRoot,
 		SessionKey: sessionKey,
 	}
 	if mode == "delete" {
@@ -841,7 +824,7 @@ func tryDeleteAllSessionsViaGRPC(repoRoot string) (*gatewayv1.SessionMutationRes
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 	defer cancel()
-	return cli.DeleteAllSessions(ctx, &gatewayv1.EmptyRepoRequest{RepoRoot: repoRoot})
+	return cli.DeleteAllSessions(ctx, &gatewayv1.EmptyRepoRequest{})
 }
 
 func grpcGatewayClient(repoRoot string) (gatewayv1.GatewayControlClient, *grpc.ClientConn, error) {
@@ -897,14 +880,6 @@ func loadGatewayAddrEnvDefaults() {
 func grpcDisabled() bool {
 	raw := strings.TrimSpace(strings.ToLower(os.Getenv("CAG_GRPC_DISABLE")))
 	return raw == "1" || raw == "true" || raw == "yes"
-}
-
-func resolveReqRoot(defaultRoot, reqRoot string) string {
-	root := strings.TrimSpace(reqRoot)
-	if root != "" {
-		return root
-	}
-	return defaultRoot
 }
 
 func sendViaSessionGRPCTimeout() time.Duration {

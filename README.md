@@ -9,6 +9,9 @@ The current design direction is session-first:
 - `channel` is only an ingress/egress endpoint
 - `binding` explicitly maps a channel conversation to a session
 - `runtime` holds the live ACP process for a session
+- control-plane config/state live under `~/.cag`
+- managed `gatewayd` state is global and recorded once under `~/.cag/gatewayd/`
+- `session.workdir` is explicit per session; there is no repo-scoped gateway identity
 
 ## Design Docs
 
