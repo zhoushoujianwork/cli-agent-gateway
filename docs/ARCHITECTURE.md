@@ -27,7 +27,7 @@ flowchart TD
 
 1. Channel adapter 接收消息并规范化。
 2. Gateway core 执行去重、鉴权、会话路由与管理指令（如 `/clear`）。
-3. ACP adapter 发起 `initialize/session/new/session/prompt`。
+3. ACP adapter 为本次执行发起一次新的 `initialize/session/new/session/prompt`。
 4. 循环处理 `session/update` 与 `session/request_permission`。
 5. Gateway 生成最终回复并通过 channel 发送。
 6. 写入状态、交互日志、任务报告供 CLI/GUI 查询。
@@ -39,13 +39,20 @@ flowchart TD
 - ACP Adapter：负责执行，不承担通道细节。
 - Storage：负责状态恢复、审计追踪与查询支持。
 
+### Gateway Session 边界
+
+- `gateway session-*` 管理的是网关侧会话条目：`session_key`、`workdir`、消息归档与删除生命周期。
+- Gateway session 不是 ACP agent 的长期 live session，也不承诺跨次 `send` 复用同一个 ACP `session_id`。
+- 每次 `send --session-key` 都视为一次新的 ACP 执行。
+- 若需要长期复用 agent 自身的对话上下文，应直接使用 agent 自身提供的 session CLI；gateway 不做隐式续接、恢复或兼容兜底。
+
 ### 观测日志（主程序）
 
 主程序（`gateway-cli run`）输出的结构化阶段日志应覆盖整条链路：
 
 1. `fetch ok`：已从 channel 拉到消息批次。
 2. `inbound accepted`：消息通过去重和鉴权。
-3. `session resolved`：会话 key/session id 已决策。
+3. `session resolved`：会话 key/workdir 已决策。
 4. `send ack ok|failed`：回执消息发送结果。
 5. `execute start`：开始交给 ACP 执行。
 6. `execute done|failed`：ACP 返回终态。

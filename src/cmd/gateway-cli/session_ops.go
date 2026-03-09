@@ -623,6 +623,7 @@ func upsertSessionMetadata(cfg config.AppConfig, key, workdir string) (SessionMu
 	if strings.TrimSpace(meta.Status) == "" {
 		meta.Status = "ready"
 	}
+	delete(st.SessionMap, key)
 	st.SessionMeta[key] = meta
 	if err := store.SaveState(st); err != nil {
 		return SessionMutationPayload{}, err
@@ -631,7 +632,6 @@ func upsertSessionMetadata(cfg config.AppConfig, key, workdir string) (SessionMu
 		OK:         true,
 		Action:     "session-new",
 		SessionKey: key,
-		SessionID:  strings.TrimSpace(st.SessionMap[key]),
 		Workdir:    meta.Workdir,
 		UpdatedAt:  meta.UpdatedAt,
 		Status:     meta.Status,

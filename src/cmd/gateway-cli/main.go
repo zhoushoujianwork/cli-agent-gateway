@@ -65,7 +65,7 @@ type SendPayload struct {
 	DryRun         bool   `json:"dry_run"`
 	Source         string `json:"source"`
 	SessionKey     string `json:"session_key,omitempty"`
-	SessionID      string `json:"session_id"`
+	SessionID      string `json:"session_id,omitempty"`
 	Result         string `json:"result,omitempty"`
 	RawOutput      string `json:"raw_output,omitempty"`
 	ResultJSON     any    `json:"result_json,omitempty"`
@@ -77,7 +77,7 @@ type SendPayload struct {
 
 type SessionsItem struct {
 	SessionKey  string `json:"session_key"`
-	SessionID   string `json:"session_id"`
+	SessionID   string `json:"session_id,omitempty"`
 	Channel     string `json:"channel"`
 	Sender      string `json:"sender"`
 	SenderName  string `json:"sender_name"`
@@ -1373,17 +1373,6 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	if st.SessionDeleted == nil {
 		st.SessionDeleted = map[string]string{}
 	}
-	sessionID := strings.TrimSpace(st.SessionMap[key])
-	if sessionID == "" {
-		cached := strings.TrimSpace(sess.SessionID)
-		if cached != "-" {
-			sessionID = cached
-		}
-	}
-	if sessionID == "" {
-		sessionID = "-"
-	}
-
 	payload := SendPayload{
 		OK:         true,
 		Channel:    nonEmpty(sess.Channel, cfg.ChannelType),
@@ -1393,7 +1382,6 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		DryRun:     dryRun,
 		Source:     source,
 		SessionKey: key,
-		SessionID:  sessionID,
 	}
 	meta := st.SessionMeta[key]
 	resolvedWorkdir := ""
@@ -1422,7 +1410,7 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		resolvedWorkdir = defaultWorkdir
 		fmt.Fprintf(os.Stderr, "[INFO] cli send default workdir initialized msg_id=%s session_key=%s workdir=%s\n", msgID, key, resolvedWorkdir)
 	}
-	fmt.Fprintf(os.Stderr, "[INFO] cli send session resolved msg_id=%s session_key=%s session_id=%s workdir=%s sender=%s\n", msgID, key, sessionID, resolvedWorkdir, nonEmpty(sess.Sender, "-"))
+	fmt.Fprintf(os.Stderr, "[INFO] cli send session resolved msg_id=%s session_key=%s workdir=%s sender=%s\n", msgID, key, resolvedWorkdir, nonEmpty(sess.Sender, "-"))
 	stInfo, err := os.Stat(resolvedWorkdir)
 	if err != nil {
 		payload.OK = false
@@ -1485,6 +1473,7 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	_ = store.AppendInteraction(map[string]any{
 		"kind":         "inbound_received",
 		"msg_id":       msgID,
+		"session_key":  key,
 		"sender":       nonEmpty(sess.Sender, "-"),
 		"text":         body,
 		"time":         now,
@@ -1498,7 +1487,6 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		"stage":       "session_resolved",
 		"msg_id":      msgID,
 		"session_key": key,
-		"session_id":  sessionID,
 		"ts":          now,
 	})
 
@@ -1509,7 +1497,6 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		Sender:     nonEmpty(sess.Sender, "-"),
 		Channel:    nonEmpty(sess.Channel, cfg.ChannelType),
 		ThreadID:   threadID,
-		SessionID:  sessionID,
 		Metadata: map[string]any{
 			"received_ts": now,
 			"message_id":  msgID,
@@ -1519,12 +1506,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		},
 	}
 	_ = store.AppendInteraction(map[string]any{
-		"kind":       "trace",
-		"stage":      "execute_start",
-		"msg_id":     msgID,
-		"session_id": req.SessionID,
-		"trace_id":   req.TraceID,
-		"ts":         time.Now().UTC().Format(time.RFC3339),
+		"kind":     "trace",
+		"stage":    "execute_start",
+		"msg_id":   msgID,
+		"trace_id": req.TraceID,
+		"ts":       time.Now().UTC().Format(time.RFC3339),
 	})
 	result, execErr := agent.Execute(req)
 	if execErr != nil {
@@ -1547,13 +1533,12 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	}
 
 	_ = store.AppendInteraction(map[string]any{
-		"kind":       "trace",
-		"stage":      "execute_done",
-		"msg_id":     msgID,
-		"session_id": result.SessionID,
-		"status":     result.Status,
-		"elapsed_s":  result.ElapsedSec,
-		"ts":         time.Now().UTC().Format(time.RFC3339),
+		"kind":      "trace",
+		"stage":     "execute_done",
+		"msg_id":    msgID,
+		"status":    result.Status,
+		"elapsed_s": result.ElapsedSec,
+		"ts":        time.Now().UTC().Format(time.RFC3339),
 	})
 	for i, ev := range result.RawEvents {
 		method := strings.TrimSpace(fmt.Sprint(ev["method"]))
@@ -1574,9 +1559,7 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		})
 	}
 
-	if strings.TrimSpace(result.SessionID) != "" {
-		st.SessionMap[key] = strings.TrimSpace(result.SessionID)
-	}
+	delete(st.SessionMap, key)
 	meta.Workdir = resolvedWorkdir
 	meta.Status = statusForSession(result.Status, result.TerminalReason)
 	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -1610,10 +1593,10 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	})
 	_ = store.AppendInteraction(map[string]any{
 		"msg_id":       msgID,
+		"session_key":  key,
 		"sender":       nonEmpty(sess.Sender, "-"),
 		"text":         body,
 		"trace_id":     req.TraceID,
-		"session_id":   result.SessionID,
 		"result":       result.Summary,
 		"raw_output":   result.OutputText,
 		"status":       result.Status,
@@ -1623,7 +1606,6 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		"user_profile": userProfile,
 	})
 
-	payload.SessionID = nonEmpty(strings.TrimSpace(result.SessionID), payload.SessionID)
 	payload.Result = strings.TrimSpace(result.Summary)
 	payload.RawOutput = result.OutputText
 	if resultNode, ok := parseResultJSON(payload.RawOutput); ok {
@@ -1631,7 +1613,7 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	}
 	payload.TerminalReason = nonEmpty(strings.TrimSpace(result.TerminalReason), terminalReasonForStatus(result.Status))
 	payload.ElapsedSec = result.ElapsedSec
-	fmt.Fprintf(os.Stderr, "[INFO] cli send done msg_id=%s session_key=%s session_id=%s status=%s elapsed=%ds\n", msgID, key, payload.SessionID, result.Status, result.ElapsedSec)
+	fmt.Fprintf(os.Stderr, "[INFO] cli send done msg_id=%s session_key=%s status=%s elapsed=%ds\n", msgID, key, result.Status, result.ElapsedSec)
 	return payload, nil
 }
 
@@ -1704,7 +1686,14 @@ func runSessions(repoRoot string, args []string) int {
 			return 0
 		}
 		for _, it := range items {
-			fmt.Printf("%s\t%s\t%s\t%s\n", it.LastTime, it.SenderName, it.Channel, it.LastMessage)
+			fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\n",
+				it.LastTime,
+				it.SessionKey,
+				nonEmpty(it.SenderName, "-"),
+				nonEmpty(it.Channel, "-"),
+				nonEmpty(it.Workdir, "-"),
+				it.LastMessage,
+			)
 		}
 		return 0
 	}
@@ -1747,7 +1736,14 @@ func runSessions(repoRoot string, args []string) int {
 		return 0
 	}
 	for _, it := range items {
-		fmt.Printf("%s\t%s\t%s\t%s\n", it.LastTime, it.SenderName, it.Channel, it.LastMessage)
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\n",
+			it.LastTime,
+			it.SessionKey,
+			nonEmpty(it.SenderName, "-"),
+			nonEmpty(it.Channel, "-"),
+			nonEmpty(it.Workdir, "-"),
+			it.LastMessage,
+		)
 	}
 	return 0
 }
@@ -1764,13 +1760,8 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 	}
 	inboundByMsg := map[string]inbound{}
 	sessionKeyByMsg := map[string]string{}
-	sessionIDByKey := map[string]string{}
 	lastByKey := map[string]SessionsItem{}
 
-	sessionMap, err := loadSessionMap(cfg)
-	if err != nil {
-		return nil, err
-	}
 	sessionMeta, err := loadSessionMeta(cfg)
 	if err != nil {
 		return nil, err
@@ -1788,17 +1779,18 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 		kind := strings.TrimSpace(fmt.Sprint(rec["kind"]))
 		switch kind {
 		case "inbound_received":
-			msgID := strings.TrimSpace(fmt.Sprint(rec["msg_id"]))
+			msgID := cleanAnyString(rec["msg_id"])
 			if msgID == "" {
 				continue
 			}
 			profile, _ := rec["user_profile"].(map[string]any)
-			channel := strings.TrimSpace(fmt.Sprint(profile["channel"]))
-			threadID := strings.TrimSpace(fmt.Sprint(profile["thread_id"]))
-			senderName := strings.TrimSpace(fmt.Sprint(profile["sender_name"]))
-			sender := strings.TrimSpace(fmt.Sprint(rec["sender"]))
-			text := strings.TrimSpace(fmt.Sprint(rec["text"]))
-			ts := strings.TrimSpace(fmt.Sprint(rec["time"]))
+			channel := cleanAnyString(profile["channel"])
+			threadID := cleanAnyString(profile["thread_id"])
+			senderName := cleanAnyString(profile["sender_name"])
+			sender := cleanAnyString(rec["sender"])
+			text := cleanAnyString(rec["text"])
+			ts := cleanAnyString(rec["time"])
+			explicitKey := cleanAnyString(rec["session_key"])
 			in := inbound{
 				msgID:      msgID,
 				sender:     sender,
@@ -1809,17 +1801,21 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 				ts:         ts,
 			}
 			inboundByMsg[msgID] = in
-			baseKey := buildSessionKey(channel, sender, threadID)
-			if isSessionDeleted(sessionDeleted, baseKey, ts) {
+			key := explicitKey
+			if key == "" {
+				baseKey := buildSessionKey(channel, sender, threadID)
+				if isSessionDeleted(sessionDeleted, baseKey, ts) {
+					continue
+				}
+				key = sessionKeyForInbound(baseKey, ts, sessionDeleted)
+			} else if isSessionDeleted(sessionDeleted, baseSessionKeyForLifecycle(key), ts) {
 				continue
 			}
-			key := sessionKeyForInbound(baseKey, ts, sessionDeleted)
 			sessionKeyByMsg[msgID] = key
 			prev, ok := lastByKey[key]
 			if !ok || ts >= prev.LastTime {
 				lastByKey[key] = SessionsItem{
 					SessionKey:  key,
-					SessionID:   "",
 					Channel:     nonEmpty(channel, "-"),
 					Sender:      nonEmpty(sender, "-"),
 					SenderName:  nonEmpty(senderName, nonEmpty(sender, "-")),
@@ -1829,21 +1825,17 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 				}
 			}
 		case "trace":
-			stage := strings.TrimSpace(fmt.Sprint(rec["stage"]))
+			stage := cleanAnyString(rec["stage"])
 			if stage != "session_resolved" {
 				continue
 			}
-			msgID := strings.TrimSpace(fmt.Sprint(rec["msg_id"]))
-			key := strings.TrimSpace(fmt.Sprint(rec["session_key"]))
+			msgID := cleanAnyString(rec["msg_id"])
+			key := cleanAnyString(rec["session_key"])
 			if msgID != "" && key != "" {
 				if isSessionDeleted(sessionDeleted, key, "") {
 					continue
 				}
 				sessionKeyByMsg[msgID] = key
-			}
-			sid := strings.TrimSpace(fmt.Sprint(rec["session_id"]))
-			if key != "" && sid != "" {
-				sessionIDByKey[key] = sid
 			}
 		}
 	}
@@ -1864,7 +1856,6 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 		if !ok || in.ts >= prev.LastTime {
 			lastByKey[key] = SessionsItem{
 				SessionKey:  key,
-				SessionID:   nonEmpty(sessionMap[key], sessionIDByKey[key]),
 				Channel:     nonEmpty(in.channel, "-"),
 				Sender:      nonEmpty(in.sender, "-"),
 				SenderName:  nonEmpty(in.senderName, nonEmpty(in.sender, "-")),
@@ -1872,32 +1863,6 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 				LastMessage: nonEmpty(in.text, "(empty)"),
 				LastTime:    in.ts,
 			}
-		}
-	}
-	for key, sid := range sessionMap {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		meta := sessionMeta[key]
-		if isSessionDeleted(sessionDeleted, key, strings.TrimSpace(meta.UpdatedAt)) {
-			continue
-		}
-		if _, ok := lastByKey[key]; ok {
-			continue
-		}
-		lastByKey[key] = SessionsItem{
-			SessionKey:  key,
-			SessionID:   strings.TrimSpace(sid),
-			Channel:     "-",
-			Sender:      "-",
-			SenderName:  "-",
-			ThreadID:    "-",
-			LastMessage: "(no messages)",
-			LastTime:    strings.TrimSpace(meta.UpdatedAt),
-			Workdir:     strings.TrimSpace(meta.Workdir),
-			UpdatedAt:   strings.TrimSpace(meta.UpdatedAt),
-			Status:      strings.TrimSpace(meta.Status),
 		}
 	}
 	for key, meta := range sessionMeta {
@@ -1913,7 +1878,6 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 		}
 		lastByKey[key] = SessionsItem{
 			SessionKey:  key,
-			SessionID:   strings.TrimSpace(sessionMap[key]),
 			Channel:     "-",
 			Sender:      "-",
 			SenderName:  "-",
@@ -1928,14 +1892,6 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 	items := make([]SessionsItem, 0, len(lastByKey))
 	for _, it := range lastByKey {
 		meta := sessionMeta[it.SessionKey]
-		if strings.TrimSpace(it.SessionID) == "" {
-			if sid, ok := sessionMap[it.SessionKey]; ok {
-				it.SessionID = sid
-			}
-		}
-		if strings.TrimSpace(it.SessionID) == "" {
-			it.SessionID = "-"
-		}
 		if strings.TrimSpace(it.Workdir) == "" {
 			it.Workdir = strings.TrimSpace(meta.Workdir)
 		}
@@ -1949,11 +1905,7 @@ func collectSessions(cfg config.AppConfig) ([]SessionsItem, error) {
 			it.UpdatedAt = strings.TrimSpace(it.LastTime)
 		}
 		if strings.TrimSpace(it.Status) == "" {
-			if strings.TrimSpace(it.SessionID) != "" && strings.TrimSpace(it.SessionID) != "-" {
-				it.Status = "ready"
-			} else {
-				it.Status = "discovered"
-			}
+			it.Status = "discovered"
 		}
 		items = append(items, it)
 	}

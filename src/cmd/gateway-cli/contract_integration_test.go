@@ -681,6 +681,9 @@ func TestCLISessionDeleteAndRecreateClosedLoop(t *testing.T) {
 	if !created.OK || created.Action != "session-new" || created.SessionKey != key {
 		t.Fatalf("unexpected session-new payload: %+v", created)
 	}
+	if strings.TrimSpace(created.SessionID) != "" {
+		t.Fatalf("expected session-new to omit ACP session id, got=%+v", created)
+	}
 	if filepath.Clean(created.Workdir) != filepath.Clean(repo) {
 		t.Fatalf("expected session-new workdir=%s got=%s", repo, created.Workdir)
 	}
@@ -712,6 +715,11 @@ func TestCLISessionDeleteAndRecreateClosedLoop(t *testing.T) {
 	afterCreate := parseSessionsJSON(t, res.Stdout)
 	if !containsSessionKey(afterCreate.Items, key) {
 		t.Fatalf("expected key present after session-new: key=%s items=%+v", key, afterCreate.Items)
+	}
+	for _, item := range afterCreate.Items {
+		if strings.TrimSpace(item.SessionKey) == key && strings.TrimSpace(item.SessionID) != "" {
+			t.Fatalf("expected sessions item to omit ACP session id, got=%+v", item)
+		}
 	}
 }
 
@@ -819,6 +827,70 @@ func TestCLISessionDeleteThenInboundCreatesNewSessionSegment(t *testing.T) {
 	newMsgs := parseMessagesJSON(t, res.Stdout)
 	if len(newMsgs.Messages) == 0 {
 		t.Fatalf("expected messages for reopened key, got empty")
+	}
+}
+
+func TestCLIGUISessionInteractionsDoNotForkHashedSession(t *testing.T) {
+	resetSharedTestGatewayd(t)
+
+	bin := buildGatewayBinary(t)
+	repo := createTempRepo(t)
+	setStorageBackend(t, repo, "localfile")
+
+	key := "gui-lcaieda-1773030734608"
+	res := runBin(t, bin, repo, "session-new", "--session-key", key, "--workdir", repo, "--json")
+	if res.Code != 0 {
+		t.Fatalf("session-new failed: code=%d stderr=%s", res.Code, res.Stderr)
+	}
+
+	ts := "2026-03-09T04:32:19Z"
+	interactionPath := sharedRuntimeInteractionPath()
+	writeJSONL(t, interactionPath, []map[string]any{
+		{
+			"kind":        "inbound_received",
+			"msg_id":      "local-u-1",
+			"session_key": key,
+			"sender":      "-",
+			"text":        "1",
+			"time":        ts,
+			"user_profile": map[string]any{
+				"channel":     "-",
+				"sender":      "-",
+				"sender_name": "-",
+				"thread_id":   "",
+			},
+			"message_metadata": map[string]any{
+				"source": "gui",
+			},
+		},
+		{
+			"kind":        "trace",
+			"stage":       "session_resolved",
+			"msg_id":      "local-u-1",
+			"session_key": key,
+			"session_id":  "-",
+			"ts":          ts,
+		},
+	})
+
+	res = runBin(t, bin, repo, "sessions", "--json")
+	if res.Code != 0 {
+		t.Fatalf("sessions failed: code=%d stderr=%s", res.Code, res.Stderr)
+	}
+	items := parseSessionsJSON(t, res.Stdout).Items
+	if len(items) != 1 {
+		t.Fatalf("expected exactly one session item, got=%+v", items)
+	}
+	if strings.TrimSpace(items[0].SessionKey) != key {
+		t.Fatalf("expected session key=%s got=%+v", key, items)
+	}
+	if strings.TrimSpace(items[0].SessionID) != "" {
+		t.Fatalf("expected gateway session list to omit ACP session id, got=%+v", items[0])
+	}
+	for _, item := range items {
+		if strings.HasPrefix(strings.TrimSpace(item.SessionKey), "sess_") {
+			t.Fatalf("expected no derived hashed session, got=%+v", items)
+		}
 	}
 }
 

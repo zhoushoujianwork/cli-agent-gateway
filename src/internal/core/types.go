@@ -17,7 +17,6 @@ type TaskRequest struct {
 	Sender     string
 	Channel    string
 	ThreadID   string
-	SessionID  string
 	Metadata   map[string]any
 }
 
@@ -27,7 +26,6 @@ type TaskResult struct {
 	Summary        string
 	TerminalReason string
 	ElapsedSec     int
-	SessionID      string
 	OutputText     string
 	ErrorText      string
 	RawEvents      []map[string]any

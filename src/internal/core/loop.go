@@ -167,31 +167,28 @@ func (l *Loop) RunForever() error {
 				Sender:     m.Sender,
 				Channel:    nonEmpty(m.Channel, "command"),
 				ThreadID:   m.ThreadID,
-				SessionID:  st.SessionMap[sessionKey],
 				Metadata: mergeMetadata(m.Metadata, map[string]any{
 					"received_ts": m.TS,
 					"message_id":  m.ID,
 					"workdir":     resolvedWorkdir,
 				}),
 			}
-			fmt.Fprintf(os.Stderr, "[INFO] session resolved msg_id=%s session_key=%s session_id=%s workdir=%s\n", m.ID, sessionKey, req.SessionID, resolvedWorkdir)
+			fmt.Fprintf(os.Stderr, "[INFO] session resolved msg_id=%s session_key=%s workdir=%s\n", m.ID, sessionKey, resolvedWorkdir)
 			l.appendInteraction(map[string]any{
 				"kind":        "trace",
 				"stage":       "session_resolved",
 				"msg_id":      m.ID,
 				"session_key": sessionKey,
-				"session_id":  req.SessionID,
 				"workdir":     resolvedWorkdir,
 				"ts":          now,
 			})
-			fmt.Fprintf(os.Stderr, "[INFO] execute start msg_id=%s session_key=%s session_id=%s sender=%s\n", m.ID, sessionKey, req.SessionID, m.Sender)
+			fmt.Fprintf(os.Stderr, "[INFO] execute start msg_id=%s session_key=%s sender=%s\n", m.ID, sessionKey, m.Sender)
 			l.appendInteraction(map[string]any{
-				"kind":       "trace",
-				"stage":      "execute_start",
-				"msg_id":     m.ID,
-				"session_id": req.SessionID,
-				"trace_id":   req.TraceID,
-				"ts":         time.Now().UTC().Format(time.RFC3339),
+				"kind":     "trace",
+				"stage":    "execute_start",
+				"msg_id":   m.ID,
+				"trace_id": req.TraceID,
+				"ts":       time.Now().UTC().Format(time.RFC3339),
 			})
 			type execResult struct {
 				result TaskResult
@@ -274,9 +271,7 @@ func (l *Loop) RunForever() error {
 			fmt.Fprintf(os.Stderr, "[INFO] execute done msg_id=%s status=%s elapsed=%ds\n", m.ID, result.Status, result.ElapsedSec)
 			l.logACPEvents(m.ID, result.RawEvents)
 
-			if strings.TrimSpace(result.SessionID) != "" {
-				st.SessionMap[sessionKey] = result.SessionID
-			}
+			delete(st.SessionMap, sessionKey)
 			meta := st.SessionMeta[sessionKey]
 			meta.Workdir = resolvedWorkdir
 			meta.Status = "ready"
@@ -310,7 +305,6 @@ func (l *Loop) RunForever() error {
 				"sender":       m.Sender,
 				"text":         m.Text,
 				"trace_id":     req.TraceID,
-				"session_id":   result.SessionID,
 				"result":       result.Summary,
 				"status":       result.Status,
 				"elapsed_sec":  result.ElapsedSec,

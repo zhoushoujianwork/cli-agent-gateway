@@ -153,7 +153,7 @@ Field rules:
 - `source` (`string`, required; `text` or `file`)
 - `error` (`string`, optional; present on failure)
 - `session_key` (`string`, optional; present when using `--session-key`)
-- `session_id` (`string`, optional)
+- `session_id` (`string`, optional; gateway does not guarantee ACP live-session reuse, typically omitted for `--session-key` sends)
 - `result` (`string`, optional; agent summary for session-path send)
 - `raw_output` (`string`, optional; agent raw output, 不做空格/格式重写)
 - `result_json` (`object|array|scalar`, optional; `raw_output` 可解析 JSON 时返回)
@@ -213,6 +213,9 @@ Defaulting:
   1) 显式 `--workdir`
   2) 已保存的 `session metadata.workdir`（由 `session-new` 或历史执行写入）
   3) 若仍为空：自动初始化并使用 `~/.cag/workspace/default`
+- `send --session-key` 只复用 gateway session 的 `session_key/workdir`，不复用 ACP live session。
+- 每次 `send --session-key` 都会创建一次新的 ACP session 执行。
+- 长期复用 agent 对话上下文不属于 gateway contract；应直接通过 agent 自身的 session CLI 管理。
 
 ### `gatewayd`
 
@@ -277,7 +280,6 @@ Output object:
   "ok": true,
   "action": "session-new",
   "session_key": "sess_xxx",
-  "session_id": "optional",
   "workdir": "/abs/path",
   "updated_at": "2026-03-06T03:26:39Z",
   "status": "ready"
@@ -288,6 +290,7 @@ Semantics:
 
 - 幂等：同一 `session_key` 重复执行不会创建重复记录。
 - `--workdir` 必填；缺失时返回 `error.code=workdir_required`。
+- `session-new` 只更新 gateway session 元数据，不会创建或保留 ACP live session。
 
 ### `session-clear` / `session-delete` / `sessions-delete-all --json`
 

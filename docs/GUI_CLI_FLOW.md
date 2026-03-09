@@ -19,6 +19,7 @@ GUI 周期轮询：
 
 - GUI 当前日志路径必须来自 `status --json` 返回的 `log_file`。
 - GUI 不应硬编码 repo 内日志路径或自行推导 `gatewayd.log` 路径作为业务真源。
+- GUI “Open Current Log” 仅打开该 `log_file` 指向的文件或其父目录，不自行推导替代路径。
 
 GUI 生命周期：
 
@@ -29,6 +30,10 @@ GUI 生命周期：
 
 GUI 用户操作映射：
 
+- 创建会话：
+  - `gateway session-new --session-key <generated_key> --workdir <path> --json`
+- 更新已选会话 workdir：
+  - `gateway session-new --session-key <existing_key> --workdir <path> --json`
 - 点击 Send：
   - `gateway send --session-key <key> --text "<text>" --json`
 - 输入 `/clear`：
@@ -40,6 +45,13 @@ GUI 用户操作映射：
   - `gateway send --session-key <key> --text "hello" --json`
 - 删除会话：
   - `gateway session-delete --session-key <key> --json`
+
+明确约束：
+
+- GUI session 是 gateway 自己的会话条目，不是 ACP agent 的长期会话句柄。
+- `session-new` 只管理 gateway session 元数据，不创建 ACP live session。
+- `send --session-key` 每次都是新的 ACP 执行；GUI 不应把 `session_id` 理解为可长期复用的 agent 对话上下文。
+- 若用户需要长期复用 agent 对话，应离开 GUI/gateway 流程，改走 agent 自身的 session CLI。
 
 ## 消息状态映射
 

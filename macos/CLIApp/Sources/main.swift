@@ -6,6 +6,7 @@ import SwiftUI
 extension Notification.Name {
     static let guiOpenSettings = Notification.Name("gui.openSettings")
     static let guiToggleLogDrawer = Notification.Name("gui.toggleLogDrawer")
+    static let guiOpenCurrentLog = Notification.Name("gui.openCurrentLog")
 }
 
 enum ChannelType: String, CaseIterable, Identifiable {
@@ -61,13 +62,13 @@ struct GatewayConfig: Decodable {
 
 struct SessionEntry: Identifiable {
     let sessionKey: String
-    let sessionId: String
     let channel: String
     let senderId: String
     let sender: String
     let threadId: String
     let lastText: String
     let lastTime: String
+    let workdir: String
     let latest: Bool
 
     var id: String { sessionKey }
@@ -366,6 +367,11 @@ final class GatewayController: ObservableObject {
 
     private func workdirForSessionKey(_ key: String) -> String {
         let base = baseSessionKey(key)
+        if let sessionWorkdir = sessions.first(where: { $0.sessionKey == key || baseSessionKey($0.sessionKey) == base })?.workdir
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !sessionWorkdir.isEmpty {
+            return sessionWorkdir
+        }
         return (sessionWorkdirByKey[base] ?? sessionWorkdirByKey[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -604,7 +610,7 @@ final class GatewayController: ObservableObject {
                 UserDefaults.standard.set(ChannelType.command.rawValue, forKey: self.channelDefaultsKey)
                 self.envFilePath = self.envPath
                 self.initialSetupBusy = false
-                self.initialSetupMessage = "Initialization complete. Session workdir can be set per chat session."
+                self.initialSetupMessage = "Initialization complete. Gateway session workdir can be set per workspace session."
                 self.needsInitialSetup = false
                 self.refreshConfigPanel()
                 self.refreshSessionsAsync()
@@ -613,47 +619,149 @@ final class GatewayController: ObservableObject {
     }
 
     func addSessionByPickingWorkdir() {
+        let fallbackDir = cfg.workdir.isEmpty ? cfg.repoRoot : cfg.workdir
+        guard let selectedPath = pickSessionWorkdir(
+            fallbackDir: fallbackDir,
+            prompt: "Create Gateway Session",
+            message: "Select a local working directory for the new gateway session."
+        ) else {
+            detailText = "Create Session cancelled."
+            return
+        }
+        let sessionKey = generatedSessionKey(for: selectedPath)
+        upsertSessionWorkdir(sessionKey: sessionKey, workdir: selectedPath) { [weak self] ok, message in
+            guard let self else { return }
+            if ok {
+                self.selectedSessionKey = sessionKey
+                self.refreshSelectedSessionWorkdir()
+                self.chatMessages = []
+                self.timelineByMsgId = [:]
+                self.refreshSessionsAsync()
+                self.detailText = "Created gateway session: \(sessionKey)"
+                self.log("session created session_key=\(sessionKey) path=\(selectedPath)")
+            } else {
+                self.detailText = "Create session failed: \(message)"
+            }
+        }
+    }
+
+    func updateSelectedSessionWorkdir() {
         guard let key = selectedSessionKey, !key.isEmpty else {
-            detailText = "Select a session first."
+            detailText = "Select a gateway session first."
             return
         }
         let targetSessionKey = baseSessionKey(key)
+        let fallbackDir = workdirForSessionKey(targetSessionKey).isEmpty
+            ? (cfg.workdir.isEmpty ? cfg.repoRoot : cfg.workdir)
+            : workdirForSessionKey(targetSessionKey)
+        guard let selectedPath = pickSessionWorkdir(
+            fallbackDir: fallbackDir,
+            prompt: "Use Workdir",
+            message: "Select a local working directory for this gateway session's CLI runs."
+        ) else {
+            detailText = "Update workdir cancelled."
+            return
+        }
+        upsertSessionWorkdir(sessionKey: targetSessionKey, workdir: selectedPath) { [weak self] ok, message in
+            guard let self else { return }
+            if ok {
+                self.refreshSelectedSessionWorkdir()
+                self.refreshSessionsAsync()
+                self.detailText = "Gateway session workdir updated: \(selectedPath)"
+                self.log("session workdir updated session_key=\(targetSessionKey) path=\(selectedPath)")
+            } else {
+                self.detailText = "Update workdir failed: \(message)"
+            }
+        }
+    }
 
+    private func pickSessionWorkdir(fallbackDir: String, prompt: String, message: String) -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
-        panel.prompt = "Use Workdir"
-        panel.message = "Select a local working directory for this session's CLI runs."
-
-        let fallbackDir = workdirForSessionKey(targetSessionKey).isEmpty
-            ? (cfg.workdir.isEmpty ? cfg.repoRoot : cfg.workdir)
-            : workdirForSessionKey(targetSessionKey)
+        panel.prompt = prompt
+        panel.message = message
         panel.directoryURL = URL(fileURLWithPath: fallbackDir)
 
         let response = panel.runModal()
-        guard response == .OK, let dirURL = panel.url else {
-            detailText = "Add Session cancelled."
-            return
-        }
+        guard response == .OK, let dirURL = panel.url else { return nil }
 
         let selectedPath = dirURL.path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !selectedPath.isEmpty else {
-            detailText = "Invalid workdir path."
-            return
-        }
+        guard !selectedPath.isEmpty else { return nil }
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: selectedPath, isDirectory: &isDir), isDir.boolValue else {
-            detailText = "Workdir not found: \(selectedPath)"
+        guard FileManager.default.fileExists(atPath: selectedPath, isDirectory: &isDir), isDir.boolValue else { return nil }
+        return selectedPath
+    }
+
+    private func upsertSessionWorkdir(sessionKey: String, workdir: String, completion: @escaping (Bool, String) -> Void) {
+        let targetSessionKey = baseSessionKey(sessionKey)
+        cagJSONAsync("session-new", args: ["--session-key", targetSessionKey, "--workdir", workdir]) { [weak self] result in
+            guard let self else { return }
+            let ok = (result.json?["ok"] as? Bool) ?? false
+            if ok {
+                self.syncCachedSessionWorkdir(targetSessionKey, workdir: workdir)
+                completion(true, "")
+                return
+            }
+            completion(false, self.actionErrorMessage(from: result) ?? "command failed")
+        }
+    }
+
+    private func actionErrorMessage(from result: CAGJSONResult) -> String? {
+        if let errorNode = result.json?["error"] as? [String: Any] {
+            let message = ((errorNode["message"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !message.isEmpty {
+                return message
+            }
+        }
+        let raw = result.raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? nil : raw
+    }
+
+    private func generatedSessionKey(for workdir: String) -> String {
+        let baseName = URL(fileURLWithPath: workdir).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowered = (baseName.isEmpty ? "session" : baseName).lowercased()
+        let slugScalars = lowered.unicodeScalars.map { scalar -> Character in
+            CharacterSet.alphanumerics.contains(scalar) ? Character(String(scalar)) : "-"
+        }
+        let slug = String(slugScalars)
+            .replacingOccurrences(of: "--", with: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let safeSlug = slug.isEmpty ? "session" : slug
+        let millis = Int(Date().timeIntervalSince1970 * 1000)
+        return "gui-\(safeSlug)-\(millis)"
+    }
+
+    func openCurrentLog() {
+        let path = effectiveLogPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else {
+            detailText = "Log path unavailable."
             return
         }
+        let fileURL = URL(fileURLWithPath: path)
+        if FileManager.default.fileExists(atPath: path) {
+            _ = NSWorkspace.shared.open(fileURL)
+            detailText = "Opened log: \(path)"
+            log("log open path=\(path) exists=true")
+            return
+        }
+        let dirURL = fileURL.deletingLastPathComponent()
+        if FileManager.default.fileExists(atPath: dirURL.path) {
+            _ = NSWorkspace.shared.open(dirURL)
+            detailText = "Log file not created yet. Opened log folder."
+            log("log open path=\(path) exists=false opened_dir=\(dirURL.path)")
+            return
+        }
+        detailText = "Log path not found: \(path)"
+        log("log open path=\(path) exists=false opened_dir=false")
+    }
 
-        sessionWorkdirByKey[targetSessionKey] = selectedPath
+    private func syncCachedSessionWorkdir(_ key: String, workdir: String) {
+        let targetSessionKey = baseSessionKey(key)
+        sessionWorkdirByKey[targetSessionKey] = workdir
         saveSessionWorkdirByKey()
-        refreshSelectedSessionWorkdir()
-        detailText = "Session workdir updated: \(selectedPath)"
-        log("session workdir updated session_key=\(targetSessionKey) path=\(selectedPath)")
     }
 
     private func shellOutput(_ command: String, timeoutSec: TimeInterval? = nil) -> (code: Int32, stdout: String, stderr: String, output: String) {
@@ -998,8 +1106,8 @@ final class GatewayController: ObservableObject {
 
     func refreshHealthChecks() {
         let t0 = Date()
-        let doctor = cagJSON("doctor", direct: true)
-        let fallback = cagJSON("health", direct: true)
+        let doctor = cagJSON("doctor")
+        let fallback = cagJSON("health")
         let response = doctor.json ?? fallback.json
 
         guard let node = response else {
@@ -1059,7 +1167,7 @@ final class GatewayController: ObservableObject {
 
     func refreshAccessUsers() {
         let t0 = Date()
-        let res = cagJSON("users", timeoutSec: 8, direct: true)
+        let res = cagJSON("users", timeoutSec: 8)
         guard let node = res.json, ((node["ok"] as? Bool) ?? false) else {
             onMain { [weak self] in
                 self?.accessUsers = []
@@ -1103,8 +1211,7 @@ final class GatewayController: ObservableObject {
         cagJSONAsync(
             action,
             args: ["--channel", entry.channel, "--user-id", entry.userID],
-            timeoutSec: 8,
-            direct: true
+            timeoutSec: 8
         ) { [weak self] result in
             guard let self else { return }
             let ok = (result.json?["ok"] as? Bool) ?? false
@@ -1209,7 +1316,7 @@ final class GatewayController: ObservableObject {
         let overlay = localOverlayMessagesBySession[sessionKey, default: []]
         runInBackground { [weak self] in
             guard let self else { return }
-            let res = self.cagJSON("messages", args: ["--session-key", baseSessionKey], timeoutSec: 8, direct: true)
+            let res = self.cagJSON("messages", args: ["--session-key", baseSessionKey], timeoutSec: 8)
             var persisted: [ChatMessage] = []
             var timeline: [String: [ProcessEvent]] = [:]
             if let node = res.json,
@@ -1360,7 +1467,7 @@ final class GatewayController: ObservableObject {
 
     func refreshSessions() {
         let t0 = Date()
-        let sessionsResult = cagJSON("sessions", args: ["--limit", "200"], direct: true)
+        let sessionsResult = cagJSON("sessions", args: ["--limit", "200"])
         if let node = sessionsResult.json,
            let ok = node["ok"] as? Bool, ok,
            let items = node["items"] as? [[String: Any]] {
@@ -1373,13 +1480,13 @@ final class GatewayController: ObservableObject {
                 built.append(
                     SessionEntry(
                         sessionKey: sessionKey,
-                        sessionId: (item["session_id"] as? String) ?? "-",
                         channel: (item["channel"] as? String) ?? "-",
                         senderId: senderID.isEmpty ? "-" : senderID,
                         sender: senderName.isEmpty ? (senderID.isEmpty ? "-" : senderID) : senderName,
                         threadId: (item["thread_id"] as? String) ?? "-",
                         lastText: (item["last_message"] as? String) ?? "",
                         lastTime: (item["last_time"] as? String) ?? "",
+                        workdir: (item["workdir"] as? String) ?? "",
                         latest: (item["latest"] as? Bool) ?? false
                     )
                 )
@@ -1436,7 +1543,58 @@ final class GatewayController: ObservableObject {
                 merged.append(msg)
             }
         }
-        return merged.sorted { $0.time < $1.time }
+        return renderMessages(merged)
+    }
+
+    private func renderMessages(_ messages: [ChatMessage]) -> [ChatMessage] {
+        let assistantFinalSourceIDs = Set(
+            messages.compactMap { msg -> String? in
+                guard msg.role == "assistant",
+                      msg.deliveryStatus != .processing,
+                      !msg.sourceMsgId.isEmpty else {
+                    return nil
+                }
+                return msg.sourceMsgId
+            }
+        )
+
+        var rendered = messages
+        for msg in messages {
+            guard msg.role == "user",
+                  msg.deliveryStatus == .processing,
+                  !msg.sourceMsgId.isEmpty,
+                  !assistantFinalSourceIDs.contains(msg.sourceMsgId),
+                  !rendered.contains(where: { $0.sourceMsgId == msg.sourceMsgId && $0.role == "assistant" && $0.deliveryStatus == .processing }) else {
+                continue
+            }
+
+            rendered.append(
+                ChatMessage(
+                    id: "processing-\(msg.sourceMsgId)",
+                    sourceMsgId: msg.sourceMsgId,
+                    role: "assistant",
+                    text: "",
+                    time: msg.time,
+                    deliveryStatus: .processing,
+                    statusDetail: msg.statusDetail
+                )
+            )
+        }
+
+        return rendered.sorted { lhs, rhs in
+            if lhs.time != rhs.time {
+                return lhs.time < rhs.time
+            }
+            if lhs.role != rhs.role {
+                if lhs.role == "user" {
+                    return true
+                }
+                if rhs.role == "user" {
+                    return false
+                }
+            }
+            return lhs.id < rhs.id
+        }
     }
 
     private func messageDeliveryStatus(role: String, rawStatus: String) -> MessageDeliveryStatus? {
@@ -1648,7 +1806,7 @@ final class GatewayController: ObservableObject {
         guard !text.isEmpty else { return }
         guard !localSending else { return }
         guard let session = selectedSessionEntry() else {
-            detailText = "Select a session first."
+            detailText = "Select a gateway session first."
             return
         }
         let selectedSessionKey = session.sessionKey
@@ -1674,7 +1832,7 @@ final class GatewayController: ObservableObject {
                         cleared ? "Action /clear: session mapping reset." : "Action /clear failed: cannot update state file.",
                         sessionKey: selectedSessionKey
                     )
-                    self.detailText = cleared ? "Session mapping cleared." : "Failed to clear session mapping."
+                    self.detailText = cleared ? "Gateway session mapping cleared." : "Failed to clear gateway session mapping."
                     self.refreshSessionsAsync()
                 }
                 return
@@ -1689,7 +1847,7 @@ final class GatewayController: ObservableObject {
                         cleared ? "Action /new: session reset." : "Action /new warning: reset failed.",
                         sessionKey: selectedSessionKey
                     )
-                    self.detailText = cleared ? "New session started." : "Could not reset old session."
+                    self.detailText = cleared ? "New gateway session started." : "Could not reset old gateway session."
                     self.refreshSessionsAsync()
                 }
                 return
@@ -1762,7 +1920,7 @@ final class GatewayController: ObservableObject {
             selectedSessionKey = nil
             selectedSessionWorkdir = ""
             refreshSessionsAsync()
-            detailText = "Deleted all sessions."
+            detailText = "Deleted all gateway sessions."
         } else {
             detailText = "Delete failed: command failed."
         }
@@ -1779,7 +1937,7 @@ final class GatewayController: ObservableObject {
             saveSessionWorkdirByKey()
             refreshSelectedSessionWorkdir()
             refreshSessionsAsync()
-            detailText = "Deleted session: \(targetKey)"
+            detailText = "Deleted gateway session: \(targetKey)"
         } else {
             detailText = "Delete failed: command failed."
         }
@@ -2205,7 +2363,7 @@ struct SessionRow: View {
                 .font(.system(size: 12))
                 .lineLimit(2)
                 .foregroundStyle(.secondary)
-            Text("sid: \(session.sessionId)")
+            Text("gateway key: \(session.sessionKey)")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
         }
@@ -2248,12 +2406,19 @@ struct ChatBubble: View {
             Text(isUser ? "You" : "Assistant")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text(message.text)
-                .font(.system(size: 12))
-                .textSelection(.enabled)
-            if isUser, !deliveryText.isEmpty {
+            if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(message.text)
+                    .font(.system(size: 12))
+                    .textSelection(.enabled)
+            }
+            if isUser, message.deliveryStatus != .processing, !deliveryText.isEmpty {
                 Text(deliveryText)
                     .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(deliveryColor)
+            }
+            if !isUser, message.deliveryStatus == .processing {
+                Text(deliveryText)
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(deliveryColor)
             }
             if isUser, message.deliveryStatus == .failed, !message.statusDetail.isEmpty {
@@ -2656,10 +2821,10 @@ struct ConfigView: View {
         switch editingChannel {
         case .command:
             VStack(alignment: .leading, spacing: 10) {
-                Text("GUI Chat uses local session execution and is the lowest-friction default.")
+                Text("GUI Chat runs gateway-managed workspace sessions. Long-lived agent sessions stay in the agent CLI.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                Text("Session workdir is no longer a global config item. Set it per session from the chat panel.")
+                Text("Gateway session workdir is no longer a global config item. Set it per workspace session from the chat panel.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 ConfigField(title: "ACP Command", hint: "Default is `codex-acp`. This controls the local ACP agent executable.") {
@@ -2749,7 +2914,7 @@ struct ConfigView: View {
                 ChannelCard(
                     systemName: "macwindow",
                     title: ChannelType.command.title,
-                    subtitle: "Local GUI session mode",
+                    subtitle: "Gateway-managed workspace sessions",
                     selected: editingChannel == .command
                 ) { editingChannel = .command }
                 ChannelCard(
@@ -2857,7 +3022,7 @@ struct ConfigView: View {
             }
             .padding(14)
             .background(Color.gray.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
-            Text("Session Tips: /new to start a fresh session, /clear to reset current session mapping.")
+            Text("Gateway Session Tips: /new starts a fresh gateway session state, /clear resets the current gateway session mapping.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             Divider()
@@ -2948,7 +3113,7 @@ struct InitialSetupView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Welcome")
                         .font(.title2.weight(.semibold))
-                    Text("First-time setup for GUI chat")
+                    Text("First-time setup for gateway-managed GUI chat")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -2957,13 +3122,13 @@ struct InitialSetupView: View {
 
             SetupCard(
                 title: "Initialize GUI Chat",
-                bodyText: "The app will initialize the minimal gateway config for local GUI chat. External channels can be configured later from the Config panel."
+                bodyText: "The app will initialize the minimal gateway config for gateway-managed workspace chat. External channels can be configured later from the Config panel."
             ) {
                 HStack(spacing: 10) {
                     Pill(text: "Default Channel: GUI Chat", color: .blue)
-                    Pill(text: "Mode: Local Session", color: .green)
+                    Pill(text: "Mode: Gateway Session", color: .green)
                 }
-                Text("Session workdir is managed per session from the chat panel. Global startup config only keeps the minimal gateway defaults.")
+                Text("Gateway session workdir is managed per workspace session from the chat panel. Long-lived agent sessions are not managed here.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Button(controller.initialSetupBusy ? "Initializing..." : "Initialize") {
@@ -3067,17 +3232,20 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Sessions")
+                        Text("Gateway Sessions")
                             .font(.title3.weight(.semibold))
                         Spacer()
-                        IconActionButton(systemName: "plus", helpText: "Add session", tint: .blue) {
+                        IconActionButton(systemName: "plus", helpText: "Create gateway session", tint: .blue) {
                             controller.addSessionByPickingWorkdir()
                         }
-                        IconActionButton(systemName: "trash", helpText: "Delete all sessions", tint: .red) {
+                        IconActionButton(systemName: "folder", helpText: "Set selected gateway session workdir", tint: .secondary, disabled: controller.selectedSessionKey == nil) {
+                            controller.updateSelectedSessionWorkdir()
+                        }
+                        IconActionButton(systemName: "trash", helpText: "Delete all gateway sessions", tint: .red) {
                             controller.deleteAllSessions()
                         }
                     }
-                    Text("Session Workdir: \(controller.selectedSessionWorkdir.isEmpty ? "(not set)" : controller.selectedSessionWorkdir)")
+                    Text("Gateway Session Workdir: \(controller.selectedSessionWorkdir.isEmpty ? "(not set)" : controller.selectedSessionWorkdir)")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -3099,9 +3267,9 @@ struct ContentView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
-                                    Button("Delete Session") {
-                                        controller.deleteSession(key: session.sessionKey)
-                                    }
+                                        Button("Delete Gateway Session") {
+                                            controller.deleteSession(key: session.sessionKey)
+                                        }
                                 }
                             }
                         }
@@ -3128,7 +3296,7 @@ struct ContentView: View {
                         ScrollView {
                             LazyVStack(spacing: 10) {
                                 if controller.chatMessages.isEmpty {
-                                    Text("Select a session to view chat history.")
+                                    Text("Select a gateway session to view chat history.")
                                         .font(.system(size: 12))
                                         .foregroundStyle(.secondary)
                                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3152,7 +3320,7 @@ struct ContentView: View {
                     }
 
                     HStack(spacing: 8) {
-                        TextField("Type here to chat locally in this session...", text: $controller.localDraftText)
+                        TextField("Type here to chat in this gateway session...", text: $controller.localDraftText)
                             .textFieldStyle(.roundedBorder)
                             .disabled(controller.selectedSessionKey == nil)
                             .onSubmit {
@@ -3222,6 +3390,9 @@ struct ContentView: View {
                 showLogDrawer.toggle()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .guiOpenCurrentLog)) { _ in
+            controller.openCurrentLog()
+        }
         .onChange(of: showLogDrawer) { _, visible in
             if visible {
                 logTailController.start()
@@ -3275,10 +3446,15 @@ struct CLIAppMain: App {
                 }
                 .keyboardShortcut(",", modifiers: .command)
 
-                Button("Toggle Logs") {
-                    NotificationCenter.default.post(name: .guiToggleLogDrawer, object: nil)
+                Button("Open Current Log") {
+                    NotificationCenter.default.post(name: .guiOpenCurrentLog, object: nil)
                 }
                 .keyboardShortcut("j", modifiers: .command)
+
+                Button("Toggle Live Logs") {
+                    NotificationCenter.default.post(name: .guiToggleLogDrawer, object: nil)
+                }
+                .keyboardShortcut("j", modifiers: [.command, .shift])
             }
         }
     }
