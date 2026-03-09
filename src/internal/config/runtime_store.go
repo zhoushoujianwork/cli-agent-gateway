@@ -17,16 +17,8 @@ import (
 const runtimeConfigKVKey = "config.runtime"
 
 func runtimeConfigDBPath(repoRoot string, envValues map[string]string) string {
-	raw := defaultStorageSQLitePath
-	if envValues != nil {
-		if v := strings.TrimSpace(envValues["STORAGE_SQLITE_PATH"]); v != "" {
-			raw = v
-		}
-	}
-	if v := strings.TrimSpace(os.Getenv("STORAGE_SQLITE_PATH")); v != "" {
-		raw = v
-	}
-	return resolvePath(repoRoot, raw)
+	_ = envValues
+	return DefaultRuntimePaths(repoRoot).StorageSQLitePath
 }
 
 func loadRuntimeValues(repoRoot string) (map[string]string, error) {
@@ -177,11 +169,6 @@ func orderedRepoEnvKeys(values map[string]string) []string {
 		"IMESSAGE_SEND_CMD",
 		"CAG_GO_DEBUG",
 		"STORAGE_BACKEND",
-		"STORAGE_SQLITE_PATH",
-		"LOCK_FILE",
-		"STATE_FILE",
-		"REPORT_DIR",
-		"INTERACTION_LOG_FILE",
 	} {
 		if strings.TrimSpace(values[key]) != "" {
 			ordered = append(ordered, key)

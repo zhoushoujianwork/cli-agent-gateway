@@ -76,6 +76,9 @@ func resetSharedTestGatewayd(t *testing.T) {
 	sharedCLIMu.Lock()
 	defer sharedCLIMu.Unlock()
 	cleanupSharedTestGatewayd()
+	_ = os.RemoveAll(filepath.Join(sharedTestHome, ".cag", "runtime"))
+	_ = os.RemoveAll(filepath.Join(sharedTestHome, ".cag", "logs"))
+	_ = os.RemoveAll(filepath.Join(sharedTestHome, ".cag", "gatewayd"))
 }
 
 func reserveTestGatewayAddr() (string, error) {
@@ -441,6 +444,37 @@ func TestCLIStartWithLogFileFlag(t *testing.T) {
 	}
 }
 
+func TestCLIStartUsesSharedGatewaydLogByDefault(t *testing.T) {
+	resetSharedTestGatewayd(t)
+
+	bin := buildGatewayBinary(t)
+	repo := createTempRepo(t)
+	logPath := filepath.Join(sharedTestHome, ".cag", "gatewayd", "gatewayd.log")
+
+	res := runBin(t, bin, repo, "start", "--json")
+	if res.Code != 0 {
+		t.Fatalf("start failed: code=%d stderr=%s", res.Code, res.Stderr)
+	}
+	started := parseStatusJSON(t, res.Stdout)
+	if !started.Running {
+		t.Fatalf("expected running after start, got: %+v", started)
+	}
+	t.Cleanup(func() {
+		_ = runBin(t, bin, repo, "stop", "--json")
+	})
+
+	if err := waitForPath(logPath, 3*time.Second); err != nil {
+		t.Fatalf("expected shared gatewayd log created at %s: %v", logPath, err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read shared gatewayd log failed: %v", err)
+	}
+	if !strings.Contains(string(raw), "startup channel=command") {
+		t.Fatalf("expected runtime logs in shared gatewayd log, content=%q", string(raw))
+	}
+}
+
 func TestCLIStartSendsStartupGreeting(t *testing.T) {
 	resetSharedTestGatewayd(t)
 
@@ -561,7 +595,7 @@ func TestCLISessionDeleteAndRecreateClosedLoop(t *testing.T) {
 	threadID := "-"
 	key := buildSessionKey(channel, sender, threadID)
 	ts := "2026-03-06T03:00:00Z"
-	interactionPath := filepath.Join(repo, ".agent_gateway_interactions.jsonl")
+	interactionPath := sharedRuntimeInteractionPath()
 	lines := []map[string]any{
 		{
 			"kind":   "inbound_received",
@@ -699,7 +733,7 @@ func TestCLISessionDeleteThenInboundCreatesNewSessionSegment(t *testing.T) {
 		t.Fatalf("user-allow failed: code=%d stderr=%s", res.Code, res.Stderr)
 	}
 
-	interactionPath := filepath.Join(repo, ".agent_gateway_interactions.jsonl")
+	interactionPath := sharedRuntimeInteractionPath()
 	lines := []map[string]any{
 		{
 			"kind":   "inbound_received",
@@ -823,18 +857,17 @@ func createTempRepo(t *testing.T) string {
 		"ALLOWED_FROM=tester",
 		"REMOTE_USER_ID=tester",
 		"ACP_AGENT_CMD=true",
-		"LOCK_FILE=.cli_agent_gateway.lock",
-		"STATE_FILE=.agent_gateway_state.json",
-		"INTERACTION_LOG_FILE=.agent_gateway_interactions.jsonl",
-		"REPORT_DIR=.agent_gateway_reports",
 		"STORAGE_BACKEND=sqlite",
-		"STORAGE_SQLITE_PATH=.agent_gateway.db",
 		"POLL_INTERVAL_SEC=1",
 	}, "\n") + "\n"
 	if err := os.WriteFile(envPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write .env failed: %v", err)
 	}
 	return repo
+}
+
+func sharedRuntimeInteractionPath() string {
+	return filepath.Join(sharedTestHome, ".cag", "runtime", "interactions.jsonl")
 }
 
 func waitForPath(path string, timeout time.Duration) error {
@@ -1039,6 +1072,9 @@ func writeJSONL(t *testing.T, path string, nodes []map[string]any) {
 	if content != "" {
 		content += "\n"
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir jsonl dir failed path=%s err=%v", path, err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write jsonl failed path=%s err=%v", path, err)
 	}
@@ -1049,6 +1085,9 @@ func appendJSONL(t *testing.T, path string, node map[string]any) {
 	raw, err := json.Marshal(node)
 	if err != nil {
 		t.Fatalf("marshal jsonl append node failed: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir jsonl append dir failed: %v", err)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {

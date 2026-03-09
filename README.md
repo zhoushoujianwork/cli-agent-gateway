@@ -47,6 +47,8 @@ make run
 cd src && go run ./cmd/gateway-cli status
 ```
 
+纯文本 `status` 会直接输出当前 lock 与运行日志路径；当网关处于运行中时，还会附带最近几行运行日志，便于快速诊断。默认控制面与 runtime 共享同一个当前日志文件：`~/.cag/gatewayd/gatewayd.log`。GUI 展示“最新日志”时应读取这一路径。
+
 ## CLI
 
 ```bash
@@ -82,10 +84,9 @@ cd src && go run ./cmd/gateway-cli send --to tester --file ./message.md --msgtyp
 
 - `gatewayd` 提供控制面 gRPC 服务（当前已开放 `Status/Start/Stop/Restart`、`Health/Doctor`、`Sessions`、`SendToSession`、`SessionMessages`、`Clear/Delete`）。
 - CLI 控制面命令仅通过 gRPC 访问 `gatewayd`（`status/start/stop/restart/health/doctor/sessions/messages/send --session-key/session-*`）。
-- CLI 在 gRPC 调用前会自动确保 `gatewayd` 在线（必要时自动拉起），仍不做本地业务回退。
+- CLI 在 gRPC 调用前会自动确保 `gatewayd` 在线（必要时自动拉起）；若控制面不可用或状态异常，则直接报错，不做本地业务回退，也不保留兼容分支。
 - 可显式执行 `gatewayd-up` / `gatewayd-down` 管理控制面进程。
 - 地址通过 `GATEWAYD_ADDR` 控制（默认 `127.0.0.1:58473`）。
-- 可通过 `CAG_GRPC_DISABLE=1` 强制禁用 gRPC 路径。
 
 ### 配置收敛规则
 

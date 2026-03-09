@@ -36,16 +36,16 @@ This document freezes the external CLI contract for `cag` (gateway-cli) used by 
 - Repository root resolution:
   - If current dir is `src/`, use parent as repo root.
   - Else prefer current dir when `.env` exists.
-  - Else fallback to parent when parent has `.env`.
+  - Else use parent when parent has `.env`.
 - Config source precedence:
   - 1) process env
   - 2) repo `.env`
   - 3) user global `~/.cag/.env`
   - 4) built-in defaults
-- Missing repo `.env` is not fatal; CLI falls back to `~/.cag/.env` and built-in defaults.
+- Repo `.env` is optional; effective config is resolved from user global `~/.cag/.env` plus built-in defaults when repo `.env` is absent.
 - `run` does not accept positional workdir arg.
 - `status/start/stop/restart/health/doctor/sessions/send(--session-key)/messages/session-*` 仅通过 gRPC 控制面访问 `gatewayd`。
-- CLI 会在 gRPC 调用前自动确保 `gatewayd` 在线（必要时自动拉起）；不做本地业务回退。
+- CLI 会在 gRPC 调用前自动确保 `gatewayd` 在线（必要时自动拉起）；若控制面不可用则直接报错，不做本地业务回退，也不保留兼容路径。
 
 ## Exit codes
 
@@ -84,6 +84,13 @@ Semantics:
 
 - `running=true` means lock is currently held by an active process.
 - `running=false` may still include historical `metadata` from prior runs.
+
+Plain output:
+
+- `status`（非 `--json`）必须打印当前 `lock` 与 `log` 路径。
+- 当 `running=true` 时，`status` 额外打印最近几行运行日志，作为快速诊断视图。
+- 默认当前日志文件是可见文件名：`~/.cag/gatewayd/gatewayd.log`。
+- `gatewayd` 与其管理的 gateway runtime 默认共享这一份日志文件，供 GUI 展示“最新日志”。
 
 ### `health --json`
 
@@ -171,7 +178,7 @@ Semantics:
 
 - `--json`: print `status` payload after start attempt.
 - `--log-file`: override log output file path for background runtime.
-  - Precedence: `--log-file` > `GATEWAY_LOG_FILE` > default `.agent_gateway.log`.
+  - Precedence: `--log-file` > `GATEWAY_LOG_FILE` > default `~/.cag/gatewayd/gatewayd.log`.
 
 ### `stop`
 
@@ -201,7 +208,7 @@ Optional:
 
 Defaulting:
 
-- For `dingtalk`, `--to` can fallback to `DINGTALK_DEFAULT_TO_USER`.
+- For `dingtalk`, omitting `--to` requires `DINGTALK_DEFAULT_TO_USER` to be configured.
 - `send --session-key` 的 `workdir` 优先级：
   1) 显式 `--workdir`
   2) 已保存的 `session metadata.workdir`（由 `session-new` 或历史执行写入）
@@ -209,7 +216,7 @@ Defaulting:
 
 ### `gatewayd`
 
-- `--listen`: gRPC 监听地址（默认读取 `GATEWAYD_ADDR`，再回退 `127.0.0.1:58473`）。
+- `--listen`: gRPC 监听地址（默认读取 `GATEWAYD_ADDR`；若未设置则使用 `127.0.0.1:58473`）。
 - 当前开放 RPC：
   - `Status`
   - `Start`
@@ -229,6 +236,7 @@ Defaulting:
 
 - GUI 依赖的会话读写命令（`sessions/messages/send --session-key/session-*`）必须在 `gatewayd` 运行时执行。
 - 若 `gatewayd` 不可达，CLI 返回非 0，并在 JSON 中输出 `error.code=gateway_unreachable`。
+- 当前属于开发阶段：控制面与配置行为允许按设计直接收敛，不要求保留旧 fallback 或 backward-compatibility 语义。
 
 ### `messages --json`
 

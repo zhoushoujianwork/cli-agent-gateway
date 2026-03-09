@@ -434,19 +434,9 @@ final class GatewayController: ObservableObject {
 
     var effectiveLogPath: String { currentLogFile.isEmpty ? cfg.logFile : currentLogFile }
 
-    var gatewaydLogPath: String { URL(fileURLWithPath: cfg.repoRoot).appendingPathComponent("logs/.gatewayd.log").path }
-
     var liveLogPaths: [String] {
-        var paths: [String] = []
         let primary = effectiveLogPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !primary.isEmpty {
-            paths.append(primary)
-        }
-        let control = gatewaydLogPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !control.isEmpty && !paths.contains(control) {
-            paths.append(control)
-        }
-        return paths
+        return primary.isEmpty ? [] : [primary]
     }
 
     private func envValue(_ key: String) -> String? {
@@ -2863,10 +2853,6 @@ struct ConfigView: View {
                 pathRow(
                     title: "Current Log",
                     value: controller.effectiveLogPath
-                )
-                pathRow(
-                    title: "gatewayd Log",
-                    value: controller.gatewaydLogPath
                 )
             }
             .padding(14)

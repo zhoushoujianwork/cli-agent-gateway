@@ -65,11 +65,6 @@ var orderedSpecs = []KeySpec{
 	{Key: "DINGTALK_SEND_URL", Scope: ScopeUserEnv, Default: defaultDingTalkSendURL},
 	{Key: "CAG_GO_DEBUG", Scope: ScopeRepoEnv, Default: "1"},
 	{Key: "STORAGE_BACKEND", Scope: ScopeRepoEnv, Default: defaultStorageBackend},
-	{Key: "STORAGE_SQLITE_PATH", Scope: ScopeRepoEnv, Default: defaultStorageSQLitePath},
-	{Key: "LOCK_FILE", Scope: ScopeRepoEnv, Default: defaultLockFile},
-	{Key: "STATE_FILE", Scope: ScopeRepoEnv, Default: defaultStateFile},
-	{Key: "REPORT_DIR", Scope: ScopeRepoEnv, Default: defaultReportDir},
-	{Key: "INTERACTION_LOG_FILE", Scope: ScopeRepoEnv, Default: defaultInteractionLog},
 	{Key: "GATEWAYD_ADDR", Scope: ScopeUserEnv, Default: defaultGatewaydAddr},
 	{Key: "AGENT_TIMEOUT_SEC", Scope: ScopeRuntimeDB, Default: "1800"},
 	{Key: "ACP_INITIALIZE_TIMEOUT_SEC", Scope: ScopeRuntimeDB, Default: "30"},
@@ -108,6 +103,8 @@ var specByKey = func() map[string]KeySpec {
 
 var removedEnvKeys = map[string]struct{}{
 	"CODEX_WORKDIR":                      {},
+	"INTERACTION_LOG_FILE":               {},
+	"LOCK_FILE":                          {},
 	"DINGTALK_CALLBACK_AES_KEY":          {},
 	"DINGTALK_CALLBACK_SECRET":           {},
 	"DINGTALK_CARD_FALLBACK_MARKDOWN":    {},
@@ -129,7 +126,10 @@ var removedEnvKeys = map[string]struct{}{
 	"DEBUG_TRACE_CHAIN":                  {},
 	"PROGRESS_NOTIFY_INTERVAL_SEC":       {},
 	"RECOVER_UNFINISHED_TASKS_AS_FAILED": {},
+	"REPORT_DIR":                         {},
 	"SMS_REPLY_MAX_CHARS":                {},
+	"STATE_FILE":                         {},
+	"STORAGE_SQLITE_PATH":                {},
 }
 
 func KnownKeys() []string {

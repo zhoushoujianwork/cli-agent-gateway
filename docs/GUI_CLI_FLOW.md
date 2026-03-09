@@ -4,7 +4,7 @@
 
 macOS GUI 不直接读写网关内部文件，只通过 `gateway` CLI 获取数据与执行动作。
 
-> 注：GUI 相关命令仅经 `gatewayd` gRPC；CLI 不走本地业务回退，但会自动确保 `gatewayd` 在线（必要时自动拉起）。
+> 注：GUI 相关命令仅经 `gatewayd` gRPC；CLI 不走本地业务回退。若控制面不可用，则直接返回错误。
 
 ## 读模型（Read）
 
@@ -14,6 +14,11 @@ GUI 周期轮询：
 2. `gateway sessions --json`
 3. `gateway messages --session-key <key> --json`（选中会话时）
 4. `gateway view tasks --json`（可选）
+
+日志展示规则：
+
+- GUI 当前日志路径必须来自 `status --json` 返回的 `log_file`。
+- GUI 不应硬编码 repo 内日志路径或自行推导 `gatewayd.log` 路径作为业务真源。
 
 GUI 生命周期：
 

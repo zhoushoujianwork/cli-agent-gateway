@@ -104,7 +104,7 @@ LOCK_FILE="$RUNTIME_BASE/gateway.lock"
 STATE_FILE="$RUNTIME_BASE/state.json"
 INTERACTION_LOG_FILE="$RUNTIME_BASE/interactions.jsonl"
 
-LOG_FILE="$HOME/Library/Logs/cli-agent-gateway/gateway.log"
+LOG_FILE="$HOME/.cag/gatewayd/gatewayd.log"
 
 mkdir -p "$OUTPUT_DIR"
 APP_PATH="$OUTPUT_DIR/$APP_NAME.app"

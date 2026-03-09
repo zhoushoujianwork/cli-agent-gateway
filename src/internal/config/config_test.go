@@ -88,3 +88,31 @@ func TestLoadPrefersUserEnvWhenProcessEnvIsBlank(t *testing.T) {
 		t.Fatalf("expected agent id from ~/.cag/.env, got=%q", cfg.DingTalkAgentID)
 	}
 }
+
+func TestDefaultRuntimePathsUseFixedCAGHome(t *testing.T) {
+	home := t.TempDir()
+	origHome, hadHome := os.LookupEnv("HOME")
+	t.Cleanup(func() {
+		if hadHome {
+			_ = os.Setenv("HOME", origHome)
+		} else {
+			_ = os.Unsetenv("HOME")
+		}
+	})
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME failed: %v", err)
+	}
+
+	pathsA := DefaultRuntimePaths(filepath.Join(t.TempDir(), "repo-a"))
+	pathsB := DefaultRuntimePaths(filepath.Join(t.TempDir(), "repo-b"))
+	wantBase := filepath.Join(home, ".cag", "runtime")
+	if pathsA.BaseDir != wantBase {
+		t.Fatalf("expected fixed runtime base=%s got=%s", wantBase, pathsA.BaseDir)
+	}
+	if pathsB.BaseDir != wantBase {
+		t.Fatalf("expected fixed runtime base=%s got=%s", wantBase, pathsB.BaseDir)
+	}
+	if pathsA.LockFile != filepath.Join(wantBase, "gateway.lock") {
+		t.Fatalf("unexpected lock file path: %s", pathsA.LockFile)
+	}
+}

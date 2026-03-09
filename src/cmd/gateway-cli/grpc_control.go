@@ -24,7 +24,7 @@ import (
 )
 
 const defaultGatewaydAddr = "127.0.0.1:58473"
-const defaultGatewaydLogFile = "logs/.gatewayd.log"
+const defaultGatewaydLogFile = "logs/gatewayd.log"
 const gatewaydStateFileName = ".cli_agent_gatewayd.json"
 
 var gatewayAddrEnvOnce sync.Once
@@ -58,13 +58,13 @@ func (s *gatewayControlServer) Status(_ context.Context, req *gatewayv1.StatusRe
 	out := &gatewayv1.StatusResponse{
 		Ok:                 true,
 		Running:            payload.Running,
-		LockFile:           payload.LockFile,
+		LockFile:           effectiveStatusLockFile(payload, cfg),
 		StartedAt:          strings.TrimSpace(payload.StartedAt),
-		Channel:            strings.TrimSpace(cfg.ChannelType),
+		Channel:            effectiveStatusChannel(payload, cfg),
 		InteractionLogFile: strings.TrimSpace(cfg.InteractionLogFile),
 		StateFile:          strings.TrimSpace(cfg.StateFile),
 		LogFile:            logFile,
-		Workdir:            strings.TrimSpace(cfg.Workdir),
+		Workdir:            effectiveStatusWorkdir(payload, cfg),
 		Status:             "stopped",
 	}
 	if payload.Running {
@@ -648,7 +648,7 @@ func startManagedGatewayd(repoRoot, addr string) error {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return err
 	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
@@ -821,13 +821,15 @@ func removeLegacyGatewaydState(repoRoot string) error {
 }
 
 func resolveGatewaydLogPath(repoRoot string) string {
+	_ = repoRoot
+	baseDir := filepath.Join(config.CAGHomeDir(), "gatewayd")
 	if v := strings.TrimSpace(os.Getenv("GATEWAYD_LOG_FILE")); v != "" {
 		if filepath.IsAbs(v) {
 			return v
 		}
-		return filepath.Join(repoRoot, v)
+		return filepath.Join(baseDir, v)
 	}
-	return filepath.Join(repoRoot, defaultGatewaydLogFile)
+	return filepath.Join(baseDir, "gatewayd.log")
 }
 
 func managedGatewaydWorkdir() string {

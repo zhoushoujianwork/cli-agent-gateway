@@ -200,7 +200,6 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  stop                Stop running gateway process by lock owner pid")
 	fmt.Fprintln(out, "  restart             Stop then start")
 	fmt.Fprintln(out, "  start --log-file    Optional server log path for background runtime")
-<<<<<<< HEAD
 	fmt.Fprintln(out, "  config [workdir]    Generate/update repo .env with startup-only defaults")
 	fmt.Fprintln(out, "  config --global     Generate/update ~/.cag/.env (gatewayd defaults)")
 	fmt.Fprintln(out, "  config show         Alias of `config list`")
@@ -208,10 +207,6 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  config get <key>    Show a single effective config value")
 	fmt.Fprintln(out, "  config set <k> <v>  Persist config to repo .env / ~/.cag/.env / runtime DB")
 	fmt.Fprintln(out, "  config unset <key>  Remove persisted override and fall back to defaults")
-=======
-	fmt.Fprintln(out, "  config              Generate/update repo .env using Go-native defaults")
-	fmt.Fprintln(out, "  config --global     Generate/update ~/.cag/.env (gateway defaults)")
->>>>>>> 13a5244bddab61ed978630332125652b06466eac
 	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
 	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
 	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run, --workdir optional for --session-key)")
@@ -233,11 +228,7 @@ func printUsage(out *os.File) {
 
 func runGoMain(repoRoot string, args []string) int {
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
-<<<<<<< HEAD
 		fmt.Fprintln(os.Stderr, "run does not accept workdir arg; session workdir should be supplied per session")
-=======
-		fmt.Fprintln(os.Stderr, "run does not accept positional arguments")
->>>>>>> 13a5244bddab61ed978630332125652b06466eac
 		return 2
 	}
 	workdir := ""
@@ -450,16 +441,8 @@ func runGoConfig(repoRoot string, args []string) int {
 		fmt.Printf("configured user env file: %s\n", path)
 		return 0
 	}
-<<<<<<< HEAD
 	workdir := resolveWorkdir(repoRoot, rest)
 	path, err := config.WriteDefaultEnv(repoRoot, workdir)
-=======
-	if len(fs.Args()) > 0 {
-		fmt.Fprintln(os.Stderr, "config does not accept workdir argument; default runtime workdir is ~/.cag")
-		return 2
-	}
-	path, err := config.WriteDefaultEnv(repoRoot)
->>>>>>> 13a5244bddab61ed978630332125652b06466eac
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "write .env failed: %v\n", err)
 		return 1
@@ -526,19 +509,7 @@ func runStatus(repoRoot string, args []string) int {
 			printJSON(statusJSON("status", payload, cfg, grpc.GetLogFile()))
 			return 0
 		}
-		if payload.Running {
-			pid := "unknown"
-			if payload.PID != nil {
-				pid = fmt.Sprintf("%d", *payload.PID)
-			}
-			started := payload.StartedAt
-			if strings.TrimSpace(started) == "" {
-				started = "unknown"
-			}
-			fmt.Printf("RUNNING pid=%s started_at=%s lock=%s\n", pid, started, payload.LockFile)
-			return 0
-		}
-		fmt.Printf("NOT_RUNNING lock=%s\n", payload.LockFile)
+		fmt.Print(renderPlainStatus(repoRoot, payload, cfg, grpc.GetLogFile()))
 		return 0
 	}
 
@@ -556,19 +527,7 @@ func runStatus(repoRoot string, args []string) int {
 		printJSON(statusJSON("status", payload, cfg, ""))
 		return 0
 	}
-	if payload.Running {
-		pid := "unknown"
-		if payload.PID != nil {
-			pid = fmt.Sprintf("%d", *payload.PID)
-		}
-		started := payload.StartedAt
-		if strings.TrimSpace(started) == "" {
-			started = "unknown"
-		}
-		fmt.Printf("RUNNING pid=%s started_at=%s lock=%s\n", pid, started, payload.LockFile)
-		return 0
-	}
-	fmt.Printf("NOT_RUNNING lock=%s\n", payload.LockFile)
+	fmt.Print(renderPlainStatus(repoRoot, payload, cfg, ""))
 	return 0
 }
 
@@ -644,7 +603,7 @@ func runStart(repoRoot string, args []string) int {
 		fmt.Fprintf(os.Stderr, "create log dir failed: %v\n", err)
 		return 1
 	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	logFile, err := os.OpenFile(logPath, runtimeLogOpenFlags(args), 0o644)
 	if err != nil {
 		if jsonOut {
 			printJSONActionError("start", "log_open_failed", err.Error())
@@ -943,7 +902,7 @@ func runRestart(repoRoot string, args []string) int {
 		printJSONActionError("restart", "log_prepare_failed", err.Error())
 		return 1
 	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	logFile, err := os.OpenFile(logPath, runtimeLogOpenFlags(args), 0o644)
 	if err != nil {
 		printJSONActionError("restart", "log_open_failed", err.Error())
 		return 1
@@ -2429,13 +2388,26 @@ func startupGreetingText(cfg config.AppConfig) string {
 }
 
 func getStatusPayload(repoRoot string) (StatusPayload, error) {
-	loadEnvDefaults(repoRoot)
-	runtimePaths := config.DefaultRuntimePaths(repoRoot)
-	st, err := lockfile.Inspect(runtimePaths.LockFile)
+	cfg, err := config.Load(repoRoot, "")
 	if err != nil {
 		return StatusPayload{}, err
 	}
-	payload := StatusPayload{Running: st.Locked, LockFile: runtimePaths.LockFile, Metadata: st.Metadata}
+	lockPath := strings.TrimSpace(cfg.LockFile)
+	if lockPath == "" {
+		lockPath = config.DefaultRuntimePaths(repoRoot).LockFile
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return StatusPayload{}, err
+	}
+	st, err := lockfile.Inspect(lockPath)
+	if err != nil {
+		return StatusPayload{}, err
+	}
+	metadata := st.Metadata
+	if !st.Locked {
+		metadata = nil
+	}
+	payload := StatusPayload{Running: st.Locked, LockFile: lockPath, Metadata: metadata}
 	if st.OwnerPID != nil {
 		pid := *st.OwnerPID
 		payload.PID = &pid
@@ -2486,16 +2458,12 @@ func statusJSON(action string, p StatusPayload, cfg config.AppConfig, logPath st
 	if p.Running {
 		status = "running"
 	}
-	lockFile := p.LockFile
-	if strings.TrimSpace(cfg.LockFile) != "" {
-		lockFile = cfg.LockFile
-	}
 	out := map[string]any{
 		"ok":           true,
 		"action":       action,
 		"status":       status,
 		"running":      p.Running,
-		"lock_file":    lockFile,
+		"lock_file":    strings.TrimSpace(p.LockFile),
 		"gateway_addr": gatewaydAddr(),
 	}
 	if p.PID != nil && *p.PID > 0 {
@@ -2504,11 +2472,11 @@ func statusJSON(action string, p StatusPayload, cfg config.AppConfig, logPath st
 	if strings.TrimSpace(p.StartedAt) != "" {
 		out["started_at"] = p.StartedAt
 	}
-	if strings.TrimSpace(cfg.ChannelType) != "" {
-		out["channel"] = cfg.ChannelType
+	if channel := statusMetadataString(p, "channel"); channel != "" {
+		out["channel"] = channel
 	}
-	if strings.TrimSpace(cfg.Workdir) != "" {
-		out["workdir"] = cfg.Workdir
+	if workdir := statusMetadataString(p, "workdir"); workdir != "" {
+		out["workdir"] = workdir
 	}
 	if strings.TrimSpace(cfg.StateFile) != "" {
 		out["state_file"] = cfg.StateFile
@@ -2525,6 +2493,85 @@ func statusJSON(action string, p StatusPayload, cfg config.AppConfig, logPath st
 		out["metadata"] = p.Metadata
 	}
 	return out
+}
+
+func statusMetadataString(p StatusPayload, key string) string {
+	if len(p.Metadata) == 0 {
+		return ""
+	}
+	v, _ := p.Metadata[key].(string)
+	return strings.TrimSpace(v)
+}
+
+func effectiveStatusChannel(p StatusPayload, cfg config.AppConfig) string {
+	_ = cfg
+	return statusMetadataString(p, "channel")
+}
+
+func effectiveStatusWorkdir(p StatusPayload, cfg config.AppConfig) string {
+	_ = cfg
+	return statusMetadataString(p, "workdir")
+}
+
+func effectiveStatusLockFile(p StatusPayload, cfg config.AppConfig) string {
+	_ = cfg
+	return strings.TrimSpace(p.LockFile)
+}
+
+func renderPlainStatus(repoRoot string, p StatusPayload, cfg config.AppConfig, logPath string) string {
+	var b strings.Builder
+	if p.Running {
+		pid := "unknown"
+		if p.PID != nil {
+			pid = fmt.Sprintf("%d", *p.PID)
+		}
+		started := p.StartedAt
+		if strings.TrimSpace(started) == "" {
+			started = "unknown"
+		}
+		fmt.Fprintf(&b, "RUNNING pid=%s started_at=%s lock=%s\n", pid, started, p.LockFile)
+	} else {
+		fmt.Fprintf(&b, "NOT_RUNNING lock=%s\n", p.LockFile)
+	}
+
+	effectiveLogPath := statusLogPath(repoRoot, p, logPath)
+	if strings.TrimSpace(effectiveLogPath) != "" {
+		fmt.Fprintf(&b, "log=%s\n", effectiveLogPath)
+	}
+
+	if p.Running {
+		lines, err := readTailLines(effectiveLogPath, 8)
+		if err != nil {
+			fmt.Fprintf(&b, "recent_log=unavailable err=%v\n", err)
+			return b.String()
+		}
+		trimmed := make([]string, 0, len(lines))
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				trimmed = append(trimmed, line)
+			}
+		}
+		if len(trimmed) == 0 {
+			b.WriteString("recent_log=empty\n")
+			return b.String()
+		}
+		b.WriteString("recent_log:\n")
+		for _, line := range trimmed {
+			fmt.Fprintf(&b, "  %s\n", line)
+		}
+	}
+
+	return b.String()
+}
+
+func statusLogPath(repoRoot string, p StatusPayload, explicitLogPath string) string {
+	if v := strings.TrimSpace(explicitLogPath); v != "" {
+		return v
+	}
+	if v, ok := p.Metadata["log_file"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return resolveLogPath(repoRoot, nil)
 }
 
 func printJSONActionError(action, code, message string) {
@@ -2570,11 +2617,7 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 	p.Channel = cfg.ChannelType
 
 	if _, err := os.Stat(cfg.Workdir); err != nil {
-<<<<<<< HEAD
 		add("workdir", false, fmt.Sprintf("workdir not accessible: %s", cfg.Workdir), "use a valid repo root or set workdir per session")
-=======
-		add("workdir", false, fmt.Sprintf("workdir not accessible: %s", cfg.Workdir), "create ~/.cag and ensure it is accessible")
->>>>>>> 13a5244bddab61ed978630332125652b06466eac
 	} else {
 		add("workdir", true, "workdir ready", "")
 	}
@@ -2709,7 +2752,6 @@ func addWritableCheck(items *[]HealthItem, key, dir string) {
 	*items = append(*items, HealthItem{Key: key, OK: true, Detail: "writable: " + d})
 }
 
-<<<<<<< HEAD
 func detectRecentDingTalkRuntimeWarning(repoRoot string, cfg config.AppConfig, window time.Duration) string {
 	if !strings.EqualFold(strings.TrimSpace(cfg.ChannelType), "dingtalk") {
 		return ""
@@ -2892,9 +2934,6 @@ func resolveWorkdir(repoRoot string, args []string) string {
 	}
 	return repoRoot
 }
-
-=======
->>>>>>> 13a5244bddab61ed978630332125652b06466eac
 func detectRepoRoot(cwd string) string {
 	current := filepath.Clean(cwd)
 	if filepath.Base(current) == "src" {
@@ -2953,9 +2992,11 @@ func printJSON(v any) {
 }
 
 func resolveLogPath(repoRoot string, args []string) string {
+	_ = repoRoot
+	baseDir := filepath.Join(config.CAGHomeDir(), "gatewayd")
 	if fv := strings.TrimSpace(flagValue(args, "--log-file")); fv != "" {
 		if !filepath.IsAbs(fv) {
-			fv = filepath.Join(repoRoot, fv)
+			fv = filepath.Join(baseDir, fv)
 		}
 		if abs, err := filepath.Abs(fv); err == nil {
 			return abs
@@ -2965,10 +3006,10 @@ func resolveLogPath(repoRoot string, args []string) string {
 	loadEnvDefaults(repoRoot)
 	v := strings.TrimSpace(os.Getenv("GATEWAY_LOG_FILE"))
 	if v == "" {
-		v = filepath.Join(repoRoot, "logs", ".agent_gateway.log")
+		v = filepath.Join(baseDir, "gatewayd.log")
 	}
 	if !filepath.IsAbs(v) {
-		v = filepath.Join(repoRoot, v)
+		v = filepath.Join(baseDir, v)
 	}
 	if abs, err := filepath.Abs(v); err == nil {
 		return abs
@@ -2977,11 +3018,14 @@ func resolveLogPath(repoRoot string, args []string) string {
 }
 
 func resolveFreshLogPath(repoRoot string, args []string) string {
-	base := resolveLogPath(repoRoot, args)
+	return resolveLogPath(repoRoot, args)
+}
+
+func runtimeLogOpenFlags(args []string) int {
 	if strings.TrimSpace(flagValue(args, "--log-file")) != "" {
-		return base
+		return os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 	}
-	return rotatedLogPath(base)
+	return os.O_CREATE | os.O_WRONLY | os.O_APPEND
 }
 
 func rotatedLogPath(path string) string {

@@ -57,15 +57,35 @@ This file provides practical instructions for human and AI agents working in thi
   - storage/config/lock in `src/internal/infra/` and `src/internal/storage/`
 - Avoid introducing heavy dependencies unless clearly justified.
 - Do not hardcode secrets or credentials; use environment variables.
+- Treat `gatewayd` as the single source of truth for control-plane state.
+  - `cag` subcommands must synchronize state through gRPC calls to `gatewayd` rather than independently reading config/state/lock data and deriving their own answers.
+  - Do not add direct local status/config queries in individual CLI subcommands as an alternative control path.
+  - If `gatewayd` is unavailable or state is invalid, fail fast with an explicit error; do not add fallback execution paths.
+- Treat `~/.cag/` as the canonical control home for user-scoped runtime artifacts.
+  - Default runtime files, control-plane state, and managed logs should converge under `~/.cag/` rather than being duplicated across per-repo runtime roots.
+  - Avoid introducing parallel path knobs for lock/state/report/sqlite/log locations.
+  - Prefer removing duplicated configuration sources over adding another precedence layer.
+  - Files placed under `~/.cag/logs/` and `~/.cag/gatewayd/` for routine operator use should use visible filenames rather than hidden dotfiles.
+  - The operator-facing "current log" for GUI/CLI status should converge to a single visible file at `~/.cag/gatewayd/gatewayd.log` rather than rotating per-start default log files.
 - GUI integration must go through `gateway-cli` / `gatewayd` only.
   - Do not let the macOS GUI directly read/write user config, state, logs, or env files as part of normal product behavior.
   - GUI-triggered config changes must go through CLI control/config commands rather than mutating `.env` or other files directly.
+
+## Change Workflow
+
+- For changes that affect control-plane behavior, runtime paths, config precedence, or home-directory layout, do the work in this order:
+  - 1) evaluate the design first, including whether the change improves `~/.cag/` ownership clarity and reduces duplicated configuration;
+  - 2) update the relevant docs/specs to reflect the intended design;
+  - 3) only then modify the implementation.
+- If the current code and docs disagree, document the target design explicitly before making behavior changes.
+- During the current development stage, prefer deleting obsolete compatibility branches and duplicate knobs rather than preserving them.
+- Do not keep temporary fallback or backward-compatibility behavior unless the user explicitly asks for it as a scoped migration task.
 
 ## Editing and Safety
 
 - This repository is public open-source on GitHub. Treat all committed content as public.
 - Do not break the single-instance lock semantics (`.cli_agent_gateway.lock` or configured `LOCK_FILE`).
-- Preserve backward compatibility of env keys unless migration docs are updated.
+- This project is currently in a development stage: prefer clear breakage with actionable errors over silent compatibility layers or fallback behavior.
 - For channel changes, verify both fetch and send paths are still consistent.
 - Keep logs and persisted reports machine-readable.
 - Never commit secrets (API keys, tokens, passwords, private certificates, chat exports containing sensitive data).

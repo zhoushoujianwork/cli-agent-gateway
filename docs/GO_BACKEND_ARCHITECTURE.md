@@ -45,6 +45,8 @@ The macOS app should not embed gateway business logic. It should:
 - Edit `.env` (or config file) via a controlled config flow.
 - Display sessions/interactions based on machine-readable outputs (`state.json`, `interactions.jsonl`, reports).
 
+For operator-facing observability, the current managed log should converge to a single visible file at `~/.cag/gatewayd/gatewayd.log` so GUI and CLI status read the same source of truth.
+
 This keeps UI and backend independently releasable.
 
 ## Compatibility contract
@@ -80,7 +82,7 @@ To minimize migration risk, keep these contracts stable:
 
 6. Cutover
 - Make Go gateway default runtime.
-- Keep Python implementation as temporary fallback during stabilization.
+- Remove obsolete Python-side runtime paths instead of keeping parallel fallback behavior.
 
 ## Risks and mitigations
 
@@ -88,8 +90,8 @@ To minimize migration risk, keep these contracts stable:
   - Mitigation: golden tests from captured real interaction logs.
 - Channel-specific edge cases:
   - Mitigation: adapter-level integration tests with mock scripts.
-- Backward compatibility breaks in config/state:
-  - Mitigation: schema/version checks and migration helpers.
+- Config/state convergence risk during development-stage cleanup:
+  - Mitigation: document the target layout first, then fail fast on invalid legacy inputs instead of preserving silent compatibility layers.
 
 ## Next engineering priorities (Go core)
 
@@ -106,7 +108,7 @@ To minimize migration risk, keep these contracts stable:
 3. Storage hardening (sqlite default)
 - Introduce schema version and migrations for state/report metadata.
 - Tune sqlite runtime (`WAL`, `busy_timeout`, indexes).
-- Define corruption recovery behavior and fallback path.
+- Define corruption recovery behavior and explicit failure mode.
 
 4. Observability
 - Keep structured logs with trace/session/message IDs.
