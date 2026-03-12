@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"cli-agent-gateway/internal/infra/proclog"
 	"cli-agent-gateway/internal/storage"
 )
 
@@ -23,6 +24,26 @@ type Loop struct {
 	PollIntervalSec     int
 	ReplyStyleEnabled   bool
 	ReplyStylePrompt    string
+}
+
+func loopLogInfo(event string, fields map[string]any) {
+	node := map[string]any{
+		"event": strings.TrimSpace(event),
+	}
+	for key, value := range fields {
+		node[key] = value
+	}
+	proclog.Info("cli", node)
+}
+
+func loopLogWarn(event string, fields map[string]any) {
+	node := map[string]any{
+		"event": strings.TrimSpace(event),
+	}
+	for key, value := range fields {
+		node[key] = value
+	}
+	proclog.Warn("cli", node)
 }
 
 func (l *Loop) RunForever() error {
@@ -42,31 +63,31 @@ func (l *Loop) RunForever() error {
 				processed[id] = struct{}{}
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "[WARN] reload state failed: %v\n", loadErr)
+			loopLogWarn("state_reload_failed", map[string]any{"err": loadErr.Error()})
 		}
 		msgs, err := l.Channel.Fetch()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[WARN] fetch error: %v\n", err)
+			loopLogWarn("fetch_failed", map[string]any{"err": err.Error()})
 			time.Sleep(time.Duration(l.PollIntervalSec) * time.Second)
 			continue
 		}
 		if len(msgs) > 0 {
-			fmt.Fprintf(os.Stderr, "[INFO] fetch ok count=%d\n", len(msgs))
+			loopLogInfo("fetch_ok", map[string]any{"count": len(msgs)})
 		}
 		if l.ProcessOnlyLatest && len(msgs) > 1 {
-			fmt.Fprintf(os.Stderr, "[INFO] process_only_latest enabled keep=1 drop=%d\n", len(msgs)-1)
+			loopLogInfo("process_only_latest", map[string]any{"keep": 1, "drop": len(msgs) - 1})
 			msgs = msgs[len(msgs)-1:]
 		}
 		for _, m := range msgs {
 			if _, ok := processed[m.ID]; ok {
-				fmt.Fprintf(os.Stderr, "[INFO] skip duplicate msg_id=%s sender=%s\n", m.ID, m.Sender)
+				loopLogInfo("skip_duplicate", map[string]any{"msg_id": m.ID, "sender": m.Sender})
 				continue
 			}
 			allowed, accessStatus := l.accessDecision(st, m)
 			st = l.upsertUserAccess(st, m, accessStatus)
 			if !allowed {
 				l.saveState(st)
-				fmt.Fprintf(os.Stderr, "[INFO] skip unauthorized msg_id=%s sender=%s status=%s\n", m.ID, m.Sender, accessStatus)
+				loopLogInfo("skip_unauthorized", map[string]any{"msg_id": m.ID, "sender": m.Sender, "status": accessStatus})
 				l.appendInteraction(map[string]any{
 					"kind":         "unauthorized_inbound",
 					"msg_id":       m.ID,
@@ -77,13 +98,19 @@ func (l *Loop) RunForever() error {
 					"status":       accessStatus,
 				})
 				if err := l.Channel.Send(l.unauthorizedNotice(m, accessStatus), m.Sender, "unauthorized-"+m.ID, ""); err != nil {
-					fmt.Fprintf(os.Stderr, "[WARN] send unauthorized notice failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
+					loopLogWarn("send_unauthorized_notice_failed", map[string]any{"msg_id": m.ID, "to": m.Sender, "err": err.Error()})
 				} else {
-					fmt.Fprintf(os.Stderr, "[INFO] send unauthorized notice ok msg_id=%s to=%s status=%s\n", m.ID, m.Sender, accessStatus)
+					loopLogInfo("send_unauthorized_notice_ok", map[string]any{"msg_id": m.ID, "to": m.Sender, "status": accessStatus})
 				}
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "[INFO] inbound accepted msg_id=%s sender=%s channel=%s thread=%s text=%s\n", m.ID, m.Sender, nonEmpty(m.Channel, "command"), nonEmpty(m.ThreadID, "-"), shortText(m.Text, 80))
+			loopLogInfo("inbound_accepted", map[string]any{
+				"msg_id":  m.ID,
+				"sender":  m.Sender,
+				"channel": nonEmpty(m.Channel, "command"),
+				"thread":  nonEmpty(m.ThreadID, "-"),
+				"text":    shortText(m.Text, 80),
+			})
 			now := time.Now().UTC().Format(time.RFC3339)
 			l.appendInteraction(map[string]any{
 				"kind":         "inbound_received",
@@ -101,9 +128,9 @@ func (l *Loop) RunForever() error {
 				processed[m.ID] = struct{}{}
 				st.ProcessedIDs = append(st.ProcessedIDs, m.ID)
 				if err := l.Channel.Send("当前对话尚未绑定到本地 session，请先在 GUI/CLI 完成绑定。", m.Sender, "unbound-"+m.ID, ""); err != nil {
-					fmt.Fprintf(os.Stderr, "[WARN] send unbound notice failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
+					loopLogWarn("send_unbound_notice_failed", map[string]any{"msg_id": m.ID, "to": m.Sender, "err": err.Error()})
 				} else {
-					fmt.Fprintf(os.Stderr, "[INFO] send unbound notice ok msg_id=%s conversation=%s\n", m.ID, convKey)
+					loopLogInfo("send_unbound_notice_ok", map[string]any{"msg_id": m.ID, "conversation": convKey})
 				}
 				l.appendInteraction(map[string]any{
 					"kind":             "channel_unassigned",
@@ -117,7 +144,7 @@ func (l *Loop) RunForever() error {
 			}
 
 			if err := l.Channel.Send("已收到，正在处理", m.Sender, "ack-"+m.ID, ""); err != nil {
-				fmt.Fprintf(os.Stderr, "[WARN] send ack failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
+				loopLogWarn("send_ack_failed", map[string]any{"msg_id": m.ID, "to": m.Sender, "err": err.Error()})
 				l.appendInteraction(map[string]any{
 					"kind":   "trace",
 					"stage":  "send_ack_failed",
@@ -127,7 +154,7 @@ func (l *Loop) RunForever() error {
 					"ts":     time.Now().UTC().Format(time.RFC3339),
 				})
 			} else {
-				fmt.Fprintf(os.Stderr, "[INFO] send ack ok msg_id=%s to=%s\n", m.ID, m.Sender)
+				loopLogInfo("send_ack_ok", map[string]any{"msg_id": m.ID, "to": m.Sender})
 				l.appendInteraction(map[string]any{
 					"kind":   "trace",
 					"stage":  "send_ack_ok",
@@ -154,7 +181,7 @@ func (l *Loop) RunForever() error {
 					"conversation_key": convKey,
 				}),
 			}
-			fmt.Fprintf(os.Stderr, "[INFO] session resolved msg_id=%s session_key=%s conversation=%s\n", m.ID, sessionKey, convKey)
+			loopLogInfo("session_resolved", map[string]any{"msg_id": m.ID, "session_key": sessionKey, "conversation": convKey})
 			l.appendInteraction(map[string]any{
 				"kind":             "trace",
 				"stage":            "session_resolved",
@@ -163,7 +190,7 @@ func (l *Loop) RunForever() error {
 				"conversation_key": convKey,
 				"ts":               now,
 			})
-			fmt.Fprintf(os.Stderr, "[INFO] execute start msg_id=%s session_key=%s sender=%s\n", m.ID, sessionKey, m.Sender)
+			loopLogInfo("execute_start", map[string]any{"msg_id": m.ID, "session_key": sessionKey, "sender": m.Sender})
 			l.appendInteraction(map[string]any{
 				"kind":     "trace",
 				"stage":    "execute_start",
@@ -203,7 +230,7 @@ func (l *Loop) RunForever() error {
 					progressText := fmt.Sprintf("处理中，已等待 %ds", progressCount*progressEvery)
 					progressID := fmt.Sprintf("progress-%s-%d", m.ID, progressCount)
 					if err := l.Channel.Send(progressText, m.Sender, progressID, ""); err != nil {
-						fmt.Fprintf(os.Stderr, "[WARN] send progress failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
+						loopLogWarn("send_progress_failed", map[string]any{"msg_id": m.ID, "to": m.Sender, "err": err.Error(), "index": progressCount})
 						l.appendInteraction(map[string]any{
 							"kind":   "trace",
 							"stage":  "send_progress_failed",
@@ -214,7 +241,7 @@ func (l *Loop) RunForever() error {
 							"ts":     time.Now().UTC().Format(time.RFC3339),
 						})
 					} else {
-						fmt.Fprintf(os.Stderr, "[INFO] send progress ok msg_id=%s to=%s index=%d\n", m.ID, m.Sender, progressCount)
+						loopLogInfo("send_progress_ok", map[string]any{"msg_id": m.ID, "to": m.Sender, "index": progressCount})
 						l.appendInteraction(map[string]any{
 							"kind":   "trace",
 							"stage":  "send_progress_ok",
@@ -233,9 +260,9 @@ func (l *Loop) RunForever() error {
 			if execErr != nil {
 				errText := fmt.Sprintf("执行失败: %v", execErr)
 				if err := l.Channel.Send(errText, m.Sender, m.ID, ""); err != nil {
-					fmt.Fprintf(os.Stderr, "[WARN] send error reply failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
+					loopLogWarn("send_error_reply_failed", map[string]any{"msg_id": m.ID, "to": m.Sender, "err": err.Error()})
 				} else {
-					fmt.Fprintf(os.Stderr, "[INFO] send error reply ok msg_id=%s to=%s\n", m.ID, m.Sender)
+					loopLogInfo("send_error_reply_ok", map[string]any{"msg_id": m.ID, "to": m.Sender})
 				}
 				l.appendInteraction(map[string]any{
 					"msg_id":       m.ID,
@@ -243,20 +270,20 @@ func (l *Loop) RunForever() error {
 					"ts":           time.Now().UTC().Format(time.RFC3339),
 					"user_profile": buildUserProfile(m),
 				})
-				fmt.Fprintf(os.Stderr, "[WARN] execute failed msg_id=%s err=%v\n", m.ID, execErr)
+				loopLogWarn("execute_failed", map[string]any{"msg_id": m.ID, "err": execErr.Error()})
 				processed[m.ID] = struct{}{}
 				st.ProcessedIDs = append(st.ProcessedIDs, m.ID)
 				l.saveState(st)
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "[INFO] execute done msg_id=%s status=%s elapsed=%ds\n", m.ID, result.Status, result.ElapsedSec)
+			loopLogInfo("execute_done", map[string]any{"msg_id": m.ID, "status": result.Status, "elapsed_sec": result.ElapsedSec})
 			l.logACPEvents(m.ID, result.RawEvents)
 
 			reportPath := l.writeReport(m, req, result)
-			fmt.Fprintf(os.Stderr, "[INFO] report written msg_id=%s path=%s\n", m.ID, nonEmpty(reportPath, "-"))
+			loopLogInfo("report_written", map[string]any{"msg_id": m.ID, "path": nonEmpty(reportPath, "-")})
 			finalText := formatFinal(result)
 			if err := l.Channel.Send(finalText, m.Sender, m.ID, reportPath); err != nil {
-				fmt.Fprintf(os.Stderr, "[WARN] send final failed msg_id=%s to=%s err=%v\n", m.ID, m.Sender, err)
+				loopLogWarn("send_final_failed", map[string]any{"msg_id": m.ID, "to": m.Sender, "err": err.Error()})
 				l.appendInteraction(map[string]any{
 					"kind":   "trace",
 					"stage":  "send_final_failed",
@@ -266,7 +293,7 @@ func (l *Loop) RunForever() error {
 					"ts":     time.Now().UTC().Format(time.RFC3339),
 				})
 			} else {
-				fmt.Fprintf(os.Stderr, "[INFO] send final ok msg_id=%s to=%s\n", m.ID, m.Sender)
+				loopLogInfo("send_final_ok", map[string]any{"msg_id": m.ID, "to": m.Sender})
 				l.appendInteraction(map[string]any{
 					"kind":   "trace",
 					"stage":  "send_final_ok",
@@ -290,7 +317,7 @@ func (l *Loop) RunForever() error {
 			processed[m.ID] = struct{}{}
 			st.ProcessedIDs = append(st.ProcessedIDs, m.ID)
 			l.saveState(st)
-			fmt.Fprintf(os.Stderr, "[INFO] persist done msg_id=%s processed_total=%d\n", m.ID, len(st.ProcessedIDs))
+			loopLogInfo("persist_done", map[string]any{"msg_id": m.ID, "processed_total": len(st.ProcessedIDs)})
 		}
 		time.Sleep(time.Duration(l.PollIntervalSec) * time.Second)
 	}
@@ -446,13 +473,13 @@ func nonEmpty(v, d string) string {
 
 func (l *Loop) appendInteraction(node map[string]any) {
 	if err := l.Storage.AppendInteraction(node); err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] append interaction failed err=%v\n", err)
+		loopLogWarn("append_interaction_failed", map[string]any{"err": err.Error()})
 	}
 }
 
 func (l *Loop) saveState(st storage.StateData) {
 	if err := l.Storage.SaveState(st); err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] save state failed err=%v\n", err)
+		loopLogWarn("save_state_failed", map[string]any{"err": err.Error()})
 	}
 }
 
@@ -680,7 +707,7 @@ func (l *Loop) logACPEvents(msgID string, events []map[string]any) {
 	if len(events) == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[INFO] acp events msg_id=%s count=%d\n", msgID, len(events))
+	loopLogInfo("acp_events", map[string]any{"msg_id": msgID, "count": len(events)})
 	for i, ev := range events {
 		method := strings.TrimSpace(anyString(ev["method"]))
 		stage := "-"
@@ -706,7 +733,13 @@ func (l *Loop) logACPEvents(msgID string, events []map[string]any) {
 				}
 			}
 		}
-		fmt.Fprintf(os.Stderr, "[INFO] acp event msg_id=%s idx=%d method=%s stage=%s text=%s\n", msgID, i+1, nonEmpty(method, "-"), stage, shortText(text, 120))
+		loopLogInfo("acp_event", map[string]any{
+			"msg_id": msgID,
+			"index":  i + 1,
+			"method": nonEmpty(method, "-"),
+			"stage":  stage,
+			"text":   shortText(text, 120),
+		})
 		l.appendInteraction(map[string]any{
 			"kind":   "trace",
 			"stage":  "acp_event",

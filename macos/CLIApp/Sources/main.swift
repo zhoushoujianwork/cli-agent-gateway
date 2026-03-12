@@ -70,6 +70,8 @@ struct SessionEntry: Identifiable {
     let lastTime: String
     let workdir: String
     let latest: Bool
+    let bindingCount: Int
+    let boundChannels: [String]
 
     var id: String { sessionKey }
 }
@@ -91,6 +93,21 @@ struct AccessUserEntry: Identifiable {
     var displayName: String { senderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? userID : senderName }
 }
 
+struct InboxConversationEntry: Identifiable {
+    let conversationKey: String
+    let channel: String
+    let conversationID: String
+    let threadID: String
+    let conversationTitle: String
+    let lastMessageID: String
+    let lastText: String
+    let lastSender: String
+    let lastSeenAt: String
+    let updatedAt: String
+
+    var id: String { conversationKey }
+}
+
 enum MessageDeliveryStatus: String {
     case sending
     case sent
@@ -107,6 +124,13 @@ struct ChatMessage: Identifiable {
     let time: String
     let deliveryStatus: MessageDeliveryStatus?
     let statusDetail: String
+}
+
+struct SessionBindTarget: Identifiable {
+    let sessionKey: String
+    let workdir: String
+
+    var id: String { sessionKey }
 }
 
 enum LocalTimeDisplay {
@@ -279,8 +303,10 @@ final class LogTailController: ObservableObject {
 
 final class GatewayController: ObservableObject {
     typealias CAGJSONResult = (code: Int32, json: [String: Any]?, raw: String)
+    typealias StartupStepResult = (ok: Bool, summary: String)
 
     @Published var statusText: String = "Checking status..."
+    @Published var gatewaydStatusText: String = "Checking gatewayd..."
     @Published var activeChannelText: String = "Unknown"
     @Published var detailText: String = ""
     @Published var selectedChannel: ChannelType
@@ -312,6 +338,7 @@ final class GatewayController: ObservableObject {
     private var lastLocalSendFingerprint: String = ""
     private var lastLocalSendAt: Date = .distantPast
     private var didAutoStartOnLaunch = false
+    private var didRunBootstrapFlow = false
     private let refreshLock = NSLock()
     private var refreshingHealth = false
     private var refreshingStatus = false
@@ -343,6 +370,42 @@ final class GatewayController: ObservableObject {
         GUILogger.shared.log(message)
     }
 
+    private func logEvent(_ event: String, fields: [String: String] = [:]) {
+        var parts = ["event=\(event)"]
+        for key in fields.keys.sorted() {
+            let value = fields[key, default: ""]
+            var clean = value.replacingOccurrences(of: "\n", with: "\\n")
+            if clean.contains(where: \.isWhitespace) || clean.contains("\"") {
+                clean = "\"" + clean.replacingOccurrences(of: "\"", with: "\\\"") + "\""
+            }
+            parts.append("\(key)=\(clean)")
+        }
+        log(parts.joined(separator: " "))
+    }
+
+    private func overallGatewayStatus(gatewaydStatus: String, runtimeStatus: String?) -> String {
+        switch gatewaydStatus {
+        case "running":
+            if let runtimeStatus, !runtimeStatus.isEmpty, runtimeStatus != "running" {
+                return "Degraded"
+            }
+            return "Running"
+        case "degraded":
+            return "Degraded"
+        case "stopped":
+            return "Stopped"
+        default:
+            if runtimeStatus == "running" {
+                return "Degraded"
+            }
+            return "Unknown"
+        }
+    }
+
+    private func startupRunID() -> String {
+        String(UUID().uuidString.prefix(8)).lowercased()
+    }
+
     private func loadSessionWorkdirByKey() -> [String: String] {
         guard let raw = UserDefaults.standard.dictionary(forKey: sessionWorkdirDefaultsKey) else {
             return [:]
@@ -364,6 +427,15 @@ final class GatewayController: ObservableObject {
 
     private func baseSessionKey(_ key: String) -> String {
         key.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? key
+    }
+
+    private func textPreview(_ raw: String, limit: Int = 96) -> String {
+        let compact = raw
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard compact.count > limit else { return compact }
+        let end = compact.index(compact.startIndex, offsetBy: limit)
+        return String(compact[..<end]).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
     }
 
     private func workdirForSessionKey(_ key: String) -> String {
@@ -499,6 +571,131 @@ final class GatewayController: ObservableObject {
         refreshHealthChecksAsync()
         refreshStatusAsync()
         refreshAccessUsersAsync()
+    }
+
+    func bootstrapOnAppear() {
+        guard !didRunBootstrapFlow else {
+            logEvent("startup", fields: [
+                "phase": "skip",
+                "reason": "already_bootstrapped",
+            ])
+            return
+        }
+        didRunBootstrapFlow = true
+        let bootID = startupRunID()
+        let startedAt = Date()
+        logEvent("startup", fields: [
+            "phase": "begin",
+            "boot_id": bootID,
+            "repo_root": cfg.repoRoot,
+            "selected_channel": selectedChannel.rawValue,
+        ])
+
+        runInBackground { [weak self] in
+            guard let self else { return }
+            var degraded = false
+            var blocked = false
+
+            func runStep(_ name: String, _ body: () -> StartupStepResult) {
+                let stepStart = Date()
+                self.logEvent("startup", fields: [
+                    "phase": "step_start",
+                    "boot_id": bootID,
+                    "step": name,
+                ])
+                let result = body()
+                let elapsed = Int(Date().timeIntervalSince(stepStart) * 1000)
+                if !result.ok {
+                    degraded = true
+                }
+                self.logEvent("startup", fields: [
+                    "phase": "step_done",
+                    "boot_id": bootID,
+                    "step": name,
+                    "ok": result.ok ? "true" : "false",
+                    "elapsed_ms": "\(elapsed)",
+                    "summary": result.summary,
+                ])
+            }
+
+            runStep("component_checks") {
+                let checks = self.checkRequiredComponents()
+                self.onMain {
+                    self.componentChecks = checks
+                }
+                let ready = checks.filter(\.installed).count
+                return (ready > 0, "installed=\(ready)/\(checks.count)")
+            }
+
+            runStep("config_snapshot") {
+                let snapshot = self.loadConfigValuesSnapshot()
+                self.onMain {
+                    self.configValuesByKey = snapshot
+                    self.configReloadVersion += 1
+                    self.envFilePath = self.envPath
+                    self.globalEnvFilePath = self.userEnvPath
+                }
+                return (true, "keys=\(snapshot.count)")
+            }
+
+            runStep("health") {
+                self.refreshHealthChecks()
+                self.flushMainQueue()
+                let failed = self.healthChecks.filter { !$0.ok }.count
+                if failed > 0 {
+                    blocked = true
+                    return (false, "failed_checks=\(failed)")
+                }
+                return (true, "failed_checks=0")
+            }
+
+            runStep("gatewayd_status") {
+                self.refreshStatus()
+                self.flushMainQueue()
+                let gatewaydStatus = self.gatewaydStatusText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let serviceStatus = self.statusText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return (serviceStatus != "unknown", "gatewayd=\(gatewaydStatus) service=\(serviceStatus)")
+            }
+
+            runStep("sessions") {
+                self.refreshSessions()
+                self.flushMainQueue()
+                return (true, "count=\(self.sessions.count)")
+            }
+
+            runStep("access_users") {
+                self.refreshAccessUsers()
+                self.flushMainQueue()
+                return (true, "count=\(self.accessUsers.count)")
+            }
+
+            if let selected = self.selectedSessionKey, !selected.isEmpty {
+                runStep("selected_session_chat") {
+                    self.refreshSelectedSessionChat()
+                    self.flushMainQueue()
+                    return (true, "session_key=\(selected) messages=\(self.chatMessages.count)")
+                }
+            }
+
+            let outcome: String
+            if blocked {
+                outcome = "blocked"
+            } else if degraded {
+                outcome = "degraded"
+            } else {
+                outcome = "ready"
+            }
+            let totalElapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
+            self.logEvent("startup", fields: [
+                "phase": "complete",
+                "boot_id": bootID,
+                "outcome": outcome,
+                "elapsed_ms": "\(totalElapsed)",
+                "selected_session": self.selectedSessionKey ?? "",
+                "session_count": "\(self.sessions.count)",
+                "access_user_count": "\(self.accessUsers.count)",
+            ])
+        }
     }
 
     private func refreshConfigSnapshotAsync() {
@@ -971,6 +1168,11 @@ final class GatewayController: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async(execute: block)
     }
 
+    private func flushMainQueue() {
+        guard !Thread.isMainThread else { return }
+        DispatchQueue.main.sync {}
+    }
+
     private func setSessionSending(_ sending: Bool, sessionKey: String, startedAt: Date? = nil) {
         let key = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
@@ -1137,8 +1339,8 @@ final class GatewayController: ObservableObject {
 
     func refreshHealthChecks() {
         let t0 = Date()
-        let doctor = cagJSON("doctor")
-        let fallback = cagJSON("health")
+        let doctor = cagJSON("doctor", direct: true)
+        let fallback = cagJSON("health", direct: true)
         let response = doctor.json ?? fallback.json
 
         guard let node = response else {
@@ -1198,7 +1400,7 @@ final class GatewayController: ObservableObject {
 
     func refreshAccessUsers() {
         let t0 = Date()
-        let res = cagJSON("users", timeoutSec: 8)
+        let res = cagJSON("users", timeoutSec: 8, direct: true)
         guard let node = res.json, ((node["ok"] as? Bool) ?? false) else {
             onMain { [weak self] in
                 self?.accessUsers = []
@@ -1254,6 +1456,60 @@ final class GatewayController: ObservableObject {
             }
             let fallback = allowing ? "Allow user failed." : "Block user failed."
             completion(false, self.cliErrorMessage(from: result.raw, fallback: fallback))
+        }
+    }
+
+    func loadInboxConversationsAsync(completion: @escaping ([InboxConversationEntry], String?) -> Void) {
+        cagJSONAsync("channel", args: ["inbox"], timeoutSec: 8, direct: true) { [weak self] result in
+            guard let self else { return }
+            guard let node = result.json, ((node["ok"] as? Bool) ?? false) else {
+                completion([], self.actionErrorMessage(from: result) ?? "Load unassigned conversations failed.")
+                return
+            }
+            let items = (node["items"] as? [[String: Any]] ?? []).compactMap { item -> InboxConversationEntry? in
+                let conversationKey = ((item["conversation_key"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let channel = ((item["channel"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let conversationID = ((item["conversation_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !conversationKey.isEmpty, !channel.isEmpty, !conversationID.isEmpty else { return nil }
+                return InboxConversationEntry(
+                    conversationKey: conversationKey,
+                    channel: channel,
+                    conversationID: conversationID,
+                    threadID: ((item["thread_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    conversationTitle: ((item["conversation_title"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    lastMessageID: ((item["last_message_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    lastText: ((item["last_text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    lastSender: ((item["last_sender"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    lastSeenAt: ((item["last_seen_at"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    updatedAt: ((item["updated_at"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }
+            completion(items, nil)
+        }
+    }
+
+    func bindConversation(entry: InboxConversationEntry, toSessionKey sessionKey: String, completion: @escaping (Bool, String) -> Void) {
+        let targetSessionKey = baseSessionKey(sessionKey)
+        var args = [
+            "create",
+            "--channel", entry.channel,
+            "--conversation-id", entry.conversationID,
+            "--session-key", targetSessionKey,
+        ]
+        if !entry.threadID.isEmpty {
+            args += ["--thread-id", entry.threadID]
+        }
+        cagJSONAsync("binding", args: args, timeoutSec: 8) { [weak self] result in
+            guard let self else { return }
+            let ok = (result.json?["ok"] as? Bool) ?? false
+            if ok {
+                self.detailText = "Bound \(entry.channel) conversation to session: \(targetSessionKey)"
+                self.refreshSessionsAsync()
+                self.refreshAccessUsersAsync()
+                completion(true, "")
+                return
+            }
+            completion(false, self.actionErrorMessage(from: result) ?? "Bind conversation failed.")
         }
     }
 
@@ -1347,7 +1603,7 @@ final class GatewayController: ObservableObject {
         let overlay = localOverlayMessagesBySession[sessionKey, default: []]
         runInBackground { [weak self] in
             guard let self else { return }
-            let res = self.cagJSON("session", args: ["messages", "--key", baseSessionKey], timeoutSec: 8)
+            let res = self.cagJSON("session", args: ["messages", "--key", baseSessionKey], timeoutSec: 8, direct: true)
             var persisted: [ChatMessage] = []
             var timeline: [String: [ProcessEvent]] = [:]
             if let node = res.json,
@@ -1433,60 +1689,68 @@ final class GatewayController: ObservableObject {
 
     func refreshStatus() {
         let t0 = Date()
-        let primary = cagJSON("runtime", args: ["status"])
-        let fallback = cagJSON("status")
-        let node = primary.json.flatMap { payload -> [String: Any]? in
+        let gatewayd = cagJSON("gatewayd-status", direct: true)
+        let runtimePrimary = cagJSON("runtime", args: ["status"], direct: true)
+        let runtimeFallback = cagJSON("status", direct: true)
+        let runtimeNode = runtimePrimary.json.flatMap { payload -> [String: Any]? in
             if payload["status"] != nil || payload["running"] != nil {
                 return payload
             }
             return nil
-        } ?? fallback.json
+        } ?? runtimeFallback.json
 
-        guard let node else {
+        let gatewaydNode = gatewayd.json
+        guard gatewaydNode != nil || runtimeNode != nil else {
             onMain { [weak self] in
                 guard let self else { return }
                 self.statusText = "Unknown"
+                self.gatewaydStatusText = "Unknown"
                 self.activeChannelText = self.selectedChannel.title
-                let raw = primary.raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                let fallbackRaw = fallback.raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                self.detailText = "Status command failed.\n\((raw.isEmpty ? fallbackRaw : raw))"
+                let gatewaydRaw = gatewayd.raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                let runtimeRaw = runtimePrimary.raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                let fallbackRaw = runtimeFallback.raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                let diagnostics = [gatewaydRaw, runtimeRaw, fallbackRaw].filter { !$0.isEmpty }
+                self.detailText = "Status command failed.\n" + diagnostics.joined(separator: "\n")
             }
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
             log("refresh result kind=status status=parse_failed elapsed_ms=\(ms)")
             return
         }
-        let status = (node["status"] as? String) ?? "unknown"
-        let channelRaw = (node["channel"] as? String) ?? selectedChannel.rawValue
+        let runtimeStatus = ((runtimeNode?["status"] as? String) ?? "unknown").trimmingCharacters(in: .whitespacesAndNewlines)
+        let channelRaw = (runtimeNode?["channel"] as? String) ?? selectedChannel.rawValue
         let channel = ChannelType(rawValue: channelRaw) ?? selectedChannel
-        let nodeLog = ((node["log_file"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let gatewayAddr = ((node["gateway_addr"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let runtimeLog = ((runtimeNode?["log_file"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let gatewaydStatus = ((gatewaydNode?["status"] as? String) ?? "unknown").trimmingCharacters(in: .whitespacesAndNewlines)
+        let gatewayAddr = (((gatewaydNode?["gateway_addr"] as? String) ?? (gatewaydNode?["listen"] as? String)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedRuntimeStatus = selectedSessionEntry()?.sender.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let serviceStatus = overallGatewayStatus(
+            gatewaydStatus: gatewaydStatus,
+            runtimeStatus: runtimeNode == nil ? nil : runtimeStatus
+        )
         onMain { [weak self] in
             guard let self else { return }
-            if !nodeLog.isEmpty {
-                self.currentLogFile = nodeLog
-            } else if self.currentLogFile.isEmpty {
+            if runtimeStatus == "running", !runtimeLog.isEmpty {
+                self.currentLogFile = runtimeLog
+            } else {
                 self.currentLogFile = self.cfg.logFile
             }
             if !gatewayAddr.isEmpty {
                 self.gatewayAddressText = gatewayAddr
             }
             self.activeChannelText = channel.title
-            if status == "running" {
-                self.statusText = "Running"
-                let pidPart = (node["pid"] as? Int).map { "PID \($0)\n" } ?? ""
-                let gatewayPart = self.gatewayAddressText.isEmpty ? "" : "Gatewayd: \(self.gatewayAddressText)\n"
-                let lockPart = (node["lock_file"] as? String).map { "Lock: \($0)\n" } ?? ""
-                let logPart = self.currentLogFile
-                self.detailText = "\(gatewayPart)\(pidPart)Channel: \(channel.title)\n\(lockPart)Log: \(logPart)"
-            } else {
-                self.statusText = "Stopped"
-                let gatewayPart = self.gatewayAddressText.isEmpty ? "" : "Gatewayd: \(self.gatewayAddressText)\n"
-                let lockPart = (node["lock_file"] as? String).map { "\nLock: \($0)" } ?? ""
-                self.detailText = "\(gatewayPart)Channel: \(channel.title)\nLog: \(self.currentLogFile)\(lockPart)"
-            }
+            self.gatewaydStatusText = gatewaydStatus.capitalized
+            self.statusText = serviceStatus
+            let gatewayPart = self.gatewayAddressText.isEmpty ? "Gateway: \(serviceStatus)\n" : "Gateway: \(serviceStatus) \(self.gatewayAddressText)\n"
+            let gatewayPIDPart = (gatewaydNode?["pid"] as? Int).map { "Gateway PID \($0)\n" } ?? ""
+            let runtimePart = runtimeNode == nil ? "Runtime: unavailable\n" : "Runtime: \(runtimeStatus.capitalized)\n"
+            let runtimePIDPart = (runtimeNode?["pid"] as? Int).map { "Runtime PID \($0)\n" } ?? ""
+            let lockPart = (runtimeNode?["lock_file"] as? String).map { "Runtime lock: \($0)\n" } ?? ""
+            let sessionPart = selectedRuntimeStatus.isEmpty ? "" : "Selected session: \(selectedRuntimeStatus)\n"
+            let logPart = "Log: \(self.currentLogFile)"
+            self.detailText = "\(gatewayPart)\(gatewayPIDPart)\(runtimePart)\(runtimePIDPart)\(sessionPart)Channel: \(channel.title)\n\(lockPart)\(logPart)"
         }
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
-        log("refresh result kind=status status=\(status) elapsed_ms=\(ms)")
+        log("refresh result kind=status service_status=\(serviceStatus.lowercased()) runtime_status=\(runtimeStatus) gatewayd_status=\(gatewaydStatus) elapsed_ms=\(ms)")
     }
 
     func autoStartOnLaunch() {
@@ -1508,7 +1772,19 @@ final class GatewayController: ObservableObject {
 
     func refreshSessions() {
         let t0 = Date()
-        let sessionsResult = cagJSON("session", args: ["list"])
+        let sessionsResult = cagJSON("session", args: ["list"], direct: true)
+        let bindingsResult = cagJSON("binding", args: ["list"], direct: true)
+        var boundChannelsBySession: [String: Set<String>] = [:]
+        if let node = bindingsResult.json,
+           let ok = node["ok"] as? Bool, ok,
+           let items = node["items"] as? [[String: Any]] {
+            for item in items {
+                let sessionKey = ((item["session_key"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let channel = ((item["channel"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !sessionKey.isEmpty, !channel.isEmpty else { continue }
+                boundChannelsBySession[sessionKey, default: []].insert(channel)
+            }
+        }
         if let node = sessionsResult.json,
            let ok = node["ok"] as? Bool, ok,
            let items = node["items"] as? [[String: Any]] {
@@ -1516,6 +1792,7 @@ final class GatewayController: ObservableObject {
             for item in items {
                 let sessionKey = (item["session_key"] as? String) ?? ""
                 if sessionKey.isEmpty { continue }
+                let channels = Array(boundChannelsBySession[sessionKey, default: []]).sorted()
                 built.append(
                     SessionEntry(
                         sessionKey: sessionKey,
@@ -1526,7 +1803,9 @@ final class GatewayController: ObservableObject {
                         lastText: "",
                         lastTime: (item["updated_at"] as? String) ?? "",
                         workdir: (item["workdir"] as? String) ?? "",
-                        latest: built.isEmpty
+                        latest: built.isEmpty,
+                        bindingCount: channels.count,
+                        boundChannels: channels
                     )
                 )
             }
@@ -1800,11 +2079,28 @@ final class GatewayController: ObservableObject {
         userMsgId: String,
         timeout: TimeInterval
     ) {
+        let startedAt = Date()
+        logEvent("send", fields: [
+            "phase": "start",
+            "session_key": baseSessionKey,
+            "message_id": userMsgId,
+            "source": "gui",
+            "text_preview": textPreview(text),
+            "timeout_sec": String(Int(timeout)),
+        ])
         let sendArgs = ["send", "--key", baseSessionKey, "--message-id", userMsgId, "--text", text]
         cagJSONAsync("session", args: sendArgs, timeoutSec: timeout) { [weak self] result in
             guard let self else { return }
             self.setSessionSending(false, sessionKey: selectedSessionKey)
+            let elapsedMS = Int(Date().timeIntervalSince(startedAt) * 1000)
             guard let node = result.json else {
+                self.logEvent("send", fields: [
+                    "phase": "error",
+                    "session_key": baseSessionKey,
+                    "message_id": userMsgId,
+                    "elapsed_ms": "\(elapsedMS)",
+                    "error": "invalid_cli_response",
+                ])
                 self.updateOverlayMessage(
                     sessionKey: selectedSessionKey,
                     messageId: userMsgId,
@@ -1816,6 +2112,14 @@ final class GatewayController: ObservableObject {
             }
             let ok = (node["ok"] as? Bool) ?? false
             if ok {
+                self.logEvent("send", fields: [
+                    "phase": "done",
+                    "session_key": baseSessionKey,
+                    "message_id": userMsgId,
+                    "ok": "true",
+                    "elapsed_ms": "\(elapsedMS)",
+                    "status": ((node["status"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                ])
                 self.updateOverlayMessage(
                     sessionKey: selectedSessionKey,
                     messageId: userMsgId,
@@ -1833,6 +2137,14 @@ final class GatewayController: ObservableObject {
             let nestedErr = ((node["error"] as? [String: Any])?["message"] as? String) ?? ""
             let plainErr = (node["error"] as? String) ?? ""
             let errText = nestedErr.isEmpty ? (plainErr.isEmpty ? "send failed" : plainErr) : nestedErr
+            self.logEvent("send", fields: [
+                "phase": "done",
+                "session_key": baseSessionKey,
+                "message_id": userMsgId,
+                "ok": "false",
+                "elapsed_ms": "\(elapsedMS)",
+                "error": errText,
+            ])
             self.updateOverlayMessage(
                 sessionKey: selectedSessionKey,
                 messageId: userMsgId,
@@ -2008,7 +2320,14 @@ final class GatewayController: ObservableObject {
             return
         }
         writeEnvValue("CHANNEL_TYPE", value: selectedChannel.rawValue)
-        let res = cagJSON("start")
+        let gatewayd = cagJSON("gatewayd-up", timeoutSec: 5)
+        if gatewayd.code != 0 || (gatewayd.json?["ok"] as? Bool) == false {
+            statusText = "Start failed"
+            detailText = cliErrorMessage(from: gatewayd.raw, fallback: "gatewayd-up failed.")
+            refreshStatus()
+            return
+        }
+        let res = cagJSON("start", direct: true)
         guard let node = res.json else {
             statusText = "Start failed"
             detailText = "Invalid CLI response.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
@@ -2032,7 +2351,7 @@ final class GatewayController: ObservableObject {
     }
 
     func stop() {
-        let res = cagJSON("stop")
+        let res = cagJSON("stop", direct: true)
         guard let node = res.json else {
             statusText = "Stop failed"
             detailText = "Invalid CLI response.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
@@ -2044,6 +2363,10 @@ final class GatewayController: ObservableObject {
             detailText = errorText
             return
         }
+        let gatewayd = cagJSON("gatewayd-down", timeoutSec: 5)
+        if gatewayd.code != 0 {
+            log("gatewayd-down after stop failed code=\(gatewayd.code) raw=\(gatewayd.raw)")
+        }
         refreshStatus()
         detailText = "Gateway stopped."
     }
@@ -2052,7 +2375,18 @@ final class GatewayController: ObservableObject {
         statusText = "Restarting"
         detailText = "Restarting gateway..."
         writeEnvValue("CHANNEL_TYPE", value: selectedChannel.rawValue)
-        let res = cagJSON("restart")
+        let shutdownRes = cagJSON("gatewayd-down", timeoutSec: 5)
+        if shutdownRes.code != 0 {
+            log("restart gatewayd-down failed code=\(shutdownRes.code) raw=\(shutdownRes.raw)")
+        }
+        let bootRes = cagJSON("gatewayd-up", timeoutSec: 5)
+        if bootRes.code != 0 || (bootRes.json?["ok"] as? Bool) == false {
+            statusText = "Restart failed"
+            detailText = cliErrorMessage(from: bootRes.raw, fallback: "gatewayd-up failed.")
+            refreshStatus()
+            return
+        }
+        let res = cagJSON("restart", direct: true)
         guard let node = res.json else {
             statusText = "Restart failed"
             detailText = "Invalid CLI response.\n\(res.raw.trimmingCharacters(in: .whitespacesAndNewlines))"
@@ -2406,15 +2740,29 @@ struct ComponentRow: View {
 struct SessionRow: View {
     let session: SessionEntry
 
+    private var bindingLabel: String? {
+        guard session.bindingCount > 0 else { return nil }
+        if session.boundChannels.count == 1, let channel = session.boundChannels.first {
+            let title = ChannelType(rawValue: channel)?.title ?? channel.capitalized
+            return "Bound: \(title)"
+        }
+        return "\(session.bindingCount) bindings"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(session.sender == "-" ? session.sessionKey : session.sender)
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Text(session.channel)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(session.channel)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    if let bindingLabel {
+                        Pill(text: bindingLabel, color: .green)
+                    }
+                }
             }
             Text(session.lastText)
                 .font(.system(size: 12))
@@ -3227,6 +3575,154 @@ struct InitialSetupView: View {
     }
 }
 
+struct InboxConversationRow: View {
+    let entry: InboxConversationEntry
+
+    private var titleText: String {
+        let title = entry.conversationTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? entry.conversationID : title
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(titleText)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                Spacer()
+                Text(entry.channel.capitalized)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            if !entry.lastText.isEmpty {
+                Text(entry.lastText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+            }
+            HStack(spacing: 10) {
+                if !entry.lastSender.isEmpty {
+                    Text("From \(entry.lastSender)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                if !entry.lastSeenAt.isEmpty {
+                    Text(LocalTimeDisplay.text(entry.lastSeenAt))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct BindConversationSheet: View {
+    @ObservedObject var controller: GatewayController
+    let target: SessionBindTarget
+    let onClose: () -> Void
+
+    @State private var inboxItems: [InboxConversationEntry] = []
+    @State private var loadError: String = ""
+    @State private var loading = false
+    @State private var bindingConversationKey: String?
+
+    private func reload() {
+        loading = true
+        loadError = ""
+        controller.loadInboxConversationsAsync { items, error in
+            loading = false
+            inboxItems = items
+            loadError = error ?? ""
+        }
+    }
+
+    private func bind(_ entry: InboxConversationEntry) {
+        bindingConversationKey = entry.conversationKey
+        loadError = ""
+        controller.bindConversation(entry: entry, toSessionKey: target.sessionKey) { ok, message in
+            bindingConversationKey = nil
+            if ok {
+                onClose()
+                return
+            }
+            loadError = message
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Bind Conversation")
+                        .font(.title3.weight(.semibold))
+                    Text("Target session: \(target.sessionKey)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button("Refresh") {
+                    reload()
+                }
+                .disabled(loading)
+            }
+
+            if !loadError.isEmpty {
+                Text(loadError)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+            }
+
+            if loading {
+                ProgressView("Loading unassigned conversations...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else if inboxItems.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("No unassigned conversations available.")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("When a channel conversation arrives without a binding, it will appear here.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(12)
+                .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(inboxItems) { entry in
+                            HStack(spacing: 10) {
+                                InboxConversationRow(entry: entry)
+                                Button(bindingConversationKey == entry.conversationKey ? "Binding..." : "Bind") {
+                                    bind(entry)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(bindingConversationKey != nil)
+                            }
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Close") {
+                    onClose()
+                }
+            }
+        }
+        .padding(18)
+        .frame(width: 700, height: 420)
+        .onAppear {
+            reload()
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var controller: GatewayController
     @StateObject private var logTailController: LogTailController
@@ -3237,6 +3733,7 @@ struct ContentView: View {
     @State private var timelineMessage: ChatMessage?
     @State private var refreshTick: Int = 0
     @State private var showDeleteAllConfirmation = false
+    @State private var bindTarget: SessionBindTarget?
 
     init(controller: GatewayController) {
         _controller = StateObject(wrappedValue: controller)
@@ -3245,7 +3742,26 @@ struct ContentView: View {
     }
 
     private var statusColor: Color {
-        controller.statusText == "Running" ? .green : (controller.statusText == "Blocked" ? .orange : .gray)
+        switch controller.statusText {
+        case "Running":
+            return .green
+        case "Degraded", "Blocked":
+            return .orange
+        default:
+            return .gray
+        }
+    }
+
+    private var canStartGateway: Bool {
+        !["Running", "Restarting", "Blocked"].contains(controller.statusText)
+    }
+
+    private var canStopGateway: Bool {
+        ["Running", "Degraded", "Restarting", "Start failed", "Stop failed", "Restart failed"].contains(controller.statusText)
+    }
+
+    private var canRestartGateway: Bool {
+        !["Blocked", "Restarting"].contains(controller.statusText)
     }
 
     private var selectedSessionSending: Bool {
@@ -3274,13 +3790,13 @@ struct ContentView: View {
                     Text("CLI Agent Gateway")
                         .font(.title3.weight(.semibold))
                     Spacer()
-                    Pill(text: controller.statusText, color: statusColor)
+                    Pill(text: "Gateway \(controller.statusText)", color: statusColor)
                     ChannelStatusPill(channelText: controller.activeChannelText)
                     IconActionButton(
                         systemName: "play.fill",
                         helpText: "Start gateway",
                         tint: .green,
-                        disabled: controller.statusText == "Running"
+                        disabled: !canStartGateway
                     ) {
                         controller.start()
                     }
@@ -3289,7 +3805,7 @@ struct ContentView: View {
                         systemName: "stop.fill",
                         helpText: "Stop gateway",
                         tint: .orange,
-                        disabled: controller.statusText != "Running"
+                        disabled: !canStopGateway
                     ) {
                         controller.stop()
                     }
@@ -3297,7 +3813,7 @@ struct ContentView: View {
                         systemName: "arrow.clockwise",
                         helpText: "Restart gateway",
                         tint: .blue,
-                        disabled: controller.statusText == "Blocked"
+                        disabled: !canRestartGateway
                     ) {
                         controller.restart()
                     }
@@ -3354,6 +3870,12 @@ struct ContentView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
+                                        Button("Bind Unassigned Conversation...") {
+                                            bindTarget = SessionBindTarget(
+                                                sessionKey: session.sessionKey,
+                                                workdir: session.workdir
+                                            )
+                                        }
                                         Button("Delete Gateway Session") {
                                             controller.deleteSession(key: session.sessionKey)
                                         }
@@ -3442,12 +3964,8 @@ struct ContentView: View {
         }
         .frame(width: 1140, height: 700)
         .onAppear {
-            GUILogger.shared.log("view onAppear bootstrap refresh")
-            controller.refreshComponentChecksAsync()
-            controller.ensureGatewaydForGUI()
-            controller.refreshConfigPanel()
-            controller.refreshSessionsAsync()
-            controller.refreshAccessUsersAsync()
+            GUILogger.shared.log("view onAppear bootstrap begin")
+            controller.bootstrapOnAppear()
         }
         .onReceive(refreshTimer) { _ in
             refreshTick += 1
@@ -3476,6 +3994,11 @@ struct ContentView: View {
         .sheet(item: $timelineMessage) { msg in
             ProcessTimelineView(message: msg, events: controller.timeline(for: msg))
         }
+        .sheet(item: $bindTarget) { target in
+            BindConversationSheet(controller: controller, target: target) {
+                bindTarget = nil
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .guiOpenSettings)) { _ in
             configInitialChannel = controller.selectedChannel
             showConfig = true
@@ -3497,7 +4020,6 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             logTailController.stop()
-            controller.shutdownGatewaydForGUI()
         }
     }
 }

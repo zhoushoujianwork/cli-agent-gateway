@@ -63,7 +63,13 @@ Without a binding:
 
 Runtime is the live ACP/agent process attached to a session.
 
+`gatewayd` hosts the runtime manager together with the external gRPC/control-plane surface.
+
+They are one integrated daemon, not two peer top-level services.
+
 Runtime is not the user-facing session identity.
+
+Gateway startup must fail fast when the configured ACP agent command is not available on PATH.
 
 ## System Shape
 
@@ -72,7 +78,7 @@ flowchart TD
     GUI["GUI"] --> CLI
     DT["DingTalk"] --> CH
     IM["iMessage"] --> CH
-    CLI["cag CLI"] --> GD["gatewayd"]
+    CLI["cag CLI"] --> GD["gatewayd (gRPC + runtime host)"]
     CH["Channel Adapters"] --> GD
     GD --> SM["Session Manager"]
     GD --> BM["Binding Manager"]
@@ -114,6 +120,7 @@ To support real shared context across GUI and phone entrypoints:
 - one session may have one live runtime
 - multiple entrypoints may write into that same session
 - the runtime must survive across sends until explicitly detached, stopped, cleared, or deleted
+- runtime restart must be explicit for a target session; no hidden restart/fork behavior
 
 This is the key change from the old stateless-per-send model.
 

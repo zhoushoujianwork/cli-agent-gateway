@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"cli-agent-gateway/internal/core"
+	"cli-agent-gateway/internal/infra/proclog"
 )
 
 type Adapter struct {
@@ -59,10 +60,13 @@ func (a *Adapter) runPrompt(req core.TaskRequest, sessionID string) (core.TaskRe
 	terminalReason := "timeout"
 	rawEvents := make([]map[string]any, 0)
 	lastHeartbeat := time.Now()
+	lastEventAt := time.Now()
 	sawChunk := false
 	lastContentAt := time.Time{}
-	softIdleSec := envIntDefault("ACP_SOFT_TERMINAL_IDLE_SEC", 8)
+	softIdleSec := softTerminalIdleSec()
 	softIdle := time.Duration(softIdleSec) * time.Second
+	terminalDrain := terminalDrainWindow()
+	terminalSeen := false
 
 	promptID, err := a.client.StartRequest("session/prompt", map[string]any{
 		"sessionId": sessionID,
@@ -78,7 +82,25 @@ func (a *Adapter) runPrompt(req core.TaskRequest, sessionID string) (core.TaskRe
 	a.debugf("prompt start request_id=%d session_id=%s", promptID, sessionID)
 
 	for time.Now().Before(deadline) {
-		if softIdleSec > 0 && sawChunk && !lastContentAt.IsZero() && time.Since(lastContentAt) >= softIdle {
+		if terminalSeen && time.Since(lastEventAt) >= terminalDrain {
+			if strings.TrimSpace(summary) == "" {
+				summary = strings.TrimSpace(output)
+			}
+			if strings.TrimSpace(summary) == "" {
+				summary = "任务已处理完成。"
+			}
+			return core.TaskResult{
+				TraceID:        req.TraceID,
+				Status:         status,
+				Summary:        summary,
+				TerminalReason: terminalReason,
+				ElapsedSec:     int(time.Since(start).Seconds()),
+				OutputText:     output,
+				RawEvents:      rawEvents,
+			}, nil
+		}
+
+		if !terminalSeen && softIdleSec > 0 && sawChunk && !lastContentAt.IsZero() && time.Since(lastContentAt) >= softIdle {
 			a.debugf("soft terminal request_id=%d session_id=%s reason=idle_after_chunk idle=%ds", promptID, sessionID, softIdleSec)
 			rawEvents = append(rawEvents, map[string]any{
 				"method": "session/soft_terminal",
@@ -119,6 +141,7 @@ func (a *Adapter) runPrompt(req core.TaskRequest, sessionID string) (core.TaskRe
 			return core.TaskResult{}, wrapACPError("session/prompt", err)
 		}
 		if resp != nil {
+			lastEventAt = time.Now()
 			rawEvents = append(rawEvents, map[string]any{
 				"method": "session/prompt.response",
 				"params": map[string]any{
@@ -150,24 +173,14 @@ func (a *Adapter) runPrompt(req core.TaskRequest, sessionID string) (core.TaskRe
 				if isTerminal(result) {
 					status = statusFrom(result)
 					terminalReason = terminalReasonFrom(result)
-					if summary == "" {
-						summary = "任务已处理完成。"
-					}
-					return core.TaskResult{
-						TraceID:        req.TraceID,
-						Status:         status,
-						Summary:        summary,
-						TerminalReason: terminalReason,
-						ElapsedSec:     int(time.Since(start).Seconds()),
-						OutputText:     output,
-						RawEvents:      rawEvents,
-					}, nil
+					terminalSeen = true
 				}
 			}
 		}
 
 		serverReq := a.client.PopRequest(50 * time.Millisecond)
 		if serverReq != nil {
+			lastEventAt = time.Now()
 			rawEvents = append(rawEvents, map[string]any{
 				"method": "session/server_request",
 				"params": map[string]any{
@@ -190,6 +203,7 @@ func (a *Adapter) runPrompt(req core.TaskRequest, sessionID string) (core.TaskRe
 
 		n := a.client.PopNotification(50 * time.Millisecond)
 		if n != nil {
+			lastEventAt = time.Now()
 			a.debugf("notification method=%s params=%v", n.Method, n.Params)
 			rawEvents = append(rawEvents, map[string]any{"method": n.Method, "params": n.Params})
 			text := extractText(n.Params)
@@ -210,18 +224,7 @@ func (a *Adapter) runPrompt(req core.TaskRequest, sessionID string) (core.TaskRe
 			if isTerminal(n.Params) {
 				status = statusFrom(n.Params)
 				terminalReason = terminalReasonFrom(n.Params)
-				if summary == "" {
-					summary = "任务已处理完成。"
-				}
-				return core.TaskResult{
-					TraceID:        req.TraceID,
-					Status:         status,
-					Summary:        summary,
-					TerminalReason: terminalReason,
-					ElapsedSec:     int(time.Since(start).Seconds()),
-					OutputText:     output,
-					RawEvents:      rawEvents,
-				}, nil
+				terminalSeen = true
 			}
 		}
 	}
@@ -244,7 +247,10 @@ func (a *Adapter) debugf(format string, args ...any) {
 	if !a.debug {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[go-acp] "+format+"\n", args...)
+	proclog.Info("acp", map[string]any{
+		"event":   "debug",
+		"message": fmt.Sprintf(format, args...),
+	})
 }
 
 func (a *Adapter) ensureReady() error {
@@ -354,6 +360,9 @@ func extractRawText(payload map[string]any) (string, bool) {
 }
 
 func isTerminal(payload map[string]any) bool {
+	if stopReasonFromPayload(payload) != "" {
+		return true
+	}
 	if u, ok := payload["update"].(map[string]any); ok {
 		su := strings.ToLower(strings.TrimSpace(anyString(u["sessionUpdate"])))
 		if su == "turn_complete" || su == "agent_turn_complete" || su == "task_complete" || su == "completed" {
@@ -374,6 +383,18 @@ func isTerminal(payload map[string]any) bool {
 }
 
 func statusFrom(payload map[string]any) string {
+	if stop := stopReasonFromPayload(payload); stop != "" {
+		switch stop {
+		case "end_turn", "completed", "done", "success":
+			return "ok"
+		case "failed", "error":
+			return "error"
+		case "cancelled":
+			return "cancelled"
+		default:
+			return "ok"
+		}
+	}
 	st := strings.ToLower(strings.TrimSpace(anyString(payload["status"])))
 	if st == "" {
 		st = strings.ToLower(strings.TrimSpace(anyString(payload["state"])))
@@ -391,6 +412,14 @@ func statusFrom(payload map[string]any) string {
 }
 
 func terminalReasonFrom(payload map[string]any) string {
+	if stop := stopReasonFromPayload(payload); stop != "" {
+		switch stop {
+		case "end_turn", "completed", "done", "success":
+			return "completed"
+		default:
+			return stop
+		}
+	}
 	if u, ok := payload["update"].(map[string]any); ok {
 		su := strings.ToLower(strings.TrimSpace(anyString(u["sessionUpdate"])))
 		switch su {
@@ -453,6 +482,17 @@ func envIntDefault(key string, fallback int) int {
 	return n
 }
 
+func terminalDrainWindow() time.Duration {
+	ms := envIntDefault("ACP_TERMINAL_DRAIN_MS", 500)
+	return time.Duration(ms) * time.Millisecond
+}
+
+func softTerminalIdleSec() int {
+	// Default off. Some ACP agents can pause between streamed chunks and the
+	// terminal event; forcing a synthetic terminal here truncates output.
+	return envIntDefault("ACP_SOFT_TERMINAL_IDLE_SEC", 0)
+}
+
 func isSessionResourceNotFound(errObj any) bool {
 	if m, ok := errObj.(map[string]any); ok {
 		code := toInt(m["code"])
@@ -502,6 +542,16 @@ func sessionUpdateType(payload map[string]any) string {
 func isChunkUpdate(t string) bool {
 	v := strings.ToLower(strings.TrimSpace(t))
 	return strings.HasSuffix(v, "_chunk")
+}
+
+func stopReasonFromPayload(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	if stop := strings.ToLower(strings.TrimSpace(anyString(payload["stopReason"]))); stop != "" {
+		return stop
+	}
+	return strings.ToLower(strings.TrimSpace(anyString(payload["stop_reason"])))
 }
 
 func appendChunk(base, chunk string) string {

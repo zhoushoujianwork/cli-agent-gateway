@@ -37,11 +37,8 @@ gui-build: build
 	contents_dir="$$app_path/Contents"; \
 	macos_dir="$$contents_dir/MacOS"; \
 	resources_dir="$$contents_dir/Resources"; \
-	status_json_file="$$(mktemp)"; \
-	trap 'rm -f "$$status_json_file"' EXIT; \
 	mkdir -p "$$macos_dir" "$$resources_dir"; \
-	./bin/cag runtime status --json > "$$status_json_file"; \
-	/usr/bin/python3 -c 'import json, pathlib, sys; status = json.loads(pathlib.Path(sys.argv[3]).read_text()); home = pathlib.Path.home(); cfg = {"repoRoot": str(pathlib.Path(sys.argv[2])), "workdir": str(status.get("workdir") or (home / ".cag")), "lockFile": str(status.get("lock_file") or (home / ".cag/runtime/gateway.lock")), "logFile": str(status.get("log_file") or (home / ".cag/gatewayd/gatewayd.log")), "stateFile": str(status.get("state_file") or (home / ".cag/runtime/state.json")), "interactionLogFile": str(status.get("interaction_log_file") or (home / ".cag/runtime/interactions.jsonl"))}; pathlib.Path(sys.argv[1]).write_text(json.dumps(cfg, indent=2) + "\n")' "$$resources_dir/gateway_config.json" "$(CURDIR)" "$$status_json_file"; \
+	/usr/bin/python3 -c 'import json, pathlib, sys; home = pathlib.Path.home(); cfg = {"repoRoot": str(pathlib.Path(sys.argv[2])), "workdir": str(home / ".cag"), "lockFile": str(home / ".cag/runtime/gateway.lock"), "logFile": str(home / ".cag/gatewayd/gatewayd.log"), "stateFile": str(home / ".cag/runtime/state.json"), "interactionLogFile": str(home / ".cag/runtime/interactions.jsonl")}; pathlib.Path(sys.argv[1]).write_text(json.dumps(cfg, indent=2) + "\n")' "$$resources_dir/gateway_config.json" "$(CURDIR)"; \
 	sdk_path="$$(xcrun --show-sdk-path --sdk macosx)"; \
 	printf '%s\n' \
 		'<?xml version="1.0" encoding="UTF-8"?>' \
@@ -112,7 +109,5 @@ gui-close:
 
 .PHONY: gui-dev
 gui-dev: gui-close build
-	@CAG_GRPC_DISABLE=1 ./bin/cag restart --json >/dev/null || echo "[WARN] local gateway restart failed; continuing to GUI build"
-	@./bin/cag gatewayd-up --json >/dev/null || echo "[WARN] gatewayd-up failed; GUI will use direct CLI fallback"
 	@$(MAKE) gui-build GUI_OUTPUT_DIR="$(GUI_OUTPUT_DIR)"
 	@open "$(GUI_APP_PATH)"

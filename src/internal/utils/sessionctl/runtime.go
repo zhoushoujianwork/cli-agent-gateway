@@ -14,6 +14,7 @@ import (
 	"cli-agent-gateway/internal/agents/acp"
 	"cli-agent-gateway/internal/config"
 	"cli-agent-gateway/internal/core"
+	"cli-agent-gateway/internal/infra/proclog"
 	"cli-agent-gateway/internal/storage"
 
 	_ "modernc.org/sqlite"
@@ -74,7 +75,11 @@ func (m *RuntimeManager) EnsureRecovered() error {
 		}
 		req := BuildRuntimeTaskRequest(session, "gatewayd-recover", "", "gatewayd-recover", "recover-"+key, nil)
 		if _, err := m.attachRuntime(cfg, session, req, true); err != nil {
-			fmt.Fprintf(os.Stderr, "[WARN] gatewayd recover failed session_key=%s err=%v\n", key, err)
+			proclog.Warn("gatewayd", map[string]any{
+				"event":       "runtime_recover_failed",
+				"session_key": key,
+				"err":         err.Error(),
+			})
 		}
 	}
 	return nil

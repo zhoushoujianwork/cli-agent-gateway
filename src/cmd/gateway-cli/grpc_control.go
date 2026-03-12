@@ -18,6 +18,7 @@ import (
 	"cli-agent-gateway/internal/config"
 	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
 	"cli-agent-gateway/internal/infra/envfile"
+	"cli-agent-gateway/internal/infra/proclog"
 	"cli-agent-gateway/internal/utils/sessionctl"
 
 	"google.golang.org/grpc"
@@ -179,18 +180,25 @@ func (s *gatewayControlServer) mutateSession(repoRoot, sessionKey string, fn fun
 }
 
 func runLocalJSONAction(repoRoot string, args ...string) (map[string]any, error) {
-	exe, err := os.Executable()
+	cmd, err := newSelfCommand(repoRoot, args...)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(exe, args...)
-	cmd.Dir = repoRoot
-	cmd.Env = managedChildEnv("CAG_GRPC_DISABLE=1")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
+	if shouldRetryWithGoRun(runErr) {
+		cmd = exec.Command("go", append([]string{"run", "./cmd/gateway-cli"}, args...)...)
+		cmd.Dir = repoRoot
+		cmd.Env = managedChildEnv("CAG_GRPC_DISABLE=1")
+		stdout.Reset()
+		stderr.Reset()
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		runErr = cmd.Run()
+	}
 	raw := strings.TrimSpace(stdout.String())
 	if raw == "" {
 		raw = strings.TrimSpace(stderr.String())
@@ -209,6 +217,35 @@ func runLocalJSONAction(repoRoot string, args ...string) (map[string]any, error)
 		return nil, err
 	}
 	return node, nil
+}
+
+func newSelfCommand(repoRoot string, args ...string) (*exec.Cmd, error) {
+	exe, err := os.Executable()
+	name, argv := selfCommandSpec(exe, args...)
+	if err != nil && name == "" {
+		return nil, err
+	}
+	cmd := exec.Command(name, argv...)
+	cmd.Dir = repoRoot
+	cmd.Env = managedChildEnv("CAG_GRPC_DISABLE=1")
+	return cmd, nil
+}
+
+func selfCommandSpec(exe string, args ...string) (string, []string) {
+	if strings.TrimSpace(exe) != "" {
+		if _, statErr := os.Stat(exe); statErr == nil {
+			return exe, args
+		}
+	}
+	return "go", append([]string{"run", "./cmd/gateway-cli"}, args...)
+}
+
+func shouldRetryWithGoRun(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "fork/exec") && strings.Contains(msg, "no such file or directory")
 }
 
 func statusResponseFromNode(node map[string]any) *gatewayv1.StatusResponse {
@@ -330,29 +367,76 @@ func runGatewayd(repoRoot string, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	proclog.Configure()
+	if err := ensureACPCommandAvailable(repoRoot); err != nil {
+		proclog.Error("gatewayd", map[string]any{
+			"event": "lifecycle",
+			"phase": "preflight_failed",
+			"err":   err.Error(),
+		})
+		return 1
+	}
 	addr := strings.TrimSpace(*listen)
 	if addr == "" {
 		addr = defaultGatewaydAddr
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gatewayd listen failed: %v\n", err)
+		proclog.Error("gatewayd", map[string]any{
+			"event": "lifecycle",
+			"phase": "listen_failed",
+			"addr":  addr,
+			"err":   err.Error(),
+		})
 		return 1
 	}
 	defer ln.Close()
 
 	srv := grpc.NewServer()
 	gatewayv1.RegisterGatewayControlServer(srv, &gatewayControlServer{repoRoot: repoRoot, managers: map[string]*sessionctl.RuntimeManager{}})
-	fmt.Printf("gatewayd listening=%s\n", addr)
+	proclog.Info("gatewayd", map[string]any{
+		"event": "lifecycle",
+		"phase": "listening",
+		"addr":  addr,
+	})
 	if err := srv.Serve(ln); err != nil {
-		fmt.Fprintf(os.Stderr, "gatewayd serve failed: %v\n", err)
+		proclog.Error("gatewayd", map[string]any{
+			"event": "lifecycle",
+			"phase": "serve_failed",
+			"addr":  addr,
+			"err":   err.Error(),
+		})
 		return 1
 	}
 	return 0
 }
 
+func runGatewaydStatus(repoRoot string, args []string) int {
+	fs := flag.NewFlagSet("gatewayd-status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	jsonOut := fs.Bool("json", false, "json output")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	payload := inspectGatewaydStatus(repoRoot)
+	if *jsonOut {
+		printJSON(payload)
+		return 0
+	}
+	fmt.Println(mustJSON(payload))
+	return 0
+}
+
 func runGatewaydUp(repoRoot string, args []string) int {
 	jsonOut := hasFlag(args, "--json")
+	if err := ensureACPCommandAvailable(repoRoot); err != nil {
+		if jsonOut {
+			printJSONActionError("gatewayd-up", "acp_preflight_failed", err.Error())
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "gatewayd-up failed: %v\n", err)
+		return 1
+	}
 	if err := ensureGatewaydRunning(repoRoot); err != nil {
 		if jsonOut {
 			printJSONActionError("gatewayd-up", "gatewayd_up_failed", err.Error())
@@ -383,6 +467,56 @@ func runGatewaydUp(repoRoot string, args []string) int {
 		fmt.Printf("gatewayd ready listen=%s\n", gatewaydAddr())
 	}
 	return 0
+}
+
+func inspectGatewaydStatus(repoRoot string) map[string]any {
+	addr := gatewaydAddr()
+	logFile := resolveGatewaydLogPath(repoRoot)
+	stateFile := gatewaydStatePath(repoRoot)
+	state, stateErr := loadGatewaydState(repoRoot)
+	statePresent := stateErr == nil
+	pidAlive := state.PID > 0 && processAlive(state.PID)
+	reachable := false
+	if conn, err := dialGateway(addr, 200*time.Millisecond); err == nil {
+		reachable = true
+		_ = conn.Close()
+	}
+	status := "stopped"
+	running := false
+	switch {
+	case reachable:
+		status = "running"
+		running = true
+	case pidAlive:
+		status = "degraded"
+		running = true
+	}
+	payload := map[string]any{
+		"ok":           true,
+		"action":       "gatewayd-status",
+		"status":       status,
+		"running":      running,
+		"reachable":    reachable,
+		"listen":       addr,
+		"gateway_addr": addr,
+		"log_file":     logFile,
+		"state_file":   stateFile,
+		"managed":      statePresent,
+	}
+	if statePresent {
+		if state.PID > 0 {
+			payload["pid"] = state.PID
+			payload["pid_alive"] = pidAlive
+		}
+		if strings.TrimSpace(state.StartedAt) != "" {
+			payload["started_at"] = strings.TrimSpace(state.StartedAt)
+		}
+		if strings.TrimSpace(state.Listen) != "" {
+			payload["listen"] = strings.TrimSpace(state.Listen)
+			payload["gateway_addr"] = strings.TrimSpace(state.Listen)
+		}
+	}
+	return payload
 }
 
 func runGatewaydDown(repoRoot string, args []string) int {
@@ -443,6 +577,9 @@ func ensureGatewaydRunning(repoRoot string) error {
 }
 
 func startManagedGatewayd(repoRoot, addr string) error {
+	if err := ensureACPCommandAvailable(repoRoot); err != nil {
+		return err
+	}
 	if state, err := loadGatewaydState(repoRoot); err == nil {
 		if state.PID > 0 && processAlive(state.PID) && strings.TrimSpace(state.Listen) == addr {
 			if conn, err := dialGateway(addr, 250*time.Millisecond); err == nil {
@@ -460,7 +597,7 @@ func startManagedGatewayd(repoRoot, addr string) error {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return err
 	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
@@ -751,7 +888,7 @@ func trySendToSessionViaGRPC(repoRoot, sessionKey, text, messageID, msgType stri
 		return nil, err
 	}
 	defer conn.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout())
+	ctx, cancel := context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout(repoRoot))
 	defer cancel()
 	return cli.SendToSession(ctx, &gatewayv1.SendToSessionRequest{
 		SessionKey: sessionKey,
@@ -882,12 +1019,16 @@ func grpcDisabled() bool {
 	return raw == "1" || raw == "true" || raw == "yes"
 }
 
-func sendViaSessionGRPCTimeout() time.Duration {
+func sendViaSessionGRPCTimeout(repoRoot string) time.Duration {
 	timeoutSec := 120
-	raw := strings.TrimSpace(os.Getenv("AGENT_TIMEOUT_SEC"))
-	if raw != "" {
-		if n, err := fmt.Sscanf(raw, "%d", &timeoutSec); err == nil && n == 1 && timeoutSec > 0 {
-			// parsed
+	if cfg, err := config.Load(repoRoot, ""); err == nil && cfg.TimeoutSec > 0 {
+		timeoutSec = cfg.TimeoutSec
+	} else {
+		raw := strings.TrimSpace(os.Getenv("AGENT_TIMEOUT_SEC"))
+		if raw != "" {
+			if n, err := fmt.Sscanf(raw, "%d", &timeoutSec); err == nil && n == 1 && timeoutSec > 0 {
+				// parsed
+			}
 		}
 	}
 	if timeoutSec < 30 {

@@ -39,6 +39,7 @@ cag binding show
 
 cag runtime status
 cag runtime ps
+cag runtime restart
 cag runtime logs
 ```
 
@@ -70,6 +71,7 @@ Recommended hidden/internal command set during migration:
 - `cag doctor`
 - `cag health`
 - `cag gatewayd`
+- `cag gatewayd-status`
 - `cag gatewayd-up`
 - `cag gatewayd-down`
 - `cag users`
@@ -79,6 +81,13 @@ Recommended hidden/internal command set during migration:
 - `cag start`
 - `cag stop`
 - `cag restart`
+
+Internal operator note:
+
+- `path`: `gatewayd-status`
+- `purpose`: inspect managed gateway daemon state without auto-starting it
+- `feature_group`: `control-plane-ops`
+- `sunset_group`: `gatewayd`
 
 Recommended legacy compatibility set during migration:
 
@@ -105,10 +114,13 @@ These annotations exist so an obsolete command family can be removed in one pass
 ## Control-Plane Rules
 
 - grouped commands talk to one user-scoped `gatewayd`
+- `gatewayd` is the managed daemon that exposes gRPC/operator APIs and hosts runtime management
 - command RPCs must not carry `repo_root`
 - control-plane state/log/config live under `~/.cag`
 - a repo checkout may be the shell cwd, but it is not a control-plane identity
 - hidden/internal commands should not be described as the primary product workflow
+- `gatewayd-status` is a read-only internal operator command and must not auto-start `gatewayd`
+- writes routed through grouped commands should be observable in `gatewayd` logs with action, target session, and elapsed time
 
 ## Session Commands
 
@@ -176,6 +188,7 @@ These annotations exist so an obsolete command family can be removed in one pass
 - rules:
   - must not default to `latest`
   - must not infer session from channel metadata
+  - client wait timeout for `session send` must derive from the same resolved `AGENT_TIMEOUT_SEC` used by the target runtime, with a small transport buffer; it must not use an unrelated fixed default
 
 ### `cag session messages`
 
@@ -203,6 +216,8 @@ These annotations exist so an obsolete command family can be removed in one pass
 - `sunset_group`: `session-v2`
 - inputs:
   - `--key <session_key>`
+- rules:
+  - if the configured ACP agent command is unavailable, attach must fail with an actionable error
 
 ### `cag session detach`
 
@@ -212,6 +227,18 @@ These annotations exist so an obsolete command family can be removed in one pass
 - `sunset_group`: `session-v2`
 - inputs:
   - `--key <session_key>`
+
+### `cag runtime restart`
+
+- `path`: `runtime restart`
+- `purpose`: restart the live ACP runtime for one explicit session
+- `feature_group`: `runtime-ops`
+- `sunset_group`: `runtime-v2`
+- inputs:
+  - `--session-key <session_key>`
+- rules:
+  - must not infer a target session from channel metadata or `latest`
+  - should stop the existing runtime if present, then attach a fresh runtime for the same session
 
 ## Channel Commands
 
@@ -293,7 +320,7 @@ These annotations exist so an obsolete command family can be removed in one pass
 ### `cag runtime status`
 
 - `path`: `runtime status`
-- `purpose`: inspect global runtime health
+- `purpose`: inspect runtime diagnostics owned by `gatewayd`, not a separate top-level daemon
 - `feature_group`: `runtime-ops`
 - `sunset_group`: `runtime-v2`
 

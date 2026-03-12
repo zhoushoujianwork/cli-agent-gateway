@@ -23,6 +23,7 @@ import (
 	"cli-agent-gateway/internal/core"
 	"cli-agent-gateway/internal/infra/envfile"
 	"cli-agent-gateway/internal/infra/lockfile"
+	"cli-agent-gateway/internal/infra/proclog"
 	"cli-agent-gateway/internal/storage"
 	"cli-agent-gateway/internal/utils/sessionctl"
 
@@ -98,6 +99,7 @@ type SessionsPayload struct {
 }
 
 func main() {
+	proclog.Configure()
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to resolve cwd: %v\n", err)
@@ -105,6 +107,26 @@ func main() {
 	}
 	repoRoot := detectRepoRoot(cwd)
 	os.Exit(executeRoot(repoRoot, os.Args[1:]))
+}
+
+func cliLogInfo(event string, fields map[string]any) {
+	node := map[string]any{
+		"event": strings.TrimSpace(event),
+	}
+	for key, value := range fields {
+		node[key] = value
+	}
+	proclog.Info("cli", node)
+}
+
+func cliLogWarn(event string, fields map[string]any) {
+	node := map[string]any{
+		"event": strings.TrimSpace(event),
+	}
+	for key, value := range fields {
+		node[key] = value
+	}
+	proclog.Warn("cli", node)
 }
 
 func runGoMain(repoRoot string, args []string) int {
@@ -156,8 +178,14 @@ func runGoMain(repoRoot string, args []string) int {
 		"started_at": time.Now().UTC().Format(time.RFC3339),
 	})
 
-	fmt.Printf("[%s] startup channel=%s workdir=%s\n", time.Now().UTC().Format(time.RFC3339), cfg.ChannelType, cfg.Workdir)
-	fmt.Printf("[%s] startup acp_cmd=%s permission_policy=%s\n", time.Now().UTC().Format(time.RFC3339), cfg.ACPAgentCmd, cfg.PermissionPolicy)
+	cliLogInfo("runtime_start", map[string]any{
+		"channel": cfg.ChannelType,
+		"workdir": cfg.Workdir,
+	})
+	cliLogInfo("runtime_config", map[string]any{
+		"acp_cmd":           cfg.ACPAgentCmd,
+		"permission_policy": cfg.PermissionPolicy,
+	})
 
 	if err := ensureGatewaydRunning(repoRoot); err != nil {
 		fmt.Fprintf(os.Stderr, "ensure gatewayd failed: %v\n", err)
@@ -197,11 +225,18 @@ func runGoMain(repoRoot string, args []string) int {
 		loop.PendingUnknownUsers = !strings.EqualFold(strings.TrimSpace(cfg.DingTalkDMPolicy), "allow_all")
 	}
 	if err := sendStartupGreeting(cfg, channel); err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] send startup greeting failed: %v\n", err)
+		cliLogWarn("startup_greeting_failed", map[string]any{
+			"err": err.Error(),
+		})
 	} else {
-		fmt.Fprintf(os.Stderr, "[INFO] startup greeting sent channel=%s target=%s\n", cfg.ChannelType, nonEmpty(startupGreetingTarget(cfg), "-"))
+		cliLogInfo("startup_greeting_sent", map[string]any{
+			"channel": cfg.ChannelType,
+			"target":  nonEmpty(startupGreetingTarget(cfg), "-"),
+		})
 		if warning := popChannelSendWarning(channel); warning != "" {
-			fmt.Fprintf(os.Stderr, "[WARN] startup greeting degraded: %s\n", warning)
+			cliLogWarn("startup_greeting_degraded", map[string]any{
+				"warning": warning,
+			})
 		}
 	}
 	if err := loop.RunForever(); err != nil {
@@ -382,7 +417,7 @@ func runStart(repoRoot string, args []string) int {
 	}
 	defer logFile.Close()
 
-	exe, err := os.Executable()
+	proc, err := newSelfCommand(repoRoot, "run")
 	if err != nil {
 		if jsonOut {
 			printJSONActionError("start", "executable_resolve_failed", err.Error())
@@ -391,8 +426,6 @@ func runStart(repoRoot string, args []string) int {
 		fmt.Fprintf(os.Stderr, "resolve executable failed: %v\n", err)
 		return 1
 	}
-	proc := exec.Command(exe, "run")
-	proc.Dir = repoRoot
 	proc.Stdout = logFile
 	proc.Stderr = logFile
 	proc.Env = managedChildEnv("GATEWAY_LOG_FILE="+logPath, "CAG_GRPC_DISABLE=")
@@ -691,13 +724,11 @@ func runRestart(repoRoot string, args []string) int {
 	}
 	defer logFile.Close()
 
-	exe, err := os.Executable()
+	p, err := newSelfCommand(repoRoot, "run")
 	if err != nil {
 		printJSONActionError("restart", "executable_resolve_failed", err.Error())
 		return 1
 	}
-	p := exec.Command(exe, "run")
-	p.Dir = repoRoot
 	p.Stdout = logFile
 	p.Stderr = logFile
 	p.Env = managedChildEnv("GATEWAY_LOG_FILE="+logPath, "CAG_GRPC_DISABLE=")
@@ -1033,10 +1064,19 @@ func runSend(repoRoot string, args []string) int {
 }
 
 func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string, dryRun bool, workdirOverride string) (SendPayload, error) {
-	fmt.Fprintf(os.Stderr, "[INFO] cli send start msg_id=%s session_key=%s channel=%s text=%s\n", msgID, key, cfg.ChannelType, shortLogText(body, 80))
+	cliLogInfo("session_send_start", map[string]any{
+		"msg_id":      msgID,
+		"session_key": key,
+		"channel":     cfg.ChannelType,
+		"text":        shortLogText(body, 80),
+	})
 	items, err := collectSessions(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] cli send session load failed msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_session_load_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return SendPayload{
 			OK:         false,
 			Channel:    cfg.ChannelType,
@@ -1058,7 +1098,10 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	}
 	if sess == nil {
 		err := fmt.Errorf("session not found for key=%s", key)
-		fmt.Fprintf(os.Stderr, "[WARN] cli send session missing msg_id=%s session_key=%s\n", msgID, key)
+		cliLogWarn("session_send_session_missing", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+		})
 		return SendPayload{
 			OK:         false,
 			Channel:    cfg.ChannelType,
@@ -1080,7 +1123,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		cfg.StorageSQLitePath,
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] cli send storage init failed msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_storage_init_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return SendPayload{
 			OK:         false,
 			Channel:    nonEmpty(sess.Channel, cfg.ChannelType),
@@ -1095,7 +1142,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	}
 	st, err := store.LoadState()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] cli send state load failed msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_state_load_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return SendPayload{
 			OK:         false,
 			Channel:    nonEmpty(sess.Channel, cfg.ChannelType),
@@ -1132,7 +1183,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	if wd, err := normalizeWorkdirPath("", workdirOverride); err != nil {
 		payload.OK = false
 		payload.Error = err.Error()
-		fmt.Fprintf(os.Stderr, "[WARN] cli send invalid workdir msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_invalid_workdir", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return payload, err
 	} else if strings.TrimSpace(wd) != "" {
 		resolvedWorkdir = wd
@@ -1148,25 +1203,47 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		if derr != nil {
 			payload.OK = false
 			payload.Error = derr.Error()
-			fmt.Fprintf(os.Stderr, "[WARN] cli send default workdir init failed msg_id=%s session_key=%s err=%v\n", msgID, key, derr)
+			cliLogWarn("session_send_default_workdir_init_failed", map[string]any{
+				"msg_id":      msgID,
+				"session_key": key,
+				"err":         derr.Error(),
+			})
 			return payload, derr
 		}
 		resolvedWorkdir = defaultWorkdir
-		fmt.Fprintf(os.Stderr, "[INFO] cli send default workdir initialized msg_id=%s session_key=%s workdir=%s\n", msgID, key, resolvedWorkdir)
+		cliLogInfo("session_send_default_workdir_initialized", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"workdir":     resolvedWorkdir,
+		})
 	}
-	fmt.Fprintf(os.Stderr, "[INFO] cli send session resolved msg_id=%s session_key=%s workdir=%s sender=%s\n", msgID, key, resolvedWorkdir, nonEmpty(sess.Sender, "-"))
+	cliLogInfo("session_send_session_resolved", map[string]any{
+		"msg_id":      msgID,
+		"session_key": key,
+		"workdir":     resolvedWorkdir,
+		"sender":      nonEmpty(sess.Sender, "-"),
+	})
 	stInfo, err := os.Stat(resolvedWorkdir)
 	if err != nil {
 		payload.OK = false
 		payload.Error = fmt.Sprintf("invalid workdir: %s", resolvedWorkdir)
-		fmt.Fprintf(os.Stderr, "[WARN] cli send workdir stat failed msg_id=%s session_key=%s path=%s err=%v\n", msgID, key, resolvedWorkdir, err)
+		cliLogWarn("session_send_workdir_stat_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"path":        resolvedWorkdir,
+			"err":         err.Error(),
+		})
 		return payload, err
 	}
 	if !stInfo.IsDir() {
 		err := fmt.Errorf("invalid workdir (not a directory): %s", resolvedWorkdir)
 		payload.OK = false
 		payload.Error = err.Error()
-		fmt.Fprintf(os.Stderr, "[WARN] cli send workdir not dir msg_id=%s session_key=%s path=%s\n", msgID, key, resolvedWorkdir)
+		cliLogWarn("session_send_workdir_not_dir", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"path":        resolvedWorkdir,
+		})
 		return payload, err
 	}
 	meta.Workdir = resolvedWorkdir
@@ -1178,12 +1255,19 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	if err := store.SaveState(st); err != nil {
 		payload.OK = false
 		payload.Error = err.Error()
-		fmt.Fprintf(os.Stderr, "[WARN] cli send save state failed msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_state_save_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return payload, err
 	}
 	if dryRun {
 		payload.TerminalReason = "dry_run"
-		fmt.Fprintf(os.Stderr, "[INFO] cli send dry-run msg_id=%s session_key=%s\n", msgID, key)
+		cliLogInfo("session_send_dry_run", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+		})
 		return payload, nil
 	}
 
@@ -1258,7 +1342,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	})
 	result, execErr := agent.Execute(req)
 	if execErr != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] cli send execute failed msg_id=%s session_key=%s err=%v\n", msgID, key, execErr)
+		cliLogWarn("session_send_execute_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         execErr.Error(),
+		})
 		errText := fmt.Sprintf("执行失败: %v", execErr)
 		_ = store.AppendInteraction(map[string]any{
 			"msg_id":       msgID,
@@ -1311,7 +1399,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	if err := store.SaveState(st); err != nil {
 		payload.OK = false
 		payload.Error = err.Error()
-		fmt.Fprintf(os.Stderr, "[WARN] cli send final state save failed msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_final_state_save_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return payload, err
 	}
 	reportPath, _ := store.WriteReport(map[string]any{
@@ -1357,7 +1449,12 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	}
 	payload.TerminalReason = nonEmpty(strings.TrimSpace(result.TerminalReason), terminalReasonForStatus(result.Status))
 	payload.ElapsedSec = result.ElapsedSec
-	fmt.Fprintf(os.Stderr, "[INFO] cli send done msg_id=%s session_key=%s status=%s elapsed=%ds\n", msgID, key, result.Status, result.ElapsedSec)
+	cliLogInfo("session_send_done", map[string]any{
+		"msg_id":      msgID,
+		"session_key": key,
+		"status":      result.Status,
+		"elapsed_sec": result.ElapsedSec,
+	})
 	return payload, nil
 }
 
@@ -2287,6 +2384,29 @@ func printJSONActionError(action, code, message string) {
 	})
 }
 
+func resolveACPBinary(command string) string {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+func ensureACPCommandAvailable(repoRoot string) error {
+	cfg, err := config.Load(repoRoot, "")
+	if err != nil {
+		return err
+	}
+	acpBin := resolveACPBinary(cfg.ACPAgentCmd)
+	if acpBin == "" {
+		return fmt.Errorf("ACP_AGENT_CMD is empty")
+	}
+	if _, err := exec.LookPath(acpBin); err != nil {
+		return fmt.Errorf("acp command not found: %s", acpBin)
+	}
+	return nil
+}
+
 func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayload {
 	p := HealthPayload{
 		OK:     false,
@@ -2323,12 +2443,10 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 		add("workdir", true, "workdir ready", "")
 	}
 
-	acpCmd := strings.TrimSpace(cfg.ACPAgentCmd)
-	acpBin := acpCmd
-	if fields := strings.Fields(acpCmd); len(fields) > 0 {
-		acpBin = fields[0]
-	}
-	if _, err := exec.LookPath(acpBin); err != nil {
+	acpBin := resolveACPBinary(cfg.ACPAgentCmd)
+	if acpBin == "" {
+		add("acp", false, "ACP_AGENT_CMD is empty", "set ACP_AGENT_CMD to a valid agent binary")
+	} else if _, err := exec.LookPath(acpBin); err != nil {
 		add("acp", false, fmt.Sprintf("acp command not found: %s", acpBin), "install codex and ensure ACP_AGENT_CMD is in PATH")
 	} else {
 		add("acp", true, fmt.Sprintf("acp command ready: %s", acpBin), "")

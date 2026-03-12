@@ -103,6 +103,9 @@ If current code and docs disagree:
 
 - `gatewayd` remains the single source of truth for control-plane state.
 - `~/.cag/` remains the canonical user-scoped runtime home.
+- Do not treat a repo checkout as a control-plane identity.
+- Do not add or preserve per-request `repo_root` routing in grouped command flows.
+- Task working directory belongs to `session.workdir`, not to `gatewayd`.
 - GUI must go through CLI / `gatewayd`; it must not mutate runtime files directly as product behavior.
 
 ## Command Group Annotation Requirement
@@ -150,3 +153,16 @@ Before any commit:
 - Never commit secrets.
 - Do not break lock semantics or runtime ownership invariants.
 - If unrelated local changes conflict with the task, stop and ask before overwriting them.
+
+## Newly Observed Workflows (2026-03-12)
+
+- GUI local dev loop (repo-verified): `make gui-dev`
+  - runs `gui-close`, rebuilds `./bin/cag`, attempts `CAG_GRPC_DISABLE=1 ./bin/cag restart --json`, attempts `./bin/cag gatewayd-up --json`, then rebuilds/opens the macOS app.
+- Runtime log workflow:
+  - `cd src && go run ./cmd/gateway-cli runtime logs`
+  - `cd src && go run ./cmd/gateway-cli runtime logs --follow`
+- Runtime/session inspection flags now used in repo workflows:
+  - `cd src && go run ./cmd/gateway-cli runtime ps --include-detached --json`
+  - `cd src && go run ./cmd/gateway-cli session list --include-archived --json`
+- Session send workflow supports file-backed input:
+  - `cd src && go run ./cmd/gateway-cli session send --key <session_key> --file <path> --json`

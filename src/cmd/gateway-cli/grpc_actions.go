@@ -12,6 +12,7 @@ import (
 
 	"cli-agent-gateway/internal/config"
 	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
+	"cli-agent-gateway/internal/infra/proclog"
 	"cli-agent-gateway/internal/storage"
 	"cli-agent-gateway/internal/utils/sessionctl"
 	"google.golang.org/grpc/codes"
@@ -34,8 +35,14 @@ func (s *gatewayControlServer) getRuntimeManager(root string) *sessionctl.Runtim
 }
 
 func (s *gatewayControlServer) Action(_ context.Context, req *gatewayv1.ActionRequest) (*gatewayv1.ActionResponse, error) {
+	startedAt := time.Now()
+	gatewaydLogAction("start", req, nil)
 	payload, err := s.handleAction(s.repoRoot, req)
 	if err != nil {
+		gatewaydLogAction("error", req, map[string]any{
+			"elapsed_ms": time.Since(startedAt).Milliseconds(),
+			"error":      err.Error(),
+		})
 		return &gatewayv1.ActionResponse{
 			Ok:     false,
 			Error:  err.Error(),
@@ -44,17 +51,109 @@ func (s *gatewayControlServer) Action(_ context.Context, req *gatewayv1.ActionRe
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
+		gatewaydLogAction("error", req, map[string]any{
+			"elapsed_ms": time.Since(startedAt).Milliseconds(),
+			"error":      err.Error(),
+		})
 		return &gatewayv1.ActionResponse{
 			Ok:     false,
 			Error:  err.Error(),
 			Action: strings.TrimSpace(req.GetAction()),
 		}, nil
 	}
+	extra := map[string]any{
+		"elapsed_ms": time.Since(startedAt).Milliseconds(),
+		"ok":         payloadOK(payload),
+	}
+	if status := strings.TrimSpace(fmt.Sprint(payload["status"])); status != "" && status != "<nil>" {
+		extra["status"] = status
+	}
+	if terminalReason := strings.TrimSpace(fmt.Sprint(payload["terminal_reason"])); terminalReason != "" && terminalReason != "<nil>" {
+		extra["terminal_reason"] = terminalReason
+	}
+	if elapsedSec, ok := payload["elapsed_sec"]; ok {
+		extra["elapsed_sec"] = elapsedSec
+	}
+	gatewaydLogAction("done", req, extra)
 	return &gatewayv1.ActionResponse{
 		Ok:          true,
 		Action:      strings.TrimSpace(req.GetAction()),
 		PayloadJson: string(raw),
 	}, nil
+}
+
+func gatewaydLogAction(phase string, req *gatewayv1.ActionRequest, extra map[string]any) {
+	fields := map[string]any{
+		"event":  "action",
+		"phase":  strings.TrimSpace(phase),
+		"action": strings.TrimSpace(req.GetAction()),
+	}
+	if sessionKey := strings.TrimSpace(req.GetSessionKey()); sessionKey != "" {
+		fields["session_key"] = sessionKey
+	}
+	if messageID := strings.TrimSpace(req.GetMessageId()); messageID != "" {
+		fields["message_id"] = messageID
+	}
+	if source := strings.TrimSpace(nonEmpty(req.GetSource(), "session.send")); strings.TrimSpace(req.GetAction()) == "session.send" && source != "" {
+		fields["source"] = source
+	} else if source := strings.TrimSpace(req.GetSource()); source != "" {
+		fields["source"] = source
+	}
+	if action := strings.TrimSpace(req.GetAction()); action == "session.send" {
+		if preview := logTextPreview(req.GetText(), 96); preview != "" {
+			fields["text_preview"] = preview
+		}
+	}
+	for key, value := range extra {
+		fields[key] = value
+	}
+	level := "INFO"
+	if strings.EqualFold(strings.TrimSpace(phase), "error") {
+		level = "ERROR"
+	}
+	proclog.Log(level, "gatewayd", fields)
+}
+
+func gatewaydLogTimeline(req *gatewayv1.ActionRequest, startedAt time.Time, step string, extra map[string]any) {
+	fields := map[string]any{
+		"event":      "action_timeline",
+		"phase":      strings.TrimSpace(step),
+		"action":     strings.TrimSpace(req.GetAction()),
+		"elapsed_ms": time.Since(startedAt).Milliseconds(),
+	}
+	if sessionKey := strings.TrimSpace(req.GetSessionKey()); sessionKey != "" {
+		fields["session_key"] = sessionKey
+	}
+	if messageID := strings.TrimSpace(req.GetMessageId()); messageID != "" {
+		fields["message_id"] = messageID
+	}
+	if source := strings.TrimSpace(nonEmpty(req.GetSource(), "session.send")); strings.TrimSpace(req.GetAction()) == "session.send" && source != "" {
+		fields["source"] = source
+	} else if source := strings.TrimSpace(req.GetSource()); source != "" {
+		fields["source"] = source
+	}
+	for key, value := range extra {
+		fields[key] = value
+	}
+	proclog.Info("gatewayd", fields)
+}
+
+func logTextPreview(raw string, limit int) string {
+	text := strings.Join(strings.Fields(strings.TrimSpace(raw)), " ")
+	if limit <= 0 || len(text) <= limit {
+		return text
+	}
+	return strings.TrimSpace(text[:limit]) + "..."
+}
+
+func payloadOK(payload map[string]any) bool {
+	if payload == nil {
+		return false
+	}
+	if ok, present := payload["ok"].(bool); present {
+		return ok
+	}
+	return true
 }
 
 func (s *gatewayControlServer) handleAction(root string, req *gatewayv1.ActionRequest) (map[string]any, error) {
@@ -105,6 +204,8 @@ func (s *gatewayControlServer) handleAction(root string, req *gatewayv1.ActionRe
 		return handleRuntimeStatus(store, manager, root)
 	case "runtime.ps":
 		return handleRuntimePS(store, manager, req)
+	case "runtime.restart":
+		return handleRuntimeRestart(store, manager, cfg, req)
 	case "runtime.logs":
 		return handleRuntimeLogs(root), nil
 	default:
@@ -305,10 +406,15 @@ func handleSessionDetach(store *sessionctl.Store, manager *sessionctl.RuntimeMan
 }
 
 func handleSessionSend(store *sessionctl.Store, manager *sessionctl.RuntimeManager, cfg config.AppConfig, req *gatewayv1.ActionRequest) (map[string]any, error) {
+	startedAt := time.Now()
+	gatewaydLogTimeline(req, startedAt, "request_accepted", nil)
 	_, session, err := loadSessionByKey(store, req.GetSessionKey(), false)
 	if err != nil {
 		return nil, err
 	}
+	gatewaydLogTimeline(req, startedAt, "session_loaded", map[string]any{
+		"workdir": session.Workdir,
+	})
 	text := strings.TrimSpace(req.GetText())
 	if text == "" {
 		return nil, fmt.Errorf("text required")
@@ -321,7 +427,11 @@ func handleSessionSend(store *sessionctl.Store, manager *sessionctl.RuntimeManag
 	if err := sessionctl.AppendSessionMessageRecord(cfg, session.Key, "user-"+msgID, "user", text, "sent", source, msgID); err != nil {
 		return nil, err
 	}
+	gatewaydLogTimeline(req, startedAt, "user_message_persisted", map[string]any{
+		"text_preview": logTextPreview(text, 96),
+	})
 	_ = sessionctl.AppendSessionTraceRecord(cfg, session.Key, msgID, "execute_start", source)
+	gatewaydLogTimeline(req, startedAt, "runtime_execute_started", nil)
 	result, runtimeRecord, execErr := manager.Send(cfg, session, sessionctl.BuildRuntimeTaskRequest(session, source, text, source, msgID, map[string]any{
 		"message_id": msgID,
 	}))
@@ -329,9 +439,17 @@ func handleSessionSend(store *sessionctl.Store, manager *sessionctl.RuntimeManag
 	status := "attached"
 	if execErr != nil {
 		status = "error"
+		gatewaydLogTimeline(req, startedAt, "runtime_execute_failed", map[string]any{
+			"error": execErr.Error(),
+		})
 		_ = sessionctl.AppendSessionMessageRecord(cfg, session.Key, "assistant-"+msgID, "system", execErr.Error(), "error", source, msgID)
 		_ = sessionctl.AppendSessionTraceRecord(cfg, session.Key, msgID, "execute_error", execErr.Error())
 	} else {
+		gatewaydLogTimeline(req, startedAt, "runtime_execute_finished", map[string]any{
+			"status":          result.Status,
+			"terminal_reason": nonEmpty(result.TerminalReason, result.Status),
+			"elapsed_sec":     result.ElapsedSec,
+		})
 		assistantText := strings.TrimSpace(result.OutputText)
 		if assistantText == "" {
 			assistantText = strings.TrimSpace(result.Summary)
@@ -351,6 +469,9 @@ func handleSessionSend(store *sessionctl.Store, manager *sessionctl.RuntimeManag
 	}); err != nil {
 		return nil, err
 	}
+	gatewaydLogTimeline(req, startedAt, "state_persisted", map[string]any{
+		"runtime_status": status,
+	})
 	payload := map[string]any{
 		"ok":              execErr == nil,
 		"action":          "session.send",
@@ -694,6 +815,44 @@ func handleRuntimePS(store *sessionctl.Store, manager *sessionctl.RuntimeManager
 	}, nil
 }
 
+func handleRuntimeRestart(store *sessionctl.Store, manager *sessionctl.RuntimeManager, cfg config.AppConfig, req *gatewayv1.ActionRequest) (map[string]any, error) {
+	_, session, err := loadSessionByKey(store, req.GetSessionKey(), false)
+	if err != nil {
+		return nil, err
+	}
+	if err := manager.Detach(session.Key); err != nil {
+		return nil, err
+	}
+	runtimeRecord, err := manager.Attach(cfg, session, nonEmpty(req.GetSource(), "runtime.restart"), map[string]any{
+		"restart": true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.Mutate(func(st *storage.StateData) error {
+		rec := st.Sessions[session.Key]
+		rec.Status = "attached"
+		rec.UpdatedAt = now
+		st.Sessions[session.Key] = rec
+		runtimeRecord.UpdatedAt = now
+		runtimeRecord.Status = "attached"
+		st.RuntimeIndex[session.Key] = runtimeRecord
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	_ = sessionctl.AppendSessionTraceRecord(cfg, session.Key, "restart-"+session.Key, "runtime_restarted", "runtime detached and attached")
+	return map[string]any{
+		"ok":          true,
+		"action":      "runtime.restart",
+		"session_key": session.Key,
+		"status":      "attached",
+		"attached":    true,
+		"updated_at":  now,
+	}, nil
+}
+
 func handleRuntimeLogs(root string) map[string]any {
 	return map[string]any{
 		"ok":       true,
@@ -766,7 +925,7 @@ func tryActionViaGRPC(repoRoot string, req *gatewayv1.ActionRequest) (*gatewayv1
 		return nil, err
 	}
 	defer conn.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout())
+	ctx, cancel := context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout(repoRoot))
 	defer cancel()
 	resp, err := cli.Action(ctx, req)
 	if err == nil {
@@ -786,7 +945,7 @@ func tryActionViaGRPC(repoRoot string, req *gatewayv1.ActionRequest) (*gatewayv1
 		return nil, err
 	}
 	defer conn.Close()
-	ctx, cancel = context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout())
+	ctx, cancel = context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout(repoRoot))
 	defer cancel()
 	return cli.Action(ctx, req)
 }
@@ -815,4 +974,12 @@ func decodeActionPayload(resp *gatewayv1.ActionResponse) (map[string]any, error)
 		return nil, err
 	}
 	return payload, nil
+}
+
+func runActionLocal(repoRoot string, req *gatewayv1.ActionRequest) (map[string]any, error) {
+	server := &gatewayControlServer{
+		repoRoot: repoRoot,
+		managers: map[string]*sessionctl.RuntimeManager{},
+	}
+	return server.handleAction(repoRoot, req)
 }

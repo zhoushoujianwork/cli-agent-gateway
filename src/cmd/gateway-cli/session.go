@@ -58,6 +58,7 @@ func commandSpecs() []CommandSpec {
 		{Path: "binding show", Purpose: "Show one binding", FeatureGroup: "binding-routing", SunsetGroup: "binding"},
 		{Path: "runtime status", Purpose: "Show global runtime status", FeatureGroup: "runtime-ops", SunsetGroup: "runtime"},
 		{Path: "runtime ps", Purpose: "List live session runtimes", FeatureGroup: "runtime-ops", SunsetGroup: "runtime"},
+		{Path: "runtime restart", Purpose: "Restart a live runtime for one session", FeatureGroup: "runtime-ops", SunsetGroup: "runtime"},
 		{Path: "runtime logs", Purpose: "Show runtime log path or stream logs", FeatureGroup: "runtime-ops", SunsetGroup: "runtime"},
 	}
 }
@@ -204,6 +205,29 @@ func newSessionSendCmd(repoRoot string) *cobra.Command {
 
 func runAction(repoRoot, action string, jsonOut bool, req *gatewayv1.ActionRequest) int {
 	req.Action = action
+	if grpcDisabled() {
+		payload, err := runActionLocal(repoRoot, req)
+		if err != nil {
+			if jsonOut {
+				printJSONActionError(action, "local_action_failed", err.Error())
+			} else {
+				fmt.Fprintf(os.Stderr, "%s failed: %v\n", action, err)
+			}
+			return 1
+		}
+		if jsonOut {
+			printJSON(payload)
+			if ok, present := payload["ok"].(bool); present && !ok {
+				return 1
+			}
+			return 0
+		}
+		renderPlainAction(action, payload)
+		if ok, present := payload["ok"].(bool); present && !ok {
+			return 1
+		}
+		return 0
+	}
 	resp, err := tryActionViaGRPC(repoRoot, req)
 	if err != nil {
 		if jsonOut {

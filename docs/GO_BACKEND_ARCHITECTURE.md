@@ -6,6 +6,8 @@ This document describes the backend design that supports the new session-first p
 
 Support one user working on the same task session from multiple entrypoints while preserving one shared live task context.
 
+`gatewayd` is the integrated backend daemon for this model: it exposes the external gRPC/control-plane surface and owns runtime management internally.
+
 ## New Backend Managers
 
 ### Session Manager
@@ -47,6 +49,7 @@ Responsibilities:
 
 - attach live ACP runtime to a session
 - detach runtime from a session
+- restart a live ACP runtime for one explicit session
 - keep runtime registry
 - serialize writes into one session runtime
 - expose runtime status and process list
@@ -56,6 +59,8 @@ Owns:
 - live runtime handle
 - process/session health
 - current attached ACP session identity as internal-only data
+
+The runtime manager is a subsystem hosted inside `gatewayd`, not a separate top-level service beside it.
 
 ## Internal Rule
 
@@ -92,9 +97,10 @@ flowchart TD
 ### GUI Send
 
 1. GUI selects one explicit session.
-2. GUI calls `session send`.
-3. Runtime manager finds or creates the live runtime for that session.
-4. Message is delivered into that session runtime.
+2. GUI calls `session send` through `gatewayd`.
+3. `gatewayd` records one action trace for the request with action, session key, message id, source, and elapsed time.
+4. Runtime manager finds or creates the live runtime for that session.
+5. Message is delivered into that session runtime.
 
 ### Channel Ingress
 
@@ -119,8 +125,13 @@ Allowed transitions:
 - `created -> attached`
 - `attached -> detached`
 - `attached -> cleared`
+- `attached -> restarted -> attached`
 - `attached -> deleted`
 - `detached -> attached`
+
+Gateway control-plane startup should fail fast if the configured ACP agent command cannot be resolved.
+
+Passive GUI reads may use direct CLI mode, but GUI writes that mutate session or runtime state must flow through `gatewayd` so one control-plane trace exists for each operator action.
 
 ## Storage Model Preview
 

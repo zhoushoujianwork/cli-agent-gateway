@@ -16,6 +16,7 @@ func newRuntimeCmd(repoRoot string) *cobra.Command {
 	cmd.AddCommand(
 		newRuntimeStatusCmd(repoRoot),
 		newRuntimePSCmd(repoRoot),
+		newRuntimeRestartCmd(repoRoot),
 		newRuntimeLogsCmd(repoRoot),
 	)
 	return cmd
@@ -57,6 +58,27 @@ func newRuntimePSCmd(repoRoot string) *cobra.Command {
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
 	cmd.Flags().StringVar(&sessionKey, "session-key", "", "session filter")
 	cmd.Flags().BoolVar(&includeDetached, "include-detached", false, "include detached entries")
+	return cmd
+}
+
+func newRuntimeRestartCmd(repoRoot string) *cobra.Command {
+	var jsonOut bool
+	var sessionKey string
+
+	cmd := &cobra.Command{
+		Use:          "restart",
+		Short:        "Restart one session runtime",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "runtime.restart", jsonOut, &gatewayv1.ActionRequest{
+				SessionKey: sessionKey,
+			}))
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	cmd.Flags().StringVar(&sessionKey, "session-key", "", "target session key")
+	_ = cmd.MarkFlagRequired("session-key")
 	return cmd
 }
 

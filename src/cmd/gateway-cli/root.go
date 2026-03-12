@@ -88,6 +88,9 @@ Primary product commands:
 		newRawRootCmd("gatewayd", "Run the gateway control-plane server", true, false, func(args []string) int {
 			return runGatewayd(repoRoot, args)
 		}),
+		newRawRootCmd("gatewayd-status", "Inspect managed gateway control-plane state", true, false, func(args []string) int {
+			return runGatewaydStatus(repoRoot, args)
+		}),
 		newRawRootCmd("gatewayd-up", "Ensure the managed gateway control-plane is up", true, false, func(args []string) int {
 			return runGatewaydUp(repoRoot, args)
 		}),
