@@ -212,6 +212,29 @@ func AppendSessionTraceRecord(cfg config.AppConfig, sessionKey, msgID, title, de
 	})
 }
 
+func AppendStructuredSessionTraceRecord(cfg config.AppConfig, sessionKey, msgID string, event core.TaskEvent) error {
+	store, err := OpenStore(cfg)
+	if err != nil {
+		return err
+	}
+	return store.backend.AppendInteraction(map[string]any{
+		"kind":            "session_trace",
+		"session_key":     sessionKey,
+		"msg_id":          msgID,
+		"title":           event.Title,
+		"detail":          event.Detail,
+		"event_kind":      event.Kind,
+		"event_stage":     event.Stage,
+		"event_status":    event.Status,
+		"event_text":      event.Text,
+		"activity_key":    event.ActivityKey,
+		"payload_preview": event.PayloadPreview,
+		"source_event_id": event.ID,
+		"method":          event.Method,
+		"ts":              time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
 func CollectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionMessageItem, []SessionTimelineItem, error) {
 	records, err := loadInteractionRecords(cfg)
 	if err != nil {
@@ -239,10 +262,17 @@ func CollectSessionMessages(cfg config.AppConfig, sessionKey string) ([]SessionM
 		case "session_trace":
 			msgID := CleanString(rec["msg_id"])
 			timelineByMsg[msgID] = append(timelineByMsg[msgID], SessionProcessEvent{
-				ID:     fmt.Sprintf("evt-%s-%d", msgID, idx),
-				Time:   ts,
-				Title:  CleanString(rec["title"]),
-				Detail: CleanString(rec["detail"]),
+				ID:             firstNonEmptyString(CleanString(rec["source_event_id"]), fmt.Sprintf("evt-%s-%d", msgID, idx)),
+				Time:           ts,
+				Title:          CleanString(rec["title"]),
+				Detail:         CleanString(rec["detail"]),
+				Kind:           CleanString(rec["event_kind"]),
+				Stage:          CleanString(rec["event_stage"]),
+				Status:         CleanString(rec["event_status"]),
+				Text:           CleanString(rec["event_text"]),
+				ActivityKey:    CleanString(rec["activity_key"]),
+				PayloadPreview: CleanString(rec["payload_preview"]),
+				Method:         CleanString(rec["method"]),
 			})
 		}
 	}
@@ -281,15 +311,31 @@ type SessionMessageItem struct {
 }
 
 type SessionProcessEvent struct {
-	ID     string `json:"id"`
-	Time   string `json:"time"`
-	Title  string `json:"title"`
-	Detail string `json:"detail"`
+	ID             string `json:"id"`
+	Time           string `json:"time"`
+	Title          string `json:"title"`
+	Detail         string `json:"detail"`
+	Kind           string `json:"kind,omitempty"`
+	Stage          string `json:"stage,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Text           string `json:"text,omitempty"`
+	ActivityKey    string `json:"activity_key,omitempty"`
+	PayloadPreview string `json:"payload_preview,omitempty"`
+	Method         string `json:"method,omitempty"`
 }
 
 type SessionTimelineItem struct {
 	MsgID  string                `json:"msg_id"`
 	Events []SessionProcessEvent `json:"events"`
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func (m *RuntimeManager) setRecoverErr(err error) {

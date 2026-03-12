@@ -93,6 +93,12 @@ Internal operator note:
 - `feature_group`: `control-plane-ops`
 - `sunset_group`: `gatewayd`
 
+GUI migration note:
+
+- long-term GUI communication should use `GatewayControl` gRPC directly
+- hidden/internal CLI commands may still be used for daemon lifecycle or diagnostics during migration
+- GUI business reads and writes should not depend on CLI stdout parsing as the steady-state product path
+
 Recommended legacy compatibility set during migration:
 
 - `cag send`
@@ -232,6 +238,10 @@ These annotations exist so an obsolete command family can be removed in one pass
 - `sunset_group`: `session-v2`
 - inputs:
   - `--key <session_key>`
+- rules:
+  - response must include persisted session messages and timeline items for the same session
+  - timeline items must be available while `session send` is still running so GUI can render progressive assistant activity
+  - timeline events may carry structured ACP activity metadata such as update kind, status, title, detail, and optional raw payload preview
 
 ### `cag session clear`
 

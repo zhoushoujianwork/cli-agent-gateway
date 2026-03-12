@@ -82,10 +82,10 @@ Gateway startup must fail fast when the configured ACP agent command is not avai
 
 ```mermaid
 flowchart TD
-    GUI["GUI"] --> CLI
+    GUI["GUI (gRPC over localhost TCP)"] --> GD["gatewayd (gRPC + runtime host)"]
     DT["DingTalk"] --> CH
     IM["iMessage"] --> CH
-    CLI["cag CLI"] --> GD["gatewayd (gRPC + runtime host)"]
+    CLI["cag CLI"] --> GD
     CH["Channel Adapters"] --> GD
     GD --> SM["Session Manager"]
     GD --> BM["Binding Manager"]
@@ -104,6 +104,10 @@ flowchart TD
 - GUI always targets one explicit selected session.
 - GUI does not write to `latest` implicitly.
 - `latest` exists only for UI default selection.
+- GUI business reads/writes should talk to `gatewayd` directly over localhost TCP gRPC.
+- GUI must not speak ACP directly.
+- if `gatewayd` is stopped, normal GUI writes fail explicitly.
+- GUI `Restart` is the only action allowed to start or restart `gatewayd`.
 
 ### Channel Ingress
 
@@ -161,7 +165,7 @@ The system should expose:
 
 - session list
 - session detail
-- session messages
+- session messages with timeline / ACP activity events
 - runtime list
 - channel list with configured/enabled state
 - binding list

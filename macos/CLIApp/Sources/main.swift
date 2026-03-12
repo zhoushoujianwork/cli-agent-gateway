@@ -126,6 +126,82 @@ struct ChatMessage: Identifiable {
     let statusDetail: String
 }
 
+enum ChatHistoryNavigationDirection {
+    case older
+    case newer
+}
+
+struct SessionChatInputField: NSViewRepresentable {
+    let placeholder: String
+    @Binding var text: String
+    let isEnabled: Bool
+    let onSubmit: () -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: SessionChatInputField
+
+        init(parent: SessionChatInputField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            if parent.text != field.stringValue {
+                parent.text = field.stringValue
+            }
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            switch commandSelector {
+            case #selector(NSResponder.insertNewline(_:)):
+                parent.onSubmit()
+                return true
+            case #selector(NSResponder.moveUp(_:)):
+                parent.onMoveUp()
+                return true
+            case #selector(NSResponder.moveDown(_:)):
+                parent.onMoveDown()
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: text)
+        field.delegate = context.coordinator
+        field.placeholderString = placeholder
+        field.isEnabled = isEnabled
+        field.isBordered = true
+        field.isBezeled = true
+        field.bezelStyle = .roundedBezel
+        field.focusRingType = .default
+        field.font = .systemFont(ofSize: NSFont.systemFontSize)
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+        if nsView.placeholderString != placeholder {
+            nsView.placeholderString = placeholder
+        }
+        if nsView.isEnabled != isEnabled {
+            nsView.isEnabled = isEnabled
+        }
+    }
+}
+
 struct SessionBindTarget: Identifiable {
     let sessionKey: String
     let workdir: String
@@ -188,6 +264,194 @@ struct ProcessEvent: Identifiable {
     let time: String
     let title: String
     let detail: String
+    let kind: String
+    let stage: String
+    let status: String
+    let text: String
+    let activityKey: String
+    let payloadPreview: String
+    let method: String
+}
+
+private struct ChatActivityItem: Identifiable {
+    let id: String
+    let kind: String
+    let title: String
+    let status: String
+    let detail: String
+    let time: String
+}
+
+private struct ChatActivityState {
+    let streamedText: String
+    let thoughtText: String
+    let toolItems: [ChatActivityItem]
+    let skillItems: [ChatActivityItem]
+    let planItems: [ChatActivityItem]
+    let commandSummary: String
+
+    var hasVisibleActivity: Bool {
+        !toolItems.isEmpty || !skillItems.isEmpty || !planItems.isEmpty || !thoughtText.isEmpty || !commandSummary.isEmpty
+    }
+}
+
+private func buildChatActivityState(events: [ProcessEvent]) -> ChatActivityState {
+    let sorted = events.sorted { lhs, rhs in
+        if lhs.time != rhs.time {
+            return lhs.time < rhs.time
+        }
+        return lhs.id < rhs.id
+    }
+
+    var streamedText = ""
+    var thoughtText = ""
+    var commandSummary = ""
+    var toolsByKey: [String: ChatActivityItem] = [:]
+    var skillsByKey: [String: ChatActivityItem] = [:]
+    var plansByKey: [String: ChatActivityItem] = [:]
+    var toolOrder: [String] = []
+    var skillOrder: [String] = []
+    var planOrder: [String] = []
+
+    for event in sorted {
+        let kind = normalizedActivityKind(event)
+        switch kind {
+        case "message":
+            streamedText = mergeStreamText(base: streamedText, incoming: event.text.isEmpty ? event.detail : event.text, stage: event.stage)
+        case "thought":
+            thoughtText = mergeStreamText(base: thoughtText, incoming: event.text.isEmpty ? event.detail : event.text, stage: event.stage)
+        case "tool":
+            let key = nonEmptyActivityKey(event)
+            if !toolOrder.contains(key) {
+                toolOrder.append(key)
+            }
+            toolsByKey[key] = mergedActivityItem(
+                existing: toolsByKey[key],
+                key: key,
+                kind: kind,
+                fallbackTitle: "Tool",
+                event: event
+            )
+        case "skill":
+            let key = nonEmptyActivityKey(event)
+            if !skillOrder.contains(key) {
+                skillOrder.append(key)
+            }
+            skillsByKey[key] = mergedActivityItem(
+                existing: skillsByKey[key],
+                key: key,
+                kind: kind,
+                fallbackTitle: "Skill",
+                event: event
+            )
+        case "plan":
+            let key = nonEmptyActivityKey(event)
+            if !planOrder.contains(key) {
+                planOrder.append(key)
+            }
+            plansByKey[key] = mergedActivityItem(
+                existing: plansByKey[key],
+                key: key,
+                kind: kind,
+                fallbackTitle: "Plan",
+                event: event
+            )
+        case "command":
+            let text = compactActivityDetail(event.detail.isEmpty ? event.text : event.detail)
+            if !text.isEmpty {
+                commandSummary = text
+            }
+        default:
+            continue
+        }
+    }
+
+    return ChatActivityState(
+        streamedText: streamedText.trimmingCharacters(in: .whitespacesAndNewlines),
+        thoughtText: thoughtText.trimmingCharacters(in: .whitespacesAndNewlines),
+        toolItems: toolOrder.compactMap { toolsByKey[$0] },
+        skillItems: skillOrder.compactMap { skillsByKey[$0] },
+        planItems: planOrder.compactMap { plansByKey[$0] },
+        commandSummary: commandSummary
+    )
+}
+
+private func normalizedActivityKind(_ event: ProcessEvent) -> String {
+    let raw = event.kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if !raw.isEmpty {
+        return raw
+    }
+    let stage = event.stage.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if stage.contains("agent_message") {
+        return "message"
+    }
+    if stage.contains("thought") || stage.contains("reason") || stage.contains("think") {
+        return "thought"
+    }
+    if stage.contains("tool") {
+        return "tool"
+    }
+    if stage.contains("skill") {
+        return "skill"
+    }
+    if stage.contains("plan") {
+        return "plan"
+    }
+    if stage.contains("available_commands") {
+        return "command"
+    }
+    return ""
+}
+
+private func nonEmptyActivityKey(_ event: ProcessEvent) -> String {
+    let key = event.activityKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !key.isEmpty {
+        return key
+    }
+    let fallback = event.title.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !fallback.isEmpty {
+        return fallback
+    }
+    return event.id
+}
+
+private func mergeStreamText(base: String, incoming: String, stage: String) -> String {
+    let next = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !next.isEmpty else { return base }
+    if stage.lowercased().hasSuffix("_chunk") {
+        return base + next
+    }
+    return next
+}
+
+private func compactActivityDetail(_ raw: String) -> String {
+    let compact = raw
+        .replacingOccurrences(of: "\n", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard compact.count > 140 else { return compact }
+    let end = compact.index(compact.startIndex, offsetBy: 140)
+    return String(compact[..<end]).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
+}
+
+private func mergedActivityItem(existing: ChatActivityItem?, key: String, kind: String, fallbackTitle: String, event: ProcessEvent) -> ChatActivityItem {
+    let title = event.title.trimmingCharacters(in: .whitespacesAndNewlines)
+    let detailSource = event.detail.isEmpty ? event.text : event.detail
+    let detail = compactActivityDetail(detailSource)
+    return ChatActivityItem(
+        id: key,
+        kind: kind,
+        title: !title.isEmpty ? title : (existing?.title ?? fallbackTitle),
+        status: event.status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? (existing?.status ?? "") : event.status,
+        detail: !detail.isEmpty ? detail : (existing?.detail ?? ""),
+        time: event.time
+    )
+}
+
+private func copyTextToPasteboard(_ text: String) {
+    let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(value, forType: .string)
 }
 
 enum GatewayError: Error, LocalizedError {
@@ -354,6 +618,11 @@ final class GatewayController: ObservableObject {
     private var sessionWorkdirByKey: [String: String] = [:]
     private var localOverlayMessagesBySession: [String: [ChatMessage]] = [:]
     private var localSendStartedAtBySession: [String: Date] = [:]
+    private var sentDraftHistoryBySession: [String: [String]] = [:]
+    private var draftHistorySessionKey: String?
+    private var draftHistoryIndex: Int?
+    private var draftHistoryPendingDraft: String = ""
+    private var suppressDraftChangeHandling = false
     private var lastLocalSendFingerprint: String = ""
     private var lastLocalSendAt: Date = .distantPast
     private var didAutoStartOnLaunch = false
@@ -482,6 +751,16 @@ final class GatewayController: ObservableObject {
         return String(compact[..<end]).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
     }
 
+    private func logPreview(_ raw: String, limit: Int = 480) -> String {
+        let compact = raw
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard compact.count > limit else { return compact }
+        let end = compact.index(compact.startIndex, offsetBy: limit)
+        return String(compact[..<end]).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
+    }
+
     private func workdirForSessionKey(_ key: String) -> String {
         let base = baseSessionKey(key)
         if let sessionWorkdir = sessions.first(where: { $0.sessionKey == key || baseSessionKey($0.sessionKey) == base })?.workdir
@@ -498,6 +777,89 @@ final class GatewayController: ObservableObject {
             return
         }
         selectedSessionWorkdir = workdirForSessionKey(key)
+    }
+
+    private func setLocalDraftTextProgrammatically(_ text: String) {
+        suppressDraftChangeHandling = true
+        localDraftText = text
+    }
+
+    private func resetDraftHistoryNavigation(clearPendingDraft: Bool = true) {
+        draftHistorySessionKey = nil
+        draftHistoryIndex = nil
+        if clearPendingDraft {
+            draftHistoryPendingDraft = ""
+        }
+    }
+
+    private func cacheSentDraftHistory(sessionKey: String, messages: [ChatMessage]) {
+        var seenMessageIDs: Set<String> = []
+        var history: [String] = []
+        for msg in messages {
+            guard msg.role == "user" else { continue }
+            let text = msg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let messageID = msg.sourceMsgId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? msg.id : msg.sourceMsgId
+            guard !seenMessageIDs.contains(messageID) else { continue }
+            seenMessageIDs.insert(messageID)
+            history.append(text)
+        }
+        sentDraftHistoryBySession[sessionKey] = Array(history.suffix(200))
+    }
+
+    private func rememberSentDraft(_ text: String, sessionKey: String) {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        var history = sentDraftHistoryBySession[sessionKey, default: []]
+        history.append(cleaned)
+        sentDraftHistoryBySession[sessionKey] = Array(history.suffix(200))
+    }
+
+    func handleLocalDraftTextChanged() {
+        if suppressDraftChangeHandling {
+            suppressDraftChangeHandling = false
+            return
+        }
+        resetDraftHistoryNavigation()
+    }
+
+    func navigateLocalDraftHistory(_ direction: ChatHistoryNavigationDirection) {
+        let sessionKey = selectedSessionKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !sessionKey.isEmpty else { return }
+        let history = sentDraftHistoryBySession[sessionKey, default: []]
+        guard !history.isEmpty else { return }
+
+        if draftHistorySessionKey != sessionKey {
+            draftHistorySessionKey = sessionKey
+            draftHistoryIndex = nil
+            draftHistoryPendingDraft = localDraftText
+        }
+
+        switch direction {
+        case .older:
+            let nextIndex: Int
+            if let idx = draftHistoryIndex {
+                guard idx > 0 else { return }
+                nextIndex = idx - 1
+            } else {
+                draftHistoryPendingDraft = localDraftText
+                nextIndex = history.count - 1
+            }
+            draftHistorySessionKey = sessionKey
+            draftHistoryIndex = nextIndex
+            setLocalDraftTextProgrammatically(history[nextIndex])
+        case .newer:
+            guard draftHistorySessionKey == sessionKey, let idx = draftHistoryIndex else { return }
+            if idx < history.count - 1 {
+                let nextIndex = idx + 1
+                draftHistoryIndex = nextIndex
+                setLocalDraftTextProgrammatically(history[nextIndex])
+            } else {
+                let pendingDraft = draftHistoryPendingDraft
+                resetDraftHistoryNavigation()
+                setLocalDraftTextProgrammatically(pendingDraft)
+            }
+        }
     }
 
     private static func loadConfig() throws -> GatewayConfig {
@@ -1128,11 +1490,21 @@ final class GatewayController: ObservableObject {
         let out = shellOutput(cmd, timeoutSec: timeoutSec)
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
         let parseSource = out.stdout.isEmpty ? out.output : out.stdout
-        guard let line = extractLastJSONLine(parseSource) ?? extractLastJSONLine(out.output),
+        let candidate = extractLastJSONLine(parseSource) ?? extractLastJSONLine(out.output)
+        guard let line = candidate,
               let data = line.data(using: .utf8),
               let node = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            log("cag json parse failed action=\(action) code=\(out.code) elapsed_ms=\(ms)")
+            logEvent("cag_json_parse_failed", fields: [
+                "action": action,
+                "args": args.joined(separator: " "),
+                "code": "\(out.code)",
+                "elapsed_ms": "\(ms)",
+                "stdout_preview": logPreview(out.stdout),
+                "stderr_preview": logPreview(out.stderr),
+                "output_preview": logPreview(out.output),
+                "candidate_preview": logPreview(candidate ?? ""),
+            ])
             return (out.code, nil, out.output)
         }
         log("cag json ok action=\(action) code=\(out.code) elapsed_ms=\(ms)")
@@ -1795,6 +2167,7 @@ final class GatewayController: ObservableObject {
         guard let sessionKey = selectedSessionKey, !sessionKey.isEmpty else {
             chatMessages = []
             timelineByMsgId = [:]
+            resetDraftHistoryNavigation()
             log("chat refresh skipped reason=no_selected_session")
             return
         }
@@ -1838,7 +2211,14 @@ final class GatewayController: ObservableObject {
                                 id: id,
                                 time: (ev["time"] as? String) ?? ISO8601DateFormatter().string(from: Date()),
                                 title: (ev["title"] as? String) ?? "",
-                                detail: (ev["detail"] as? String) ?? ""
+                                detail: (ev["detail"] as? String) ?? "",
+                                kind: (ev["kind"] as? String) ?? "",
+                                stage: (ev["stage"] as? String) ?? "",
+                                status: (ev["status"] as? String) ?? "",
+                                text: (ev["text"] as? String) ?? "",
+                                activityKey: (ev["activity_key"] as? String) ?? "",
+                                payloadPreview: (ev["payload_preview"] as? String) ?? "",
+                                method: (ev["method"] as? String) ?? ""
                             )
                         }
                         if !events.isEmpty {
@@ -1851,6 +2231,7 @@ final class GatewayController: ObservableObject {
             self.onMain {
                 guard self.selectedSessionKey == sessionKey else { return }
                 self.timelineByMsgId = timeline
+                self.cacheSentDraftHistory(sessionKey: sessionKey, messages: merged)
                 self.chatMessages = merged
             }
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
@@ -2022,12 +2403,16 @@ final class GatewayController: ObservableObject {
             }
             onMain { [weak self] in
                 guard let self else { return }
+                let previousSelectedKey = self.selectedSessionKey
                 self.sessions = built
                 if let selected = self.selectedSessionKey, !self.sessions.contains(where: { $0.sessionKey == selected }) {
                     self.selectedSessionKey = nil
                 }
                 if self.selectedSessionKey == nil {
                     self.selectedSessionKey = self.sessions.first?.sessionKey
+                }
+                if self.selectedSessionKey != previousSelectedKey {
+                    self.resetDraftHistoryNavigation()
                 }
                 self.refreshSelectedSessionWorkdir()
                 self.refreshSelectedSessionChat()
@@ -2051,6 +2436,9 @@ final class GatewayController: ObservableObject {
     }
 
     func selectSession(_ key: String?) {
+        if selectedSessionKey != key {
+            resetDraftHistoryNavigation()
+        }
         selectedSessionKey = key
         refreshSelectedSessionWorkdir()
         refreshSelectedSessionChat()
@@ -2215,6 +2603,12 @@ final class GatewayController: ObservableObject {
 
     private func extractLastJSONLine(_ text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let candidate = extractJSONObjectCandidate(trimmed),
+           let data = candidate.data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) != nil {
+            return candidate
+        }
+
         if trimmed.hasPrefix("{"), trimmed.hasSuffix("}") {
             return trimmed
         }
@@ -2239,9 +2633,9 @@ final class GatewayController: ObservableObject {
                 if !started { continue }
                 if balance < 0 { break }
                 if balance == 0 {
-                    let candidate = lines[start...end].joined(separator: "\n")
+                    let joined = lines[start...end].joined(separator: "\n")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard candidate.hasPrefix("{"), candidate.hasSuffix("}") else {
+                    guard let candidate = extractJSONObjectCandidate(joined) else {
                         break
                     }
                     guard let data = candidate.data(using: .utf8) else {
@@ -2255,6 +2649,20 @@ final class GatewayController: ObservableObject {
             }
         }
         return lastValid
+    }
+
+    private func extractJSONObjectCandidate(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("{"), trimmed.hasSuffix("}") {
+            return trimmed
+        }
+        guard let start = trimmed.firstIndex(of: "{"),
+              let end = trimmed.lastIndex(of: "}"),
+              start < end else {
+            return nil
+        }
+        return String(trimmed[start...end]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func parseLocalCommand(_ text: String) -> (cmd: String, payload: String)? {
@@ -2396,7 +2804,8 @@ final class GatewayController: ObservableObject {
         if let cmd = command {
             if cmd.cmd == "/clear" {
                 setSessionSending(true, sessionKey: selectedSessionKey, startedAt: Date())
-                localDraftText = ""
+                resetDraftHistoryNavigation()
+                setLocalDraftTextProgrammatically("")
                 clearSessionMappingAsync(baseSessionKey: baseSessionKey) { [weak self] cleared in
                     guard let self else { return }
                     self.setSessionSending(false, sessionKey: selectedSessionKey)
@@ -2411,7 +2820,8 @@ final class GatewayController: ObservableObject {
             }
             if cmd.payload.isEmpty {
                 setSessionSending(true, sessionKey: selectedSessionKey, startedAt: Date())
-                localDraftText = ""
+                resetDraftHistoryNavigation()
+                setLocalDraftTextProgrammatically("")
                 clearSessionMappingAsync(baseSessionKey: baseSessionKey) { [weak self] cleared in
                     guard let self else { return }
                     self.setSessionSending(false, sessionKey: selectedSessionKey)
@@ -2428,6 +2838,8 @@ final class GatewayController: ObservableObject {
         }
 
         let sessionWorkdir = workdirForSessionKey(baseSessionKey)
+        rememberSentDraft(text, sessionKey: selectedSessionKey)
+        resetDraftHistoryNavigation()
 
         let userMsgId = "local-u-\(Int(Date().timeIntervalSince1970 * 1000))"
         let nowIso = ISO8601DateFormatter().string(from: Date())
@@ -2441,7 +2853,7 @@ final class GatewayController: ObservableObject {
             statusDetail: ""
         )
         appendOverlayMessage(localUser, sessionKey: selectedSessionKey)
-        localDraftText = ""
+        setLocalDraftTextProgrammatically("")
         setSessionSending(true, sessionKey: selectedSessionKey, startedAt: Date())
         if baseSessionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             setSessionSending(false, sessionKey: selectedSessionKey)
@@ -2497,6 +2909,7 @@ final class GatewayController: ObservableObject {
         if allOK {
             sessionWorkdirByKey.removeAll()
             saveSessionWorkdirByKey()
+            resetDraftHistoryNavigation()
             selectedSessionKey = nil
             selectedSessionWorkdir = ""
             refreshSessionsAsync()
@@ -2511,6 +2924,7 @@ final class GatewayController: ObservableObject {
         let res = cagJSON("session", args: ["delete", "--key", targetKey])
         if ((res.json?["ok"] as? Bool) ?? false) {
             if selectedSessionKey == key {
+                resetDraftHistoryNavigation()
                 selectedSessionKey = nil
             }
             sessionWorkdirByKey.removeValue(forKey: targetKey)
@@ -3021,11 +3435,27 @@ struct SessionBindingRow: View {
 
 struct ChatBubble: View {
     let message: ChatMessage
+    let events: [ProcessEvent]
     let onAssistantTap: (ChatMessage) -> Void
     @State private var hovering = false
+    @State private var copied = false
 
     private var isUser: Bool { message.role == "user" }
     private var isSystem: Bool { message.role == "system" }
+    private var activityState: ChatActivityState { buildChatActivityState(events: events) }
+    private var displayText: String {
+        let direct = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !direct.isEmpty {
+            return direct
+        }
+        return activityState.streamedText
+    }
+    private var canCopyAssistantText: Bool {
+        !isUser &&
+        !isSystem &&
+        message.deliveryStatus != .processing &&
+        !displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     private var deliveryText: String {
         switch message.deliveryStatus {
@@ -3051,16 +3481,44 @@ struct ChatBubble: View {
     @ViewBuilder
     private var bubbleContent: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(isUser ? "You" : "Assistant")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-            if !isUser, message.deliveryStatus == .processing {
+            HStack(alignment: .center, spacing: 8) {
+                Text(isUser ? "You" : "Assistant")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if canCopyAssistantText {
+                    Button {
+                        copyTextToPasteboard(displayText)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                            copied = false
+                        }
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(copied ? Color.green : Color.secondary)
+                            .frame(width: 22, height: 22)
+                            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                    .help(copied ? "Copied" : "Copy reply")
+                }
+            }
+            if !isUser, message.deliveryStatus == .processing, !activityState.hasVisibleActivity, displayText.isEmpty {
                 ProcessingIndicator()
             }
-            if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(message.text)
+            if !isUser, activityState.hasVisibleActivity {
+                InlineActivityGroupView(state: activityState, processing: message.deliveryStatus == .processing)
+            }
+            if !displayText.isEmpty {
+                Text(displayText)
                     .font(.system(size: 12))
                     .textSelection(.enabled)
+            }
+            if !isUser, message.deliveryStatus == .processing, (!activityState.hasVisibleActivity || !displayText.isEmpty) {
+                Text("Streaming...")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
             }
             if isUser, message.deliveryStatus != .processing, !deliveryText.isEmpty {
                 Text(deliveryText)
@@ -3129,6 +3587,147 @@ struct ChatBubble: View {
     }
 }
 
+private struct InlineActivityGroupView: View {
+    let state: ChatActivityState
+    let processing: Bool
+
+    private var activityRows: [ChatActivityItem] {
+        state.toolItems + state.skillItems + state.planItems
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !state.thoughtText.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Thinking")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(state.thoughtText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                }
+                .padding(8)
+                .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            if !activityRows.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(activityRows) { item in
+                        InlineActivityRow(item: item)
+                    }
+                }
+            }
+
+            if !state.commandSummary.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Commands")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(state.commandSummary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                }
+                .padding(8)
+                .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            if processing, state.streamedText.isEmpty {
+                Text("Waiting for more output...")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+    }
+}
+
+private struct InlineActivityRow: View {
+    let item: ChatActivityItem
+
+    private var label: String {
+        switch item.kind {
+        case "skill":
+            return "skill"
+        case "plan":
+            return "plan"
+        default:
+            return "tool"
+        }
+    }
+
+    private var tint: Color {
+        switch item.kind {
+        case "skill":
+            return .purple
+        case "plan":
+            return .orange
+        default:
+            return .blue
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 8) {
+                Text(label.uppercased())
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(tint.opacity(0.12), in: Capsule())
+                Text(item.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Spacer()
+                if !item.status.isEmpty {
+                    ActivityStatusBadge(status: item.status)
+                }
+            }
+            if !item.detail.isEmpty {
+                Text(item.detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(8)
+        .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct ActivityStatusBadge: View {
+    let status: String
+
+    private var normalized: String {
+        status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var tint: Color {
+        switch normalized {
+        case "completed", "done", "ok", "success":
+            return .green
+        case "failed", "error", "cancelled":
+            return .red
+        default:
+            return .orange
+        }
+    }
+
+    var body: some View {
+        Text(normalized.isEmpty ? "update" : normalized)
+            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(tint.opacity(0.12), in: Capsule())
+    }
+}
+
 struct ProcessingIndicator: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.35)) { context in
@@ -3172,6 +3771,17 @@ struct ProcessTimelineView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     Text(evt.title).font(.system(size: 12, weight: .semibold))
+                                    if !evt.kind.isEmpty {
+                                        Text(evt.kind)
+                                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.gray.opacity(0.12), in: Capsule())
+                                    }
+                                    if !evt.status.isEmpty {
+                                        ActivityStatusBadge(status: evt.status)
+                                    }
                                     Spacer()
                                     if !evt.time.isEmpty {
                                         Text(LocalTimeDisplay.text(evt.time)).font(.system(size: 10)).foregroundStyle(.tertiary)
@@ -3179,6 +3789,13 @@ struct ProcessTimelineView: View {
                                 }
                                 if !evt.detail.isEmpty {
                                     Text(evt.detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                                }
+                                if !evt.payloadPreview.isEmpty {
+                                    Text(evt.payloadPreview)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(4)
+                                        .textSelection(.enabled)
                                 }
                             }
                             .padding(8)
@@ -4204,7 +4821,7 @@ struct ManageBindingsSheet: View {
 struct ContentView: View {
     @StateObject private var controller: GatewayController
     @StateObject private var logTailController: LogTailController
-    private let refreshTimer = Timer.publish(every: 2.0, on: .main, in: .common).autoconnect()
+    private let refreshTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
     @State private var showConfig = false
     @State private var configInitialChannel: ChannelType
     @State private var showLogDrawer = false
@@ -4397,7 +5014,7 @@ struct ContentView: View {
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                 } else {
                                     ForEach(controller.chatMessages.suffix(200)) { msg in
-                                        ChatBubble(message: msg) { tapped in
+                                        ChatBubble(message: msg, events: controller.timeline(for: msg)) { tapped in
                                             timelineMessage = tapped
                                         }
                                             .id(msg.id)
@@ -4415,11 +5032,23 @@ struct ContentView: View {
                     }
 
                     HStack(spacing: 8) {
-                        TextField("Type here to chat in this gateway session...", text: $controller.localDraftText)
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(controller.selectedSessionKey == nil)
-                            .onSubmit {
+                        SessionChatInputField(
+                            placeholder: "Type here to chat in this gateway session...",
+                            text: $controller.localDraftText,
+                            isEnabled: controller.selectedSessionKey != nil,
+                            onSubmit: {
                                 controller.sendLocalChat()
+                            },
+                            onMoveUp: {
+                                controller.navigateLocalDraftHistory(.older)
+                            },
+                            onMoveDown: {
+                                controller.navigateLocalDraftHistory(.newer)
+                            }
+                        )
+                            .disabled(controller.selectedSessionKey == nil)
+                            .onChange(of: controller.localDraftText) { _, _ in
+                                controller.handleLocalDraftTextChanged()
                             }
                         IconActionButton(
                             systemName: selectedSessionSending ? "hourglass" : "paperplane.fill",
@@ -4455,11 +5084,12 @@ struct ContentView: View {
         }
         .onReceive(refreshTimer) { _ in
             refreshTick += 1
+            let selectedSessionSending = controller.isSessionSending(controller.selectedSessionKey)
             controller.refreshStatusAsync()
-            if controller.isSessionSending(controller.selectedSessionKey) {
+            if selectedSessionSending {
                 controller.refreshSelectedSessionChatAsync()
             }
-            if refreshTick % 3 == 0 {
+            if refreshTick % 3 == 0 && !selectedSessionSending {
                 controller.refreshSessionsAsync()
             }
             if refreshTick % 5 == 0 {

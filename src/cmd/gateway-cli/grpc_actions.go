@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cli-agent-gateway/internal/config"
+	"cli-agent-gateway/internal/core"
 	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
 	"cli-agent-gateway/internal/infra/proclog"
 	"cli-agent-gateway/internal/storage"
@@ -136,6 +137,82 @@ func gatewaydLogTimeline(req *gatewayv1.ActionRequest, startedAt time.Time, step
 		fields[key] = value
 	}
 	proclog.Info("gatewayd", fields)
+}
+
+func gatewaydLogACPEvents(req *gatewayv1.ActionRequest, startedAt time.Time, events []map[string]any) {
+	if len(events) == 0 {
+		return
+	}
+	gatewaydLogTimeline(req, startedAt, "acp_events", map[string]any{"count": len(events)})
+	for i, ev := range events {
+		method := strings.TrimSpace(fmt.Sprint(ev["method"]))
+		stage := "-"
+		text := ""
+		payloadJSON := ""
+		if params, ok := ev["params"].(map[string]any); ok {
+			if update, ok := params["update"].(map[string]any); ok {
+				if su := strings.TrimSpace(fmt.Sprint(update["sessionUpdate"])); su != "" {
+					stage = su
+				}
+				text = firstNonEmptyString(
+					strings.TrimSpace(fmt.Sprint(update["title"])),
+					strings.TrimSpace(fmt.Sprint(update["text"])),
+					strings.TrimSpace(fmt.Sprint(update["summary"])),
+					strings.TrimSpace(fmt.Sprint(update["message"])),
+				)
+				if text == "" {
+					if content, ok := update["content"].(map[string]any); ok {
+						text = strings.TrimSpace(fmt.Sprint(content["text"]))
+					}
+				}
+			}
+			if stage == "-" {
+				if innerMethod := strings.TrimSpace(fmt.Sprint(params["method"])); innerMethod != "" {
+					stage = innerMethod
+				}
+			}
+			payloadJSON = truncateLogJSON(params, 16384)
+		}
+		extra := map[string]any{
+			"index":        i + 1,
+			"method":       nonEmpty(method, "-"),
+			"stage":        stage,
+			"payload_json": payloadJSON,
+		}
+		if strings.TrimSpace(text) != "" {
+			extra["text_preview"] = logTextPreview(text, 200)
+		}
+		gatewaydLogTimeline(req, startedAt, "acp_event", extra)
+	}
+}
+
+func truncateLogJSON(v any, limit int) string {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return truncateLogText(fmt.Sprint(v), limit)
+	}
+	return truncateLogText(string(raw), limit)
+}
+
+func truncateLogText(raw string, limit int) string {
+	text := strings.TrimSpace(raw)
+	if limit <= 0 || len(text) <= limit {
+		return text
+	}
+	suffix := "...(truncated)"
+	if limit <= len(suffix) {
+		return text[:limit]
+	}
+	return text[:limit-len(suffix)] + suffix
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func logTextPreview(raw string, limit int) string {
@@ -440,9 +517,33 @@ func handleSessionSend(store *sessionctl.Store, manager *sessionctl.RuntimeManag
 	})
 	_ = sessionctl.AppendSessionTraceRecord(cfg, session.Key, msgID, "execute_start", source)
 	gatewaydLogTimeline(req, startedAt, "runtime_execute_started", nil)
-	result, runtimeRecord, execErr := manager.Send(cfg, session, sessionctl.BuildRuntimeTaskRequest(session, source, text, source, msgID, map[string]any{
+	taskReq := sessionctl.BuildRuntimeTaskRequest(session, source, text, source, msgID, map[string]any{
 		"message_id": msgID,
-	}))
+	})
+	eventIndex := 0
+	taskReq.EventSink = func(event core.TaskEvent) {
+		eventIndex++
+		_ = sessionctl.AppendStructuredSessionTraceRecord(cfg, session.Key, msgID, event)
+		extra := map[string]any{
+			"index":  eventIndex,
+			"method": nonEmpty(event.Method, "-"),
+			"stage":  nonEmpty(event.Stage, "-"),
+		}
+		if event.Status != "" {
+			extra["status"] = event.Status
+		}
+		if event.Title != "" {
+			extra["title"] = event.Title
+		}
+		if event.Detail != "" {
+			extra["detail"] = logTextPreview(event.Detail, 200)
+		}
+		if event.PayloadPreview != "" {
+			extra["payload_json"] = event.PayloadPreview
+		}
+		gatewaydLogTimeline(req, startedAt, "acp_event", extra)
+	}
+	result, runtimeRecord, execErr := manager.Send(cfg, session, taskReq)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	status := "attached"
 	if execErr != nil {

@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -142,23 +143,28 @@ func (a *Adapter) runPrompt(req core.TaskRequest, sessionID string) (core.TaskRe
 		}
 		if resp != nil {
 			lastEventAt = time.Now()
-			rawEvents = append(rawEvents, map[string]any{
+			eventParams := map[string]any{
 				"method": "session/prompt.response",
 				"params": map[string]any{
 					"id":     resp.ID,
 					"error":  resp.Error,
 					"result": resp.Result,
 				},
-			})
-			a.debugf("prompt response id=%d error=%v", resp.ID, resp.Error)
+			}
+			rawEvents = append(rawEvents, eventParams)
+			a.emitTaskEvent(req, len(rawEvents), "session/prompt.response", eventParams["params"])
+			a.debugf("prompt response id=%d payload=%s", resp.ID, marshalLogJSON(map[string]any{
+				"error":  resp.Error,
+				"result": resp.Result,
+			}, 16384))
 			if resp.Error != nil {
 				return core.TaskResult{}, newProtocolError("session/prompt", fmt.Sprintf("jsonrpc error: %v", resp.Error))
 			}
 			if result, ok := resp.Result.(map[string]any); ok {
 				text := extractText(result)
 				rawText, hasRawText := extractRawText(result)
-				if text != "" || hasRawText {
-					if isChunkUpdate(sessionUpdateType(result)) {
+				if shouldUsePayloadTextForAssistantOutput(result) && (text != "" || hasRawText) {
+					if shouldAppendACPOutput(result) {
 						output = appendRawChunk(output, rawText)
 						summary = appendSummaryChunk(summary, text, rawText, hasRawText)
 						sawChunk = true
@@ -181,15 +187,17 @@ func (a *Adapter) runPrompt(req core.TaskRequest, sessionID string) (core.TaskRe
 		serverReq := a.client.PopRequest(50 * time.Millisecond)
 		if serverReq != nil {
 			lastEventAt = time.Now()
-			rawEvents = append(rawEvents, map[string]any{
+			eventParams := map[string]any{
 				"method": "session/server_request",
 				"params": map[string]any{
 					"id":     serverReq.ID,
 					"method": serverReq.Method,
 					"params": serverReq.Params,
 				},
-			})
-			a.debugf("server request method=%s id=%d", serverReq.Method, serverReq.ID)
+			}
+			rawEvents = append(rawEvents, eventParams)
+			a.emitTaskEvent(req, len(rawEvents), "session/server_request", eventParams["params"])
+			a.debugf("server request method=%s id=%d payload=%s", serverReq.Method, serverReq.ID, marshalLogJSON(serverReq.Params, 8192))
 			if strings.Contains(strings.ToLower(serverReq.Method), "request_permission") {
 				decision := "allow"
 				if strings.EqualFold(a.permissionPolicy, "auto_deny") {
@@ -204,12 +212,13 @@ func (a *Adapter) runPrompt(req core.TaskRequest, sessionID string) (core.TaskRe
 		n := a.client.PopNotification(50 * time.Millisecond)
 		if n != nil {
 			lastEventAt = time.Now()
-			a.debugf("notification method=%s params=%v", n.Method, n.Params)
+			a.debugf("notification method=%s payload=%s", n.Method, marshalLogJSON(n.Params, 16384))
 			rawEvents = append(rawEvents, map[string]any{"method": n.Method, "params": n.Params})
+			a.emitTaskEvent(req, len(rawEvents), n.Method, n.Params)
 			text := extractText(n.Params)
 			rawText, hasRawText := extractRawText(n.Params)
-			if text != "" || hasRawText {
-				if isChunkUpdate(sessionUpdateType(n.Params)) {
+			if shouldUsePayloadTextForAssistantOutput(n.Params) && (text != "" || hasRawText) {
+				if shouldAppendACPOutput(n.Params) {
 					output = appendRawChunk(output, rawText)
 					summary = appendSummaryChunk(summary, text, rawText, hasRawText)
 					sawChunk = true
@@ -251,6 +260,21 @@ func (a *Adapter) debugf(format string, args ...any) {
 		"event":   "debug",
 		"message": fmt.Sprintf(format, args...),
 	})
+}
+
+func (a *Adapter) emitTaskEvent(req core.TaskRequest, index int, method string, raw any) {
+	if req.EventSink == nil {
+		return
+	}
+	params, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	event, ok := buildTaskEvent(index, method, params)
+	if !ok {
+		return
+	}
+	req.EventSink(event)
 }
 
 func (a *Adapter) ensureReady() error {
@@ -318,45 +342,13 @@ func (a *Adapter) createSession(req core.TaskRequest) (string, error) {
 }
 
 func extractText(payload map[string]any) string {
-	if u, ok := payload["update"].(map[string]any); ok {
-		if c, ok := u["content"].(map[string]any); ok {
-			if t, ok := c["text"].(string); ok && strings.TrimSpace(t) != "" {
-				return strings.TrimSpace(t)
-			}
-		}
-		for _, key := range []string{"summary", "message", "text", "output"} {
-			if t, ok := u[key].(string); ok && strings.TrimSpace(t) != "" {
-				return strings.TrimSpace(t)
-			}
-		}
-	}
-	for _, key := range []string{"summary", "message", "text", "output", "content"} {
-		if t, ok := payload[key].(string); ok && strings.TrimSpace(t) != "" {
-			return strings.TrimSpace(t)
-		}
-	}
-	return ""
+	text, _, _ := extractPayloadText(payload)
+	return strings.TrimSpace(text)
 }
 
 func extractRawText(payload map[string]any) (string, bool) {
-	if u, ok := payload["update"].(map[string]any); ok {
-		if c, ok := u["content"].(map[string]any); ok {
-			if t, ok := c["text"].(string); ok {
-				return t, true
-			}
-		}
-		for _, key := range []string{"summary", "message", "text", "output"} {
-			if t, ok := u[key].(string); ok {
-				return t, true
-			}
-		}
-	}
-	for _, key := range []string{"summary", "message", "text", "output", "content"} {
-		if t, ok := payload[key].(string); ok {
-			return t, true
-		}
-	}
-	return "", false
+	_, raw, hasRaw := extractPayloadText(payload)
+	return raw, hasRaw
 }
 
 func isTerminal(payload map[string]any) bool {
@@ -552,6 +544,350 @@ func stopReasonFromPayload(payload map[string]any) string {
 		return stop
 	}
 	return strings.ToLower(strings.TrimSpace(anyString(payload["stop_reason"])))
+}
+
+func shouldAppendACPOutput(payload map[string]any) bool {
+	updateType := sessionUpdateType(payload)
+	if isChunkUpdate(updateType) {
+		return true
+	}
+	if updateType == "" || isTerminal(payload) {
+		return false
+	}
+	switch {
+	case strings.Contains(updateType, "tool"),
+		strings.Contains(updateType, "skill"),
+		strings.Contains(updateType, "reason"),
+		strings.Contains(updateType, "think"),
+		strings.Contains(updateType, "plan"),
+		strings.Contains(updateType, "progress"),
+		strings.HasSuffix(updateType, "_update"):
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldUsePayloadTextForAssistantOutput(payload map[string]any) bool {
+	updateType := strings.ToLower(strings.TrimSpace(sessionUpdateType(payload)))
+	if updateType == "" {
+		return true
+	}
+	return strings.Contains(updateType, "agent_message")
+}
+
+func buildTaskEvent(index int, method string, params map[string]any) (core.TaskEvent, bool) {
+	method = strings.TrimSpace(method)
+	if params == nil {
+		return core.TaskEvent{}, false
+	}
+	event := core.TaskEvent{
+		ID:     fmt.Sprintf("acp-%d", index),
+		Method: method,
+		Stage:  method,
+		Kind:   "trace",
+	}
+
+	update, _ := params["update"].(map[string]any)
+	if update != nil {
+		if stage := strings.TrimSpace(anyString(update["sessionUpdate"])); stage != "" {
+			event.Stage = stage
+		}
+		event.Status = strings.TrimSpace(anyString(update["status"]))
+		event.ActivityKey = firstNonEmptyString(
+			anyString(update["toolCallId"]),
+			anyString(update["tool_call_id"]),
+			anyString(update["skillCallId"]),
+			anyString(update["skill_call_id"]),
+			strings.TrimSpace(anyString(update["title"])),
+			event.Stage,
+		)
+		event.Title = firstNonEmptyString(
+			anyString(update["title"]),
+			anyString(update["name"]),
+			anyString(update["toolName"]),
+			anyString(update["tool_name"]),
+			anyString(update["skillName"]),
+			anyString(update["skill_name"]),
+		)
+		event.Detail = eventDetailForUpdate(update)
+		if _, raw, ok := extractUpdateText(update); ok {
+			event.Text = raw
+		}
+		event.PayloadPreview = marshalLogJSON(update, 4096)
+		assignTaskEventKind(&event, update)
+		if event.Title == "" {
+			event.Title = defaultEventTitle(event.Kind, event.Stage)
+		}
+		return event, true
+	}
+
+	if method == "session/prompt.response" {
+		if result, ok := params["result"].(map[string]any); ok {
+			event.Stage = firstNonEmptyString(sessionUpdateType(result), "prompt_response")
+			event.Text = strings.TrimSpace(extractText(result))
+			event.PayloadPreview = marshalLogJSON(result, 4096)
+			if event.Text != "" {
+				event.Kind = "message"
+				event.Title = "Assistant"
+				return event, true
+			}
+			if isTerminal(result) {
+				event.Kind = "status"
+				event.Title = "Completed"
+				event.Status = firstNonEmptyString(statusFrom(result), "ok")
+				event.Detail = firstNonEmptyString(terminalReasonFrom(result), event.Status)
+				return event, true
+			}
+		}
+		return core.TaskEvent{}, false
+	}
+
+	if method == "session/server_request" {
+		event.Kind = "permission"
+		event.Title = strings.TrimSpace(anyString(params["method"]))
+		event.Detail = marshalLogJSON(params["params"], 1024)
+		event.PayloadPreview = event.Detail
+		if event.Title == "" && event.Detail == "" {
+			return core.TaskEvent{}, false
+		}
+		return event, true
+	}
+	return core.TaskEvent{}, false
+}
+
+func assignTaskEventKind(event *core.TaskEvent, update map[string]any) {
+	stage := strings.ToLower(strings.TrimSpace(event.Stage))
+	switch {
+	case strings.Contains(stage, "agent_message"):
+		event.Kind = "message"
+	case strings.Contains(stage, "agent_thought"), strings.Contains(stage, "reason"), strings.Contains(stage, "think"):
+		event.Kind = "thought"
+	case strings.Contains(stage, "tool"), strings.TrimSpace(anyString(update["toolCallId"])) != "":
+		event.Kind = "tool"
+	case strings.Contains(stage, "skill"), strings.TrimSpace(anyString(update["skillCallId"])) != "":
+		event.Kind = "skill"
+	case strings.Contains(stage, "plan"):
+		event.Kind = "plan"
+	case strings.Contains(stage, "available_commands"):
+		event.Kind = "command"
+	case strings.Contains(stage, "usage"):
+		event.Kind = "usage"
+	default:
+		if event.Text != "" {
+			event.Kind = "message"
+		}
+	}
+}
+
+func defaultEventTitle(kind, stage string) string {
+	switch strings.TrimSpace(kind) {
+	case "message":
+		return "Assistant"
+	case "thought":
+		return "Thinking"
+	case "tool":
+		return "Tool"
+	case "skill":
+		return "Skill"
+	case "plan":
+		return "Plan"
+	case "command":
+		return "Commands"
+	case "usage":
+		return "Usage"
+	case "permission":
+		return "Permission"
+	default:
+		return strings.TrimSpace(stage)
+	}
+}
+
+func eventDetailForUpdate(update map[string]any) string {
+	if update == nil {
+		return ""
+	}
+	switch {
+	case strings.TrimSpace(anyString(update["sessionUpdate"])) == "available_commands_update":
+		if commands, ok := update["availableCommands"].([]any); ok {
+			names := make([]string, 0, len(commands))
+			for _, item := range commands {
+				if m, ok := item.(map[string]any); ok {
+					if name := strings.TrimSpace(anyString(m["name"])); name != "" {
+						names = append(names, name)
+					}
+				}
+			}
+			return strings.Join(names, ", ")
+		}
+	case strings.Contains(strings.ToLower(strings.TrimSpace(anyString(update["sessionUpdate"]))), "tool"):
+		if command := summarizeToolCommand(update["rawInput"]); command != "" {
+			return command
+		}
+		if path := summarizeToolLocation(update["locations"]); path != "" {
+			return path
+		}
+		return ""
+	case strings.Contains(strings.ToLower(strings.TrimSpace(anyString(update["sessionUpdate"]))), "usage"):
+		used := strings.TrimSpace(fmt.Sprint(update["used"]))
+		size := strings.TrimSpace(fmt.Sprint(update["size"]))
+		if used != "" || size != "" {
+			return strings.TrimSpace("used " + used + " / " + size)
+		}
+	}
+	if _, raw, ok := extractLooseText(update); ok {
+		return strings.TrimSpace(raw)
+	}
+	return ""
+}
+
+func summarizeToolCommand(raw any) string {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if parsed, ok := m["parsed_cmd"].([]any); ok && len(parsed) > 0 {
+		if entry, ok := parsed[0].(map[string]any); ok {
+			return firstNonEmptyString(
+				anyString(entry["cmd"]),
+				anyString(entry["path"]),
+				anyString(entry["name"]),
+			)
+		}
+	}
+	if command, ok := m["command"].([]any); ok && len(command) > 0 {
+		parts := make([]string, 0, len(command))
+		for _, item := range command {
+			part := strings.TrimSpace(fmt.Sprint(item))
+			if part != "" {
+				parts = append(parts, part)
+			}
+		}
+		return strings.Join(parts, " ")
+	}
+	return ""
+}
+
+func summarizeToolLocation(raw any) string {
+	arr, ok := raw.([]any)
+	if !ok || len(arr) == 0 {
+		return ""
+	}
+	if m, ok := arr[0].(map[string]any); ok {
+		return firstNonEmptyString(anyString(m["path"]), anyString(m["uri"]))
+	}
+	return ""
+}
+
+func extractPayloadText(payload map[string]any) (string, string, bool) {
+	if payload == nil {
+		return "", "", false
+	}
+	if u, ok := payload["update"].(map[string]any); ok {
+		if summary, raw, ok := extractUpdateText(u); ok {
+			return summary, raw, true
+		}
+	}
+	return extractLooseText(payload)
+}
+
+func extractUpdateText(update map[string]any) (string, string, bool) {
+	if update == nil {
+		return "", "", false
+	}
+	return extractLooseText(update)
+}
+
+func extractLooseText(payload map[string]any) (string, string, bool) {
+	if payload == nil {
+		return "", "", false
+	}
+	if text, ok := nonEmptyString(payload["content"]); ok {
+		return text, text, true
+	}
+	if text, ok := renderContentText(payload["content"]); ok {
+		return strings.TrimSpace(text), text, true
+	}
+	for _, key := range []string{"summary", "message", "text", "output"} {
+		if text, ok := payload[key].(string); ok {
+			return strings.TrimSpace(text), text, true
+		}
+	}
+	return "", "", false
+}
+
+func renderContentText(v any) (string, bool) {
+	switch x := v.(type) {
+	case string:
+		return x, true
+	case []any:
+		parts := make([]string, 0, len(x))
+		for _, item := range x {
+			if text, ok := renderContentText(item); ok && text != "" {
+				parts = append(parts, text)
+			}
+		}
+		if len(parts) == 0 {
+			return "", false
+		}
+		return strings.Join(parts, ""), true
+	case map[string]any:
+		blockType := strings.ToLower(strings.TrimSpace(firstNonEmptyString(
+			anyString(x["type"]),
+			anyString(x["kind"]),
+		)))
+		if text, ok := nonEmptyString(x["text"]); ok {
+			return text, true
+		}
+		if blockType == "text" || blockType == "content" || blockType == "" || strings.Contains(blockType, "reason") || strings.Contains(blockType, "think") {
+			if content, ok := renderContentText(x["content"]); ok {
+				return content, true
+			}
+		}
+		if inner, ok := renderContentText(x["parts"]); ok {
+			return inner, true
+		}
+		if inner, ok := renderContentText(x["items"]); ok {
+			return inner, true
+		}
+	}
+	return "", false
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func nonEmptyString(v any) (string, bool) {
+	text, ok := v.(string)
+	if !ok || strings.TrimSpace(text) == "" {
+		return "", false
+	}
+	return text, true
+}
+
+func marshalLogJSON(v any, limit int) string {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		fallback := strings.TrimSpace(fmt.Sprint(v))
+		return truncateForLog(fallback, limit)
+	}
+	return truncateForLog(string(raw), limit)
+}
+
+func truncateForLog(raw string, limit int) string {
+	if limit <= 0 || len(raw) <= limit {
+		return raw
+	}
+	if limit <= len("...(truncated)") {
+		return raw[:limit]
+	}
+	return raw[:limit-len("...(truncated)")] + "...(truncated)"
 }
 
 func appendChunk(base, chunk string) string {

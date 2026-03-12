@@ -1,4 +1,4 @@
-# GUI <-> CLI Flow (Session-First vNext)
+# GUI <-> Gatewayd Flow (Session-First vNext)
 
 This document defines the target GUI behavior for the new session-first design.
 
@@ -19,22 +19,40 @@ It should help the user:
 
 The GUI does not own routing logic or runtime truth.
 
+## Transport Policy
+
+The long-term GUI transport is direct control-plane RPC to `gatewayd`.
+
+Rules:
+
+- GUI business reads and writes should use `GatewayControl` gRPC directly.
+- gRPC transport should use localhost TCP, not ACP and not direct state-file mutation.
+- default listen address is `127.0.0.1:58473` unless `GATEWAYD_ADDR` overrides it.
+- GUI must not speak ACP directly as product behavior.
+- CLI JSON commands remain migration/bootstrap tools and internal operator workflows; they are not the long-term GUI data path.
+- `Action` RPC may remain a migration contract for GUI work, but typed RPCs should replace GUI-critical reads and writes over time.
+
 ## Read Model
 
 Primary reads:
 
-1. `cag gatewayd-status --json`
-2. `cag session list --json`
-3. `cag session show --key <session_key> --json`
-4. `cag session messages --key <session_key> --json`
-5. `cag binding list --json`
-6. `cag channel inbox --json`
+1. `cag gatewayd-status --json` without auto-start
+2. `GatewayControl/Status`
+3. `GatewayControl/Action(session.list)`
+4. `GatewayControl/Action(session.show)`
+5. `GatewayControl/Action(session.messages)`
+6. `GatewayControl/Action(binding.list)`
+7. `GatewayControl/Action(channel.inbox)`
 
 Rules:
 
-- GUI uses machine-readable CLI output only.
+- GUI should prefer gRPC responses over CLI JSON output.
 - GUI does not read state files directly as product behavior.
 - GUI may use `latest` only to choose an initial selected session.
+- `session messages` is the GUI read model for both persisted chat messages and in-flight session activity.
+- while a send is in flight, GUI should poll `session messages` and render ACP session updates from the returned timeline before the final assistant message is persisted.
+- GUI should treat ACP `sessionUpdate` kinds such as `agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`, `plan`, and `available_commands_update` as structured activity blocks, not as raw text to concatenate into the visible answer bubble.
+- if `gatewayd` is stopped, GUI should show the stopped state and skip business gRPC reads that require a live server.
 
 ## GUI Startup Flow
 
@@ -45,12 +63,11 @@ Recommended sequence:
 1. load bundled app config and initialize the GUI logger
 2. run local component checks for `cag` and `codex-acp`
 3. load config snapshot for the settings panel
-4. run `cag doctor --json` with `cag health --json` as fallback in direct CLI mode
-5. run `cag gatewayd-status --json` in direct CLI mode
-6. run `cag session list --json` in direct CLI mode
-7. run `cag binding list --json` in direct CLI mode
-8. run `cag channel inbox --json` or user/access reads in direct CLI mode if the current GUI screen needs them
-9. if a session is selected, run `cag session messages --key <session_key> --json` in direct CLI mode
+4. run `cag doctor --json` with `cag health --json` as fallback for local diagnostics
+5. run `cag gatewayd-status --json` without auto-start
+6. if `gatewayd` is running, open the gRPC client connection
+7. if `gatewayd` is running, fetch session list, binding list, and inbox through gRPC
+8. if a session is selected and `gatewayd` is running, fetch `session messages` through gRPC
 
 Rules:
 
@@ -58,6 +75,7 @@ Rules:
 - each startup step should emit `step_start` and `step_done` with elapsed time and summary status
 - GUI startup must not auto-start `gatewayd`
 - GUI shutdown must not auto-stop `gatewayd`
+- startup must not treat a failed gRPC dial as permission to auto-start the server
 - channel configuration failures must be logged and shown as health warnings, but they must not block gateway service startup by themselves
 - startup may continue after a non-fatal step failure so the GUI can still show partial state
 - startup completion should emit one summary line with overall outcome such as `ready`, `degraded`, or `blocked`
@@ -106,6 +124,7 @@ For `gatewayd` timeline steps, at minimum log:
 - runtime execute started
 - runtime execute finished or failed
 - state persisted
+- ACP event fanout while execution is in flight
 
 Recommended step names:
 
@@ -155,11 +174,11 @@ Rules:
 
 Rules:
 
-- passive reads may use direct CLI mode
-- GUI writes must not mutate session/runtime state in direct CLI mode as product behavior
+- GUI writes must use gRPC to `gatewayd`; they must not mutate session/runtime state through direct CLI mode as product behavior
 - explicit writes such as `session create`, `session clear`, `session attach`, `session detach`, `runtime restart`, and `session send` must go through `gatewayd`
-- if `gatewayd` is not running when the GUI performs a write, the CLI layer may start it first, but the resulting write must still be observable in `gatewayd` logs
-- GUI `Restart` is an operator action that force-restarts `gatewayd`; it should stop the current control-plane process, start a fresh one, and therefore truncate `gatewayd.log` before new lines are written
+- if `gatewayd` is not running when the GUI performs a normal write, the write must fail with an actionable gateway-stopped error
+- GUI `Restart` is the only operator action that may start or restart `gatewayd`
+- GUI `Restart` should stop the current control-plane process when present, start a fresh one, and therefore truncate `gatewayd.log` before new lines are written
 
 ### Binding Operations
 
@@ -227,8 +246,18 @@ Rules:
 - if no session is selected, send must be disabled
 - send must never auto-route to `latest`
 - while a send is in flight, the GUI should keep a visible local processing state until the assistant reply is persisted
+- the processing state should progressively load ACP activity from `session messages.timeline` so the assistant bubble updates during execution instead of waiting for the final persisted assistant message
+- the assistant bubble should render one unified output that may contain:
+  - streamed assistant text
+  - grouped activity rows for ACP `tool_call` / `tool_call_update`
+  - grouped thought or planning rows for ACP `agent_thought_chunk` / `plan`
+  - command or skill availability rows for ACP `available_commands_update`
+- GUI should group repeated updates for the same tool or activity key and show the latest status in-place instead of printing every update as flat raw text
+- when an assistant reply is complete and visible in the chat panel, the bubble should show a lightweight copy affordance so the operator can copy the final assistant text with one click
 - the wait budget for `session send` must align with the runtime's resolved `AGENT_TIMEOUT_SEC`; GUI/client-side waiting must not expire earlier because of a separate hard-coded default
 - send progress is scoped to the target session only; one session's in-flight send must not block another session's chat UI
+- the chat input should support session-local sent-message history navigation; only user-sent messages are eligible history items, assistant or system replies must never be selected by `Up` / `Down`
+- pressing `Up` walks older user-sent messages for the selected session, while `Down` walks back toward newer user messages and finally restores the draft/input state that existed before history navigation started
 
 ### Channel Inbox Panel
 
@@ -288,6 +317,7 @@ Actions:
 - Do not build new GUI behavior on top of legacy flat commands.
 - GUI may still use hidden/internal control-plane commands during migration only.
 - Hidden/internal commands should be treated as operator APIs, not as end-user navigation.
+- New GUI business reads and writes should target `gatewayd` gRPC instead of CLI stdout parsing.
 - Do not interpret stderr as business result.
 - Parse one JSON object per command invocation.
 
@@ -295,11 +325,12 @@ Actions:
 
 During the Cobra transition:
 
-- GUI reads and writes should continue to prefer:
-  - `cag session ...`
-  - `cag channel ...`
-  - `cag binding ...`
-  - `cag runtime ...`
+- GUI reads and writes should migrate toward:
+  - `GatewayControl/Status`
+  - `GatewayControl/Action(session.*)`
+  - `GatewayControl/Action(channel.*)`
+  - `GatewayControl/Action(binding.*)`
+  - `GatewayControl/Action(runtime.*)`
 - GUI bootstrap and operator actions may temporarily continue to call hidden/internal commands such as:
   - `cag doctor`
   - `cag gatewayd-status`
@@ -311,7 +342,7 @@ During the Cobra transition:
 
 These internal commands are migration support only and should not receive new product semantics.
 
-Explicit operator actions may still start `gatewayd`, but passive GUI startup and refresh should stay in direct CLI mode so opening the app does not mutate control-plane state.
+Explicit operator actions may still start `gatewayd`, but passive GUI startup and refresh must not mutate control-plane state so opening the app does not start the server.
 
 ## Non-Goals
 
