@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"cli-agent-gateway/internal/core"
 	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
 	"cli-agent-gateway/internal/utils/sessionctl"
+	"github.com/spf13/cobra"
 )
 
 type CommandSpec struct {
@@ -44,12 +44,16 @@ func commandSpecs() []CommandSpec {
 		{Path: "session delete", Purpose: "Archive a session and remove its bindings", FeatureGroup: "session-lifecycle", SunsetGroup: "session"},
 		{Path: "session list", Purpose: "List gateway sessions", FeatureGroup: "session-read-model", SunsetGroup: "session"},
 		{Path: "session show", Purpose: "Show one session with bindings/runtime", FeatureGroup: "session-read-model", SunsetGroup: "session"},
+		{Path: "session bind", Purpose: "Bind a channel conversation to one session", FeatureGroup: "session-routing", SunsetGroup: "session"},
+		{Path: "session unbind", Purpose: "Remove one channel binding from one session", FeatureGroup: "session-routing", SunsetGroup: "session"},
 		{Path: "session send", Purpose: "Send a message into a session runtime", FeatureGroup: "session-io", SunsetGroup: "session"},
 		{Path: "session messages", Purpose: "Read session messages and timeline", FeatureGroup: "session-read-model", SunsetGroup: "session"},
 		{Path: "session clear", Purpose: "Reset live session context while keeping history", FeatureGroup: "session-runtime", SunsetGroup: "session"},
 		{Path: "session attach", Purpose: "Attach a live runtime to a session", FeatureGroup: "session-runtime", SunsetGroup: "session"},
 		{Path: "session detach", Purpose: "Detach the live runtime from a session", FeatureGroup: "session-runtime", SunsetGroup: "session"},
 		{Path: "channel list", Purpose: "List supported channel entrypoints", FeatureGroup: "channel-read-model", SunsetGroup: "channel"},
+		{Path: "channel enable", Purpose: "Enable a configured channel", FeatureGroup: "channel-routing", SunsetGroup: "channel"},
+		{Path: "channel disable", Purpose: "Disable a configured channel", FeatureGroup: "channel-routing", SunsetGroup: "channel"},
 		{Path: "channel inbox", Purpose: "List unassigned channel conversations", FeatureGroup: "channel-routing", SunsetGroup: "channel"},
 		{Path: "channel show", Purpose: "Show one channel conversation or binding state", FeatureGroup: "channel-routing", SunsetGroup: "channel"},
 		{Path: "binding create", Purpose: "Bind a channel conversation to a session", FeatureGroup: "binding-routing", SunsetGroup: "binding"},
@@ -58,89 +62,210 @@ func commandSpecs() []CommandSpec {
 		{Path: "binding show", Purpose: "Show one binding", FeatureGroup: "binding-routing", SunsetGroup: "binding"},
 		{Path: "runtime status", Purpose: "Show global runtime status", FeatureGroup: "runtime-ops", SunsetGroup: "runtime"},
 		{Path: "runtime ps", Purpose: "List live session runtimes", FeatureGroup: "runtime-ops", SunsetGroup: "runtime"},
+		{Path: "runtime restart", Purpose: "Restart a live runtime for one session", FeatureGroup: "runtime-ops", SunsetGroup: "runtime"},
 		{Path: "runtime logs", Purpose: "Show runtime log path or stream logs", FeatureGroup: "runtime-ops", SunsetGroup: "runtime"},
 	}
 }
 
-func runSessionCommand(repoRoot string, args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "session requires a subcommand")
-		return 2
-	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "create":
-		fs := flag.NewFlagSet("session create", flag.ContinueOnError)
-		key := fs.String("key", "", "session key")
-		workdir := fs.String("workdir", "", "workdir")
-		jsonOut := fs.Bool("json", false, "json output")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		return runAction(repoRoot, "session.create", *jsonOut, &gatewayv1.ActionRequest{
-			SessionKey: *key,
-			Workdir:    *workdir,
-		})
-	case "delete", "show", "attach", "detach", "clear", "messages":
-		fs := flag.NewFlagSet("session "+args[0], flag.ContinueOnError)
-		key := fs.String("key", "", "session key")
-		jsonOut := fs.Bool("json", false, "json output")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		return runAction(repoRoot, "session."+strings.ToLower(strings.TrimSpace(args[0])), *jsonOut, &gatewayv1.ActionRequest{
-			SessionKey: *key,
-		})
-	case "list":
-		fs := flag.NewFlagSet("session list", flag.ContinueOnError)
-		jsonOut := fs.Bool("json", false, "json output")
-		includeArchived := fs.Bool("include-archived", false, "include archived sessions")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		return runAction(repoRoot, "session.list", *jsonOut, &gatewayv1.ActionRequest{
-			IncludeArchived: *includeArchived,
-		})
-	case "send":
-		fs := flag.NewFlagSet("session send", flag.ContinueOnError)
-		key := fs.String("key", "", "session key")
-		text := fs.String("text", "", "text to send")
-		filePath := fs.String("file", "", "read text from file")
-		source := fs.String("source", "session.send", "logical source")
-		messageID := fs.String("message-id", "", "message id")
-		jsonOut := fs.Bool("json", false, "json output")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		body := strings.TrimSpace(*text)
-		if body == "" && strings.TrimSpace(*filePath) != "" {
-			raw, err := os.ReadFile(strings.TrimSpace(*filePath))
+func newSessionCmd(repoRoot string) *cobra.Command {
+	cmd := newGroupCmd("session", "Manage session-first task contexts")
+	cmd.AddCommand(
+		newSessionCreateCmd(repoRoot),
+		newSessionKeyActionCmd(repoRoot, "delete", "Delete a task session"),
+		newSessionListCmd(repoRoot),
+		newSessionKeyActionCmd(repoRoot, "show", "Show one task session"),
+		newSessionBindCmd(repoRoot, "bind", "Bind a channel conversation to a session"),
+		newSessionBindCmd(repoRoot, "unbind", "Remove a channel binding from a session"),
+		newSessionSendCmd(repoRoot),
+		newSessionKeyActionCmd(repoRoot, "messages", "Read session messages and timeline"),
+		newSessionKeyActionCmd(repoRoot, "clear", "Reset live session context while keeping history"),
+		newSessionKeyActionCmd(repoRoot, "attach", "Attach a live runtime to a session"),
+		newSessionKeyActionCmd(repoRoot, "detach", "Detach the live runtime from a session"),
+	)
+	return cmd
+}
+
+func newSessionCreateCmd(repoRoot string) *cobra.Command {
+	var key string
+	var workdir string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:          "create",
+		Short:        "Create a new task session",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			normalizedWorkdir, err := normalizeWorkdirPath(repoRoot, workdir)
 			if err != nil {
-				if *jsonOut {
-					printJSONActionError("session.send", "file_read_failed", err.Error())
+				if jsonOut {
+					printJSONActionError("session.create", "invalid_workdir", err.Error())
 				} else {
-					fmt.Fprintf(os.Stderr, "session send failed: %v\n", err)
+					fmt.Fprintf(cmd.ErrOrStderr(), "session create failed: %v\n", err)
 				}
-				return 1
+				return cliExitError{code: 1}
 			}
-			body = strings.TrimSpace(string(raw))
-		}
-		if strings.TrimSpace(*messageID) == "" {
-			*messageID = fmt.Sprintf("cli-%d", time.Now().UnixMilli())
-		}
-		return runAction(repoRoot, "session.send", *jsonOut, &gatewayv1.ActionRequest{
-			SessionKey: *key,
-			Text:       body,
-			Source:     *source,
-			MessageId:  *messageID,
-		})
-	default:
-		fmt.Fprintf(os.Stderr, "unknown session subcommand: %s\n", args[0])
-		return 2
+			return exitCodeToError(runAction(repoRoot, "session.create", jsonOut, &gatewayv1.ActionRequest{
+				SessionKey: key,
+				Workdir:    normalizedWorkdir,
+			}))
+		},
 	}
+	cmd.Flags().StringVar(&key, "key", "", "session key")
+	cmd.Flags().StringVar(&workdir, "workdir", "", "workdir")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	_ = cmd.MarkFlagRequired("key")
+	_ = cmd.MarkFlagRequired("workdir")
+	return cmd
+}
+
+func newSessionKeyActionCmd(repoRoot, name, short string) *cobra.Command {
+	var key string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:          name,
+		Short:        short,
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "session."+name, jsonOut, &gatewayv1.ActionRequest{
+				SessionKey: key,
+			}))
+		},
+	}
+	cmd.Flags().StringVar(&key, "key", "", "session key")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	_ = cmd.MarkFlagRequired("key")
+	return cmd
+}
+
+func newSessionListCmd(repoRoot string) *cobra.Command {
+	var jsonOut bool
+	var includeArchived bool
+
+	cmd := &cobra.Command{
+		Use:          "list",
+		Short:        "List task sessions",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "session.list", jsonOut, &gatewayv1.ActionRequest{
+				IncludeArchived: includeArchived,
+			}))
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	cmd.Flags().BoolVar(&includeArchived, "include-archived", false, "include archived sessions")
+	return cmd
+}
+
+func newSessionBindCmd(repoRoot, name, short string) *cobra.Command {
+	var key string
+	var channel string
+	var conversationID string
+	var threadID string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:          name,
+		Short:        short,
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "session."+name, jsonOut, &gatewayv1.ActionRequest{
+				SessionKey:     key,
+				Channel:        channel,
+				ConversationId: conversationID,
+				ThreadId:       threadID,
+			}))
+		},
+	}
+	cmd.Flags().StringVar(&key, "key", "", "session key")
+	cmd.Flags().StringVar(&channel, "channel", "", "channel")
+	cmd.Flags().StringVar(&conversationID, "conversation-id", "", "conversation id")
+	cmd.Flags().StringVar(&threadID, "thread-id", "", "thread id")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	_ = cmd.MarkFlagRequired("key")
+	_ = cmd.MarkFlagRequired("channel")
+	_ = cmd.MarkFlagRequired("conversation-id")
+	return cmd
+}
+
+func newSessionSendCmd(repoRoot string) *cobra.Command {
+	var key string
+	var text string
+	var filePath string
+	var source string
+	var messageID string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:          "send",
+		Short:        "Send a message into a session",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body := text
+			if body == "" && filePath != "" {
+				raw, err := os.ReadFile(filePath)
+				if err != nil {
+					if jsonOut {
+						printJSONActionError("session.send", "file_read_failed", err.Error())
+					} else {
+						fmt.Fprintf(cmd.ErrOrStderr(), "session send failed: %v\n", err)
+					}
+					return cliExitError{code: 1}
+				}
+				body = string(raw)
+			}
+			body = sessionctl.CleanString(body)
+			if messageID == "" {
+				messageID = fmt.Sprintf("cli-%d", time.Now().UnixMilli())
+			}
+			return exitCodeToError(runAction(repoRoot, "session.send", jsonOut, &gatewayv1.ActionRequest{
+				SessionKey: key,
+				Text:       body,
+				Source:     source,
+				MessageId:  messageID,
+			}))
+		},
+	}
+	cmd.Flags().StringVar(&key, "key", "", "session key")
+	cmd.Flags().StringVar(&text, "text", "", "text to send")
+	cmd.Flags().StringVar(&filePath, "file", "", "read text from file")
+	cmd.Flags().StringVar(&source, "source", "session.send", "logical source")
+	cmd.Flags().StringVar(&messageID, "message-id", "", "message id")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	_ = cmd.MarkFlagRequired("key")
+	return cmd
 }
 
 func runAction(repoRoot, action string, jsonOut bool, req *gatewayv1.ActionRequest) int {
 	req.Action = action
+	if grpcDisabled() {
+		payload, err := runActionLocal(repoRoot, req)
+		if err != nil {
+			if jsonOut {
+				printJSONActionError(action, "local_action_failed", err.Error())
+			} else {
+				fmt.Fprintf(os.Stderr, "%s failed: %v\n", action, err)
+			}
+			return 1
+		}
+		if jsonOut {
+			printJSON(payload)
+			if ok, present := payload["ok"].(bool); present && !ok {
+				return 1
+			}
+			return 0
+		}
+		renderPlainAction(action, payload)
+		if ok, present := payload["ok"].(bool); present && !ok {
+			return 1
+		}
+		return 0
+	}
 	resp, err := tryActionViaGRPC(repoRoot, req)
 	if err != nil {
 		if jsonOut {

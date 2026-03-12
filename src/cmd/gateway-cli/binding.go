@@ -1,64 +1,100 @@
 package main
 
 import (
-	"flag"
-	"fmt"
-	"os"
-	"strings"
-
 	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
+	"github.com/spf13/cobra"
 )
 
-func runBindingCommand(repoRoot string, args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "binding requires a subcommand")
-		return 2
+func newBindingCmd(repoRoot string) *cobra.Command {
+	cmd := newGroupCmd("binding", "Manage explicit conversation-to-session bindings")
+	cmd.AddCommand(
+		newBindingCreateCmd(repoRoot),
+		newBindingTargetCmd(repoRoot, "delete", "Delete a channel-to-session binding"),
+		newBindingListCmd(repoRoot),
+		newBindingTargetCmd(repoRoot, "show", "Show one binding"),
+	)
+	return cmd
+}
+
+func newBindingCreateCmd(repoRoot string) *cobra.Command {
+	var channel string
+	var conversationID string
+	var threadID string
+	var sessionKey string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:          "create",
+		Short:        "Create a channel-to-session binding",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "binding.create", jsonOut, &gatewayv1.ActionRequest{
+				Channel:        channel,
+				ConversationId: conversationID,
+				ThreadId:       threadID,
+				SessionKey:     sessionKey,
+			}))
+		},
 	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "create":
-		fs := flag.NewFlagSet("binding create", flag.ContinueOnError)
-		channel := fs.String("channel", "", "channel")
-		conversationID := fs.String("conversation-id", "", "conversation id")
-		threadID := fs.String("thread-id", "", "thread id")
-		sessionKey := fs.String("session-key", "", "session key")
-		jsonOut := fs.Bool("json", false, "json output")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		return runAction(repoRoot, "binding.create", *jsonOut, &gatewayv1.ActionRequest{
-			Channel:        *channel,
-			ConversationId: *conversationID,
-			ThreadId:       *threadID,
-			SessionKey:     *sessionKey,
-		})
-	case "delete", "show":
-		fs := flag.NewFlagSet("binding "+args[0], flag.ContinueOnError)
-		channel := fs.String("channel", "", "channel")
-		conversationID := fs.String("conversation-id", "", "conversation id")
-		threadID := fs.String("thread-id", "", "thread id")
-		jsonOut := fs.Bool("json", false, "json output")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		return runAction(repoRoot, "binding."+strings.ToLower(strings.TrimSpace(args[0])), *jsonOut, &gatewayv1.ActionRequest{
-			Channel:        *channel,
-			ConversationId: *conversationID,
-			ThreadId:       *threadID,
-		})
-	case "list":
-		fs := flag.NewFlagSet("binding list", flag.ContinueOnError)
-		channel := fs.String("channel", "", "channel filter")
-		sessionKey := fs.String("session-key", "", "session key filter")
-		jsonOut := fs.Bool("json", false, "json output")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		return runAction(repoRoot, "binding.list", *jsonOut, &gatewayv1.ActionRequest{
-			Channel:    *channel,
-			SessionKey: *sessionKey,
-		})
-	default:
-		fmt.Fprintf(os.Stderr, "unknown binding subcommand: %s\n", args[0])
-		return 2
+	cmd.Flags().StringVar(&channel, "channel", "", "channel")
+	cmd.Flags().StringVar(&conversationID, "conversation-id", "", "conversation id")
+	cmd.Flags().StringVar(&threadID, "thread-id", "", "thread id")
+	cmd.Flags().StringVar(&sessionKey, "session-key", "", "session key")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	_ = cmd.MarkFlagRequired("channel")
+	_ = cmd.MarkFlagRequired("conversation-id")
+	_ = cmd.MarkFlagRequired("session-key")
+	return cmd
+}
+
+func newBindingTargetCmd(repoRoot, name, short string) *cobra.Command {
+	var channel string
+	var conversationID string
+	var threadID string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:          name,
+		Short:        short,
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "binding."+name, jsonOut, &gatewayv1.ActionRequest{
+				Channel:        channel,
+				ConversationId: conversationID,
+				ThreadId:       threadID,
+			}))
+		},
 	}
+	cmd.Flags().StringVar(&channel, "channel", "", "channel")
+	cmd.Flags().StringVar(&conversationID, "conversation-id", "", "conversation id")
+	cmd.Flags().StringVar(&threadID, "thread-id", "", "thread id")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	_ = cmd.MarkFlagRequired("channel")
+	_ = cmd.MarkFlagRequired("conversation-id")
+	return cmd
+}
+
+func newBindingListCmd(repoRoot string) *cobra.Command {
+	var channel string
+	var sessionKey string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:          "list",
+		Short:        "List channel-to-session bindings",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "binding.list", jsonOut, &gatewayv1.ActionRequest{
+				Channel:    channel,
+				SessionKey: sessionKey,
+			}))
+		},
+	}
+	cmd.Flags().StringVar(&channel, "channel", "", "channel filter")
+	cmd.Flags().StringVar(&sessionKey, "session-key", "", "session key filter")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	return cmd
 }

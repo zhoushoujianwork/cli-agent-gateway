@@ -17,16 +17,13 @@ import (
 const runtimeConfigKVKey = "config.runtime"
 
 func runtimeConfigDBPath(repoRoot string, envValues map[string]string) string {
+	_ = repoRoot
 	_ = envValues
-	return DefaultRuntimePaths(repoRoot).StorageSQLitePath
+	return DefaultRuntimePaths("").StorageSQLitePath
 }
 
 func loadRuntimeValues(repoRoot string) (map[string]string, error) {
-	repoEnv, err := envfile.Parse(filepath.Join(repoRoot, ".env"))
-	if err != nil {
-		return nil, err
-	}
-	return loadRuntimeValuesFromPath(runtimeConfigDBPath(repoRoot, repoEnv))
+	return loadRuntimeValuesFromPath(runtimeConfigDBPath(repoRoot, nil))
 }
 
 func loadRuntimeValuesFromPath(dbPath string) (map[string]string, error) {
@@ -63,11 +60,7 @@ func loadRuntimeValuesFromPath(dbPath string) (map[string]string, error) {
 }
 
 func saveRuntimeValues(repoRoot string, updates map[string]*string) (string, error) {
-	repoEnv, err := envfile.Parse(filepath.Join(repoRoot, ".env"))
-	if err != nil {
-		return "", err
-	}
-	dbPath := runtimeConfigDBPath(repoRoot, repoEnv)
+	dbPath := runtimeConfigDBPath(repoRoot, nil)
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return "", err
 	}
@@ -143,11 +136,20 @@ func migrateUserScopedKeys(repoRoot string, envValues map[string]string) error {
 	return updateUserEnvValues(updates)
 }
 
-func repoInitValues(workdir string, existing map[string]string) map[string]string {
+func userInitValues(workdir string, existing map[string]string) map[string]string {
 	_ = workdir
 	values := map[string]string{
 		"CHANNEL_TYPE":  defaultChannelType,
 		"ACP_AGENT_CMD": defaultACPAgentCmd,
+		"ACP_PERMISSION_POLICY": defaultPermissionPolicy,
+		"SMS_FETCH_CMD": defaultFetchCmd,
+		"SMS_SEND_CMD": defaultSendCmd,
+		"REMOTE_USER_ID": "tester",
+		"ALLOWED_FROM": "tester",
+		"IMESSAGE_FETCH_CMD": defaultIMessageFetchCmd,
+		"IMESSAGE_SEND_CMD": defaultIMessageSendCmd,
+		"CAG_GO_DEBUG": "1",
+		"STORAGE_BACKEND": defaultStorageBackend,
 	}
 	for key := range values {
 		if existingValue := strings.TrimSpace(existing[key]); existingValue != "" {
@@ -157,9 +159,10 @@ func repoInitValues(workdir string, existing map[string]string) map[string]strin
 	return values
 }
 
-func orderedRepoEnvKeys(values map[string]string) []string {
-	ordered := []string{"CHANNEL_TYPE", "ACP_AGENT_CMD"}
-	for _, key := range []string{
+func orderedUserInitKeys(values map[string]string) []string {
+	ordered := []string{
+		"CHANNEL_TYPE",
+		"ACP_AGENT_CMD",
 		"ACP_PERMISSION_POLICY",
 		"SMS_FETCH_CMD",
 		"SMS_SEND_CMD",
@@ -169,6 +172,18 @@ func orderedRepoEnvKeys(values map[string]string) []string {
 		"IMESSAGE_SEND_CMD",
 		"CAG_GO_DEBUG",
 		"STORAGE_BACKEND",
+	}
+	for _, key := range []string{
+		"GATEWAYD_ADDR",
+		"DINGTALK_SEND_MODE",
+		"DINGTALK_APP_KEY",
+		"DINGTALK_APP_SECRET",
+		"DINGTALK_AGENT_ID",
+		"DINGTALK_BOT_WEBHOOK",
+		"DINGTALK_BOT_SECRET",
+		"DINGTALK_DEFAULT_TO_USER",
+		"DINGTALK_TOKEN_URL",
+		"DINGTALK_SEND_URL",
 	} {
 		if strings.TrimSpace(values[key]) != "" {
 			ordered = append(ordered, key)
@@ -178,10 +193,7 @@ func orderedRepoEnvKeys(values map[string]string) []string {
 }
 
 func listEntries(repoRoot string) ([]Entry, error) {
-	repoEnv, err := envfile.Parse(filepath.Join(repoRoot, ".env"))
-	if err != nil {
-		return nil, err
-	}
+	repoEnv := map[string]string{}
 	userEnv, err := loadUserEnv()
 	if err != nil {
 		return nil, err

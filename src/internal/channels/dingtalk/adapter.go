@@ -19,13 +19,13 @@ import (
 	"time"
 
 	"cli-agent-gateway/internal/core"
+	"cli-agent-gateway/internal/infra/proclog"
 
 	dtchatbot "github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 	dtclient "github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
 )
 
 type Options struct {
-	RepoRoot              string
 	FetchMaxEvents        int
 	DMPolicy              string
 	GroupPolicy           string
@@ -776,8 +776,11 @@ func (a *Adapter) logf(format string, args ...any) {
 	if !streamDebugEnabled() {
 		return
 	}
-	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(os.Stderr, "[%s] dingtalk-stream %s\n", time.Now().UTC().Format(time.RFC3339), msg)
+	proclog.Info("cli", map[string]any{
+		"event":     "dingtalk_stream",
+		"subsystem": "dingtalk_stream",
+		"message":   fmt.Sprintf(format, args...),
+	})
 }
 
 func streamDebugEnabled() bool {

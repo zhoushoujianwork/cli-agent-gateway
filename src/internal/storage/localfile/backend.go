@@ -133,6 +133,7 @@ func emptyState() storageapi.StateData {
 		SessionDeleted: map[string]string{},
 		Sessions:       map[string]storageapi.SessionRecord{},
 		Bindings:       map[string]storageapi.BindingRecord{},
+		ChannelStates:  map[string]storageapi.ChannelStateRecord{},
 		RuntimeIndex:   map[string]storageapi.RuntimeRecord{},
 		Unassigned:     map[string]storageapi.ConversationRecord{},
 		UserAccess:     map[string]storageapi.UserAccessRecord{},
@@ -158,6 +159,9 @@ func normalizeState(d *storageapi.StateData) {
 	}
 	if d.Bindings == nil {
 		d.Bindings = map[string]storageapi.BindingRecord{}
+	}
+	if d.ChannelStates == nil {
+		d.ChannelStates = map[string]storageapi.ChannelStateRecord{}
 	}
 	if d.RuntimeIndex == nil {
 		d.RuntimeIndex = map[string]storageapi.RuntimeRecord{}

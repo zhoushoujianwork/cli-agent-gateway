@@ -19,6 +19,8 @@ Example:
 - `channel` is only an ingress/egress endpoint.
 - `binding` is explicit.
 - `runtime` is long-lived per session.
+- control-plane config and runtime state live under `~/.cag`.
+- `session.workdir` is the only task working directory concept.
 - No routing by heuristic derivation.
 - No implicit write routing to `latest`.
 
@@ -47,6 +49,11 @@ Examples:
 - one DingTalk DM conversation
 - one iMessage conversation
 
+Configured channel backends may also have an explicit ingress availability state:
+
+- `enabled`: channel ingress may fetch and execute through bindings
+- `disabled`: channel ingress is paused but its config remains intact
+
 ### Binding
 
 A binding explicitly maps one channel conversation to one session.
@@ -57,20 +64,28 @@ Without a binding:
 - the message may be recorded
 - but the message must not execute
 
+Bindings may be managed either from the routing object view (`cag binding ...`) or from the target session view (`cag session bind|unbind`).
+
 ### Runtime
 
 Runtime is the live ACP/agent process attached to a session.
 
+`gatewayd` hosts the runtime manager together with the external gRPC/control-plane surface.
+
+They are one integrated daemon, not two peer top-level services.
+
 Runtime is not the user-facing session identity.
+
+Gateway startup must fail fast when the configured ACP agent command is not available on PATH.
 
 ## System Shape
 
 ```mermaid
 flowchart TD
-    GUI["GUI"] --> CLI
+    GUI["GUI (gRPC over localhost TCP)"] --> GD["gatewayd (gRPC + runtime host)"]
     DT["DingTalk"] --> CH
     IM["iMessage"] --> CH
-    CLI["cag CLI"] --> GD["gatewayd"]
+    CLI["cag CLI"] --> GD
     CH["Channel Adapters"] --> GD
     GD --> SM["Session Manager"]
     GD --> BM["Binding Manager"]
@@ -89,12 +104,17 @@ flowchart TD
 - GUI always targets one explicit selected session.
 - GUI does not write to `latest` implicitly.
 - `latest` exists only for UI default selection.
+- GUI business reads/writes should talk to `gatewayd` directly over localhost TCP gRPC.
+- GUI must not speak ACP directly.
+- if `gatewayd` is stopped, normal GUI writes fail explicitly.
+- GUI `Restart` is the only action allowed to start or restart `gatewayd`.
 
 ### Channel Ingress
 
 - If the incoming conversation has a binding, route to that bound session.
 - If the incoming conversation has no binding, do not execute.
 - Put the conversation into an unassigned inbox for GUI/CLI management.
+- If the configured channel is disabled, do not fetch or execute new ingress for that channel until it is explicitly re-enabled.
 
 ### Explicit Non-Goals
 
@@ -112,6 +132,7 @@ To support real shared context across GUI and phone entrypoints:
 - one session may have one live runtime
 - multiple entrypoints may write into that same session
 - the runtime must survive across sends until explicitly detached, stopped, cleared, or deleted
+- runtime restart must be explicit for a target session; no hidden restart/fork behavior
 
 This is the key change from the old stateless-per-send model.
 
@@ -130,14 +151,23 @@ This is the key change from the old stateless-per-send model.
 - `storage`
   - persists sessions, bindings, interactions, reports
 
+## Control-Plane Home
+
+- `gatewayd` is user-scoped, not repo-scoped.
+- Runtime state, logs, SQLite, and operator config live under `~/.cag/`.
+- Managed `gatewayd` state is recorded in one global file under `~/.cag/gatewayd/`; it must not fork by repo.
+- Control-plane RPCs must not accept per-request `repo_root` overrides.
+- Relative session workdirs should be normalized in the CLI before the request is sent.
+
 ## Observability
 
 The system should expose:
 
 - session list
 - session detail
-- session messages
+- session messages with timeline / ACP activity events
 - runtime list
+- channel list with configured/enabled state
 - binding list
 - unassigned channel inbox
 - machine-readable logs and reports
@@ -150,8 +180,11 @@ The product command tree should converge to:
 - `cag channel ...`
 - `cag binding ...`
 - `cag runtime ...`
+- `cag config`
 
 Old flat commands are legacy and should not receive new behavior.
+
+Migration-only control-plane commands may still exist, but they should be hidden from the primary help surface and treated as internal operator entrypoints.
 
 ## Design Constraints
 

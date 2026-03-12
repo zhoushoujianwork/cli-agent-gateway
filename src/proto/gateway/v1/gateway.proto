@@ -5,9 +5,8 @@ package gateway.v1;
 option go_package = "cli-agent-gateway/internal/gen/gatewayv1;gatewayv1";
 
 message StatusRequest {
-  string repo_root = 1;
-  string log_file = 2;
-  bool quiet = 3;
+  string log_file = 1;
+  bool quiet = 2;
 }
 
 message StatusResponse {
@@ -27,8 +26,7 @@ message StatusResponse {
 }
 
 message SessionsRequest {
-  string repo_root = 1;
-  int32 limit = 2;
+  int32 limit = 1;
 }
 
 message SessionItem {
@@ -53,14 +51,13 @@ message SessionsResponse {
 }
 
 message SendToSessionRequest {
-  string repo_root = 1;
-  string session_key = 2;
-  string text = 3;
-  string message_id = 4;
-  string msg_type = 5;
-  bool dry_run = 6;
-  string source = 7;
-  string workdir = 8;
+  string session_key = 1;
+  string text = 2;
+  string message_id = 3;
+  string msg_type = 4;
+  bool dry_run = 5;
+  string source = 6;
+  string workdir = 7;
 }
 
 message SendToSessionResponse {
@@ -82,9 +79,8 @@ message SendToSessionResponse {
 }
 
 message SessionNewRequest {
-  string repo_root = 1;
-  string session_key = 2;
-  string workdir = 3;
+  string session_key = 1;
+  string workdir = 2;
 }
 
 message SessionNewResponse {
@@ -98,8 +94,7 @@ message SessionNewResponse {
 }
 
 message SessionMessagesRequest {
-  string repo_root = 1;
-  string session_key = 2;
+  string session_key = 1;
 }
 
 message ChatMessage {
@@ -132,8 +127,7 @@ message SessionMessagesResponse {
 }
 
 message SessionKeyRequest {
-  string repo_root = 1;
-  string session_key = 2;
+  string session_key = 1;
 }
 
 message SessionMutationResponse {
@@ -142,13 +136,10 @@ message SessionMutationResponse {
   string session_key = 3;
 }
 
-message EmptyRepoRequest {
-  string repo_root = 1;
-}
+message EmptyRepoRequest {}
 
 message HealthCheckRequest {
-  string repo_root = 1;
-  bool include_paths = 2;
+  bool include_paths = 1;
 }
 
 message HealthCheckItem {
@@ -168,18 +159,17 @@ message HealthCheckResponse {
 }
 
 message ActionRequest {
-  string repo_root = 1;
-  string action = 2;
-  string session_key = 3;
-  string workdir = 4;
-  string text = 5;
-  string message_id = 6;
-  string source = 7;
-  string channel = 8;
-  string conversation_id = 9;
-  string thread_id = 10;
-  bool include_archived = 11;
-  int32 limit = 12;
+  string action = 1;
+  string session_key = 2;
+  string workdir = 3;
+  string text = 4;
+  string message_id = 5;
+  string source = 6;
+  string channel = 7;
+  string conversation_id = 8;
+  string thread_id = 9;
+  bool include_archived = 10;
+  int32 limit = 11;
 }
 
 message ActionResponse {

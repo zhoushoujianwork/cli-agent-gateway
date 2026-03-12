@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -112,5 +113,60 @@ func TestEnsureSessionWorkdirKeepsExistingValue(t *testing.T) {
 	}
 	if filepath.Clean(next.SessionMeta["sess-b"].Workdir) != filepath.Clean(custom) {
 		t.Fatalf("expected stored workdir=%s got=%s", custom, next.SessionMeta["sess-b"].Workdir)
+	}
+}
+
+func TestChannelIngressEnabledDefaultsTrue(t *testing.T) {
+	loop := &Loop{ChannelName: "dingtalk"}
+	if !loop.channelIngressEnabled(storage.StateData{}) {
+		t.Fatalf("expected channel ingress enabled by default")
+	}
+}
+
+func TestChannelIngressEnabledHonorsStoredDisable(t *testing.T) {
+	loop := &Loop{ChannelName: "dingtalk"}
+	st := storage.StateData{
+		ChannelStates: map[string]storage.ChannelStateRecord{
+			"dingtalk": {
+				Channel: "dingtalk",
+				Enabled: false,
+			},
+		},
+	}
+	if loop.channelIngressEnabled(st) {
+		t.Fatalf("expected disabled channel ingress to be blocked")
+	}
+}
+
+func TestChannelStateTransitionEventLogsOnlyOnEdge(t *testing.T) {
+	loop := &Loop{ChannelName: "dingtalk"}
+	if event, ok := loop.channelStateTransitionEvent(false); !ok || event != "channel_disabled" {
+		t.Fatalf("expected first disabled state to log once, got event=%q ok=%v", event, ok)
+	}
+	if event, ok := loop.channelStateTransitionEvent(false); ok || event != "" {
+		t.Fatalf("expected repeated disabled state to be suppressed, got event=%q ok=%v", event, ok)
+	}
+	if event, ok := loop.channelStateTransitionEvent(true); !ok || event != "channel_enabled" {
+		t.Fatalf("expected enable transition to log once, got event=%q ok=%v", event, ok)
+	}
+	if event, ok := loop.channelStateTransitionEvent(true); ok || event != "" {
+		t.Fatalf("expected repeated enabled state to be suppressed, got event=%q ok=%v", event, ok)
+	}
+}
+
+func TestShouldLogFetchFailureSuppressesRepeats(t *testing.T) {
+	loop := &Loop{}
+	if !loop.shouldLogFetchFailure(fmt.Errorf("boom")) {
+		t.Fatalf("expected first fetch error to be logged")
+	}
+	if loop.shouldLogFetchFailure(fmt.Errorf("boom")) {
+		t.Fatalf("expected repeated identical fetch error to be suppressed")
+	}
+	if !loop.shouldLogFetchFailure(fmt.Errorf("boom-2")) {
+		t.Fatalf("expected changed fetch error to be logged")
+	}
+	loop.noteFetchSuccess()
+	if !loop.shouldLogFetchFailure(fmt.Errorf("boom")) {
+		t.Fatalf("expected fetch error after recovery to be logged again")
 	}
 }

@@ -6,6 +6,20 @@ This document describes the backend design that supports the new session-first p
 
 Support one user working on the same task session from multiple entrypoints while preserving one shared live task context.
 
+`gatewayd` is the integrated backend daemon for this model: it exposes the external gRPC/control-plane surface and owns runtime management internally.
+
+## GUI Transport
+
+The long-term desktop integration is GUI-to-`gatewayd` gRPC over localhost TCP.
+
+Rules:
+
+- GUI is a first-class control-plane client of `gatewayd`, not a CLI screen-scraper.
+- GUI transport should use localhost TCP by default for cross-platform compatibility.
+- GUI must not connect directly to ACP.
+- hidden CLI commands may still help with diagnostics or daemon lifecycle during migration.
+- `Action` RPC is an acceptable migration surface, but GUI-critical paths should move to typed RPCs over time.
+
 ## New Backend Managers
 
 ### Session Manager
@@ -33,6 +47,7 @@ Responsibilities:
 - unbind a channel conversation
 - list bindings
 - expose unassigned conversations
+- validate session-oriented bind and unbind mutations
 
 Owns:
 
@@ -41,12 +56,21 @@ Owns:
 - optional `thread_id`
 - target `session_key`
 
+### Channel Availability
+
+Responsibilities:
+
+- report whether a configured channel is enabled
+- enable one configured channel ingress
+- disable one configured channel ingress without removing config
+
 ### Runtime Manager
 
 Responsibilities:
 
 - attach live ACP runtime to a session
 - detach runtime from a session
+- restart a live ACP runtime for one explicit session
 - keep runtime registry
 - serialize writes into one session runtime
 - expose runtime status and process list
@@ -56,6 +80,8 @@ Owns:
 - live runtime handle
 - process/session health
 - current attached ACP session identity as internal-only data
+
+The runtime manager is a subsystem hosted inside `gatewayd`, not a separate top-level service beside it.
 
 ## Internal Rule
 
@@ -71,7 +97,7 @@ ACP `session_id` should not define routing semantics.
 ```mermaid
 flowchart TD
     CLI["CLI"] --> API["Command Handlers"]
-    GUI["GUI"] --> API
+    GUI["GUI (gRPC over localhost TCP)"] --> API
     CH["Channel Adapters"] --> RT["Router"]
     API --> SM["Session Manager"]
     API --> BM["Binding Manager"]
@@ -92,9 +118,10 @@ flowchart TD
 ### GUI Send
 
 1. GUI selects one explicit session.
-2. GUI calls `session send`.
-3. Runtime manager finds or creates the live runtime for that session.
-4. Message is delivered into that session runtime.
+2. GUI calls `session send` through `gatewayd`.
+3. `gatewayd` records one action trace for the request with action, session key, message id, source, and elapsed time.
+4. Runtime manager finds or creates the live runtime for that session.
+5. Message is delivered into that session runtime.
 
 ### Channel Ingress
 
@@ -105,6 +132,8 @@ flowchart TD
 4. If binding does not exist:
    - record as unassigned
    - do not execute
+5. If the configured channel is disabled:
+   - do not fetch or execute new ingress for that channel
 
 ## Runtime Policy
 
@@ -119,8 +148,21 @@ Allowed transitions:
 - `created -> attached`
 - `attached -> detached`
 - `attached -> cleared`
+- `attached -> restarted -> attached`
 - `attached -> deleted`
 - `detached -> attached`
+
+Gateway control-plane startup should fail fast if the configured ACP agent command cannot be resolved.
+
+Passive GUI startup must not auto-start `gatewayd`.
+
+Normal GUI reads and writes should flow through `gatewayd` gRPC whenever the daemon is running so one control-plane trace exists for each operator action.
+
+If `gatewayd` is stopped:
+
+- ordinary GUI writes must fail with an explicit gateway-stopped error
+- GUI may still inspect gateway status through internal/operator paths that do not auto-start the daemon
+- GUI `Restart` is the only operator action allowed to start or restart `gatewayd`
 
 ## Storage Model Preview
 

@@ -18,6 +18,7 @@ type TaskRequest struct {
 	Channel    string
 	ThreadID   string
 	Metadata   map[string]any
+	EventSink  func(TaskEvent)
 }
 
 type TaskResult struct {
@@ -29,6 +30,19 @@ type TaskResult struct {
 	OutputText     string
 	ErrorText      string
 	RawEvents      []map[string]any
+}
+
+type TaskEvent struct {
+	ID             string
+	Method         string
+	Kind           string
+	Stage          string
+	Status         string
+	Title          string
+	Detail         string
+	Text           string
+	ActivityKey    string
+	PayloadPreview string
 }
 
 // ChannelAdapter handles ingress/egress for a channel.

@@ -23,6 +23,7 @@ import (
 	"cli-agent-gateway/internal/core"
 	"cli-agent-gateway/internal/infra/envfile"
 	"cli-agent-gateway/internal/infra/lockfile"
+	"cli-agent-gateway/internal/infra/proclog"
 	"cli-agent-gateway/internal/storage"
 	"cli-agent-gateway/internal/utils/sessionctl"
 
@@ -98,137 +99,34 @@ type SessionsPayload struct {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage(os.Stderr)
-		os.Exit(2)
-	}
-
-	cmd := strings.ToLower(strings.TrimSpace(os.Args[1]))
+	proclog.Configure()
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to resolve cwd: %v\n", err)
 		os.Exit(1)
 	}
 	repoRoot := detectRepoRoot(cwd)
-	args := os.Args[2:]
+	os.Exit(executeRoot(repoRoot, os.Args[1:]))
+}
 
-	switch cmd {
-	case "run":
-		os.Exit(runGoMain(repoRoot, args))
-	case "start":
-		os.Exit(runStart(repoRoot, args))
-	case "stop":
-		os.Exit(runStop(repoRoot, args))
-	case "restart":
-		os.Exit(runRestart(repoRoot, args))
-	case "config":
-		os.Exit(runGoConfig(repoRoot, args))
-	case "status":
-		os.Exit(runStatus(repoRoot, args))
-	case "health":
-		os.Exit(runHealth(repoRoot, args))
-	case "doctor":
-		os.Exit(runDoctor(repoRoot, args))
-	case "send":
-		os.Exit(runSend(repoRoot, args))
-	case "session":
-		os.Exit(runSessionCommand(repoRoot, args))
-	case "channel":
-		os.Exit(runChannelCommand(repoRoot, args))
-	case "binding":
-		os.Exit(runBindingCommand(repoRoot, args))
-	case "runtime":
-		os.Exit(runRuntimeCommand(repoRoot, args))
-	case "sessions":
-		os.Exit(runDeprecatedCLI("sessions", "session list", hasFlag(args, "--json")))
-	case "messages":
-		os.Exit(runDeprecatedCLI("messages", "session messages --key <session_key>", hasFlag(args, "--json")))
-	case "users":
-		os.Exit(runUsers(repoRoot, args))
-	case "user-allow":
-		os.Exit(runUserAllow(repoRoot, args))
-	case "user-block":
-		os.Exit(runUserBlock(repoRoot, args))
-	case "session-clear":
-		os.Exit(runDeprecatedCLI("session-clear", "session clear --key <session_key>", hasFlag(args, "--json")))
-	case "session-new":
-		os.Exit(runDeprecatedCLI("session-new", "session create --key <session_key> --workdir <path>", hasFlag(args, "--json")))
-	case "session-delete":
-		os.Exit(runDeprecatedCLI("session-delete", "session delete --key <session_key>", hasFlag(args, "--json")))
-	case "sessions-delete-all":
-		os.Exit(runDeprecatedCLI("sessions-delete-all", "session delete --key <session_key> (repeat as needed)", hasFlag(args, "--json")))
-	case "gatewayd":
-		os.Exit(runGatewayd(repoRoot, args))
-	case "gatewayd-up":
-		os.Exit(runGatewaydUp(repoRoot, args))
-	case "gatewayd-down":
-		os.Exit(runGatewaydDown(repoRoot, args))
-	case "actions":
-		printActions(os.Stdout)
-	case "help", "-h", "--help":
-		printUsage(os.Stdout)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown action: %s\n", cmd)
-		printUsage(os.Stderr)
-		os.Exit(2)
+func cliLogInfo(event string, fields map[string]any) {
+	node := map[string]any{
+		"event": strings.TrimSpace(event),
 	}
+	for key, value := range fields {
+		node[key] = value
+	}
+	proclog.Info("cli", node)
 }
 
-func printActions(out *os.File) {
-	fmt.Fprintln(out, "run")
-	fmt.Fprintln(out, "start")
-	fmt.Fprintln(out, "stop")
-	fmt.Fprintln(out, "restart")
-	fmt.Fprintln(out, "config")
-	fmt.Fprintln(out, "status")
-	fmt.Fprintln(out, "health")
-	fmt.Fprintln(out, "doctor")
-	fmt.Fprintln(out, "send")
-	fmt.Fprintln(out, "session")
-	fmt.Fprintln(out, "channel")
-	fmt.Fprintln(out, "binding")
-	fmt.Fprintln(out, "runtime")
-	fmt.Fprintln(out, "users")
-	fmt.Fprintln(out, "user-allow")
-	fmt.Fprintln(out, "user-block")
-	fmt.Fprintln(out, "gatewayd")
-	fmt.Fprintln(out, "gatewayd-up")
-	fmt.Fprintln(out, "gatewayd-down")
-	fmt.Fprintln(out, "actions")
-	fmt.Fprintln(out, "help")
-}
-
-func printUsage(out *os.File) {
-	fmt.Fprintln(out, "Usage: cag <action> [options]")
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Actions:")
-	fmt.Fprintln(out, "  run                 Start gateway runtime in foreground")
-	fmt.Fprintln(out, "  start               Start gateway runtime in background (dashboard-friendly)")
-	fmt.Fprintln(out, "  stop                Stop running gateway process by lock owner pid")
-	fmt.Fprintln(out, "  restart             Stop then start")
-	fmt.Fprintln(out, "  start --log-file    Optional server log path for background runtime")
-	fmt.Fprintln(out, "  config [workdir]    Generate/update repo .env with startup-only defaults")
-	fmt.Fprintln(out, "  config --global     Generate/update ~/.cag/.env (gatewayd defaults)")
-	fmt.Fprintln(out, "  config show         Alias of `config list`")
-	fmt.Fprintln(out, "  config list         Show effective config with source and scope")
-	fmt.Fprintln(out, "  config get <key>    Show a single effective config value")
-	fmt.Fprintln(out, "  config set <k> <v>  Persist config to repo .env / ~/.cag/.env / runtime DB")
-	fmt.Fprintln(out, "  config unset <key>  Remove persisted override and fall back to defaults")
-	fmt.Fprintln(out, "  status [--json]     Check single-instance lock status")
-	fmt.Fprintln(out, "  health [--json]     Validate runtime prerequisites for selected channel")
-	fmt.Fprintln(out, "  send [opts]         Send message (--text/--file, --msgtype, --dry-run, --workdir optional for --session-key)")
-	fmt.Fprintln(out, "  session <subcmd>    Manage session-first task contexts")
-	fmt.Fprintln(out, "  channel <subcmd>    Inspect channel conversations and inbox")
-	fmt.Fprintln(out, "  binding <subcmd>    Manage explicit conversation -> session bindings")
-	fmt.Fprintln(out, "  runtime <subcmd>    Inspect live session runtimes")
-	fmt.Fprintln(out, "  users [--json]      List pending/allowed/blocked gateway users")
-	fmt.Fprintln(out, "  user-allow          Mark a user as allowed (--channel --user-id)")
-	fmt.Fprintln(out, "  user-block          Mark a user as blocked (--channel --user-id)")
-	fmt.Fprintln(out, "  gatewayd [opts]     Run gRPC control plane server")
-	fmt.Fprintln(out, "  gatewayd-up         Ensure gRPC control plane is running")
-	fmt.Fprintln(out, "  gatewayd-down       Stop managed gRPC control plane process")
-	fmt.Fprintln(out, "  actions             Print supported action names")
-	fmt.Fprintln(out, "  help                Show this message")
+func cliLogWarn(event string, fields map[string]any) {
+	node := map[string]any{
+		"event": strings.TrimSpace(event),
+	}
+	for key, value := range fields {
+		node[key] = value
+	}
+	proclog.Warn("cli", node)
 }
 
 func runGoMain(repoRoot string, args []string) int {
@@ -280,8 +178,14 @@ func runGoMain(repoRoot string, args []string) int {
 		"started_at": time.Now().UTC().Format(time.RFC3339),
 	})
 
-	fmt.Printf("[%s] startup channel=%s workdir=%s\n", time.Now().UTC().Format(time.RFC3339), cfg.ChannelType, cfg.Workdir)
-	fmt.Printf("[%s] startup acp_cmd=%s permission_policy=%s\n", time.Now().UTC().Format(time.RFC3339), cfg.ACPAgentCmd, cfg.PermissionPolicy)
+	cliLogInfo("runtime_start", map[string]any{
+		"channel": cfg.ChannelType,
+		"workdir": cfg.Workdir,
+	})
+	cliLogInfo("runtime_config", map[string]any{
+		"acp_cmd":           cfg.ACPAgentCmd,
+		"permission_policy": cfg.PermissionPolicy,
+	})
 
 	if err := ensureGatewaydRunning(repoRoot); err != nil {
 		fmt.Fprintf(os.Stderr, "ensure gatewayd failed: %v\n", err)
@@ -305,6 +209,7 @@ func runGoMain(repoRoot string, args []string) int {
 	}
 	loop := &core.Loop{
 		Channel:             channel,
+		ChannelName:         strings.TrimSpace(cfg.ChannelType),
 		Agent:               agent,
 		Storage:             store,
 		RemoteUserID:        cfg.RemoteUserID,
@@ -321,134 +226,24 @@ func runGoMain(repoRoot string, args []string) int {
 		loop.PendingUnknownUsers = !strings.EqualFold(strings.TrimSpace(cfg.DingTalkDMPolicy), "allow_all")
 	}
 	if err := sendStartupGreeting(cfg, channel); err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] send startup greeting failed: %v\n", err)
+		cliLogWarn("startup_greeting_failed", map[string]any{
+			"err": err.Error(),
+		})
 	} else {
-		fmt.Fprintf(os.Stderr, "[INFO] startup greeting sent channel=%s target=%s\n", cfg.ChannelType, nonEmpty(startupGreetingTarget(cfg), "-"))
+		cliLogInfo("startup_greeting_sent", map[string]any{
+			"channel": cfg.ChannelType,
+			"target":  nonEmpty(startupGreetingTarget(cfg), "-"),
+		})
 		if warning := popChannelSendWarning(channel); warning != "" {
-			fmt.Fprintf(os.Stderr, "[WARN] startup greeting degraded: %s\n", warning)
+			cliLogWarn("startup_greeting_degraded", map[string]any{
+				"warning": warning,
+			})
 		}
 	}
 	if err := loop.RunForever(); err != nil {
 		fmt.Fprintf(os.Stderr, "gateway loop failed: %v\n", err)
 		return 1
 	}
-	return 0
-}
-
-func runGoConfig(repoRoot string, args []string) int {
-	fs := flag.NewFlagSet("config", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	global := fs.Bool("global", false, "write user-level config to ~/.cag/.env")
-	gatewayAddr := fs.String("gatewayd-addr", "", "gatewayd address for ~/.cag/.env (used with --global)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	rest := fs.Args()
-	if len(rest) > 0 {
-		filtered := make([]string, 0, len(rest))
-		for _, arg := range rest {
-			if arg == "--global" {
-				*global = true
-				continue
-			}
-			filtered = append(filtered, arg)
-		}
-		rest = filtered
-	}
-	if len(rest) > 0 {
-		switch strings.ToLower(strings.TrimSpace(rest[0])) {
-		case "show":
-			if len(rest) == 1 {
-				entries, err := config.List(repoRoot)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "show config failed: %v\n", err)
-					return 1
-				}
-				for _, entry := range entries {
-					fmt.Printf("%s=%s\t(scope=%s source=%s)\n", entry.Key, entry.Value, entry.Scope, entry.Source)
-				}
-				return 0
-			}
-			if len(rest) == 2 {
-				entry, err := config.Get(repoRoot, rest[1])
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "show config failed: %v\n", err)
-					return 1
-				}
-				fmt.Printf("%s=%s\t(scope=%s source=%s)\n", entry.Key, entry.Value, entry.Scope, entry.Source)
-				return 0
-			}
-			fmt.Fprintln(os.Stderr, "usage: cag config show [key]")
-			return 2
-		case "list":
-			entries, err := config.List(repoRoot)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "list config failed: %v\n", err)
-				return 1
-			}
-			for _, entry := range entries {
-				fmt.Printf("%s=%s\t(scope=%s source=%s)\n", entry.Key, entry.Value, entry.Scope, entry.Source)
-			}
-			return 0
-		case "get":
-			if len(rest) != 2 {
-				fmt.Fprintln(os.Stderr, "usage: cag config get <key>")
-				return 2
-			}
-			entry, err := config.Get(repoRoot, rest[1])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "get config failed: %v\n", err)
-				return 1
-			}
-			fmt.Printf("%s=%s\t(scope=%s source=%s)\n", entry.Key, entry.Value, entry.Scope, entry.Source)
-			return 0
-		case "set":
-			if len(rest) != 3 {
-				fmt.Fprintln(os.Stderr, "usage: cag config set <key> <value> [--global]")
-				return 2
-			}
-			entry, path, err := config.Set(repoRoot, rest[1], rest[2], *global)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "set config failed: %v\n", err)
-				return 1
-			}
-			fmt.Printf("configured %s in %s: %s=%s\n", entry.Scope, path, entry.Key, entry.Value)
-			return 0
-		case "unset":
-			if len(rest) != 2 {
-				fmt.Fprintln(os.Stderr, "usage: cag config unset <key> [--global]")
-				return 2
-			}
-			entry, path, err := config.Unset(repoRoot, rest[1], *global)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "unset config failed: %v\n", err)
-				return 1
-			}
-			fmt.Printf("removed override from %s: %s=%s (source=%s)\n", path, entry.Key, entry.Value, entry.Source)
-			return 0
-		}
-	}
-
-	if *global {
-		if len(rest) > 0 {
-			fmt.Fprintln(os.Stderr, "config --global does not accept workdir argument")
-			return 2
-		}
-		path, err := config.WriteUserEnv(strings.TrimSpace(*gatewayAddr))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "write ~/.cag/.env failed: %v\n", err)
-			return 1
-		}
-		fmt.Printf("configured user env file: %s\n", path)
-		return 0
-	}
-	workdir := resolveWorkdir(repoRoot, rest)
-	path, err := config.WriteDefaultEnv(repoRoot, workdir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "write .env failed: %v\n", err)
-		return 1
-	}
-	fmt.Printf("configured env file: %s\n", path)
 	return 0
 }
 
@@ -623,7 +418,7 @@ func runStart(repoRoot string, args []string) int {
 	}
 	defer logFile.Close()
 
-	exe, err := os.Executable()
+	proc, err := newSelfCommand(repoRoot, "run")
 	if err != nil {
 		if jsonOut {
 			printJSONActionError("start", "executable_resolve_failed", err.Error())
@@ -632,8 +427,6 @@ func runStart(repoRoot string, args []string) int {
 		fmt.Fprintf(os.Stderr, "resolve executable failed: %v\n", err)
 		return 1
 	}
-	proc := exec.Command(exe, "run")
-	proc.Dir = repoRoot
 	proc.Stdout = logFile
 	proc.Stderr = logFile
 	proc.Env = managedChildEnv("GATEWAY_LOG_FILE="+logPath, "CAG_GRPC_DISABLE=")
@@ -831,6 +624,12 @@ func runRestart(repoRoot string, args []string) int {
 		}
 		requestedLog := strings.TrimSpace(flagValue(args, "--log-file"))
 		grpcRes, gerr := tryRestartViaGRPC(repoRoot, requestedLog)
+		if gerr == nil && grpcRes != nil && !grpcRes.GetOk() && shouldRefreshGatewaydForRestart(grpcRes.GetError()) {
+			_, _ = shutdownManagedGatewayd(repoRoot)
+			if ensureErr := ensureGatewaydRunning(repoRoot); ensureErr == nil {
+				grpcRes, gerr = tryRestartViaGRPC(repoRoot, requestedLog)
+			}
+		}
 		if gerr != nil {
 			if jsonOut {
 				printJSONActionError("restart", "gateway_unreachable", formatGatewayUnavailable(gerr))
@@ -926,13 +725,11 @@ func runRestart(repoRoot string, args []string) int {
 	}
 	defer logFile.Close()
 
-	exe, err := os.Executable()
+	p, err := newSelfCommand(repoRoot, "run")
 	if err != nil {
 		printJSONActionError("restart", "executable_resolve_failed", err.Error())
 		return 1
 	}
-	p := exec.Command(exe, "run")
-	p.Dir = repoRoot
 	p.Stdout = logFile
 	p.Stderr = logFile
 	p.Env = managedChildEnv("GATEWAY_LOG_FILE="+logPath, "CAG_GRPC_DISABLE=")
@@ -951,6 +748,11 @@ func runRestart(repoRoot string, args []string) int {
 	}
 	printJSON(statusJSON("restart", after, cfg, logPath))
 	return 0
+}
+
+func shouldRefreshGatewaydForRestart(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(lower, "fork/exec") && strings.Contains(lower, "no such file or directory")
 }
 
 func runHealth(repoRoot string, args []string) int {
@@ -1263,10 +1065,19 @@ func runSend(repoRoot string, args []string) int {
 }
 
 func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string, dryRun bool, workdirOverride string) (SendPayload, error) {
-	fmt.Fprintf(os.Stderr, "[INFO] cli send start msg_id=%s session_key=%s channel=%s text=%s\n", msgID, key, cfg.ChannelType, shortLogText(body, 80))
+	cliLogInfo("session_send_start", map[string]any{
+		"msg_id":      msgID,
+		"session_key": key,
+		"channel":     cfg.ChannelType,
+		"text":        shortLogText(body, 80),
+	})
 	items, err := collectSessions(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] cli send session load failed msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_session_load_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return SendPayload{
 			OK:         false,
 			Channel:    cfg.ChannelType,
@@ -1288,7 +1099,10 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	}
 	if sess == nil {
 		err := fmt.Errorf("session not found for key=%s", key)
-		fmt.Fprintf(os.Stderr, "[WARN] cli send session missing msg_id=%s session_key=%s\n", msgID, key)
+		cliLogWarn("session_send_session_missing", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+		})
 		return SendPayload{
 			OK:         false,
 			Channel:    cfg.ChannelType,
@@ -1310,7 +1124,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		cfg.StorageSQLitePath,
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] cli send storage init failed msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_storage_init_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return SendPayload{
 			OK:         false,
 			Channel:    nonEmpty(sess.Channel, cfg.ChannelType),
@@ -1325,7 +1143,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	}
 	st, err := store.LoadState()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] cli send state load failed msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_state_load_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return SendPayload{
 			OK:         false,
 			Channel:    nonEmpty(sess.Channel, cfg.ChannelType),
@@ -1359,10 +1181,14 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	}
 	meta := st.SessionMeta[key]
 	resolvedWorkdir := ""
-	if wd, err := normalizeWorkdirPath(cfg.RepoRoot, workdirOverride); err != nil {
+	if wd, err := normalizeWorkdirPath("", workdirOverride); err != nil {
 		payload.OK = false
 		payload.Error = err.Error()
-		fmt.Fprintf(os.Stderr, "[WARN] cli send invalid workdir msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_invalid_workdir", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return payload, err
 	} else if strings.TrimSpace(wd) != "" {
 		resolvedWorkdir = wd
@@ -1378,25 +1204,47 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 		if derr != nil {
 			payload.OK = false
 			payload.Error = derr.Error()
-			fmt.Fprintf(os.Stderr, "[WARN] cli send default workdir init failed msg_id=%s session_key=%s err=%v\n", msgID, key, derr)
+			cliLogWarn("session_send_default_workdir_init_failed", map[string]any{
+				"msg_id":      msgID,
+				"session_key": key,
+				"err":         derr.Error(),
+			})
 			return payload, derr
 		}
 		resolvedWorkdir = defaultWorkdir
-		fmt.Fprintf(os.Stderr, "[INFO] cli send default workdir initialized msg_id=%s session_key=%s workdir=%s\n", msgID, key, resolvedWorkdir)
+		cliLogInfo("session_send_default_workdir_initialized", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"workdir":     resolvedWorkdir,
+		})
 	}
-	fmt.Fprintf(os.Stderr, "[INFO] cli send session resolved msg_id=%s session_key=%s workdir=%s sender=%s\n", msgID, key, resolvedWorkdir, nonEmpty(sess.Sender, "-"))
+	cliLogInfo("session_send_session_resolved", map[string]any{
+		"msg_id":      msgID,
+		"session_key": key,
+		"workdir":     resolvedWorkdir,
+		"sender":      nonEmpty(sess.Sender, "-"),
+	})
 	stInfo, err := os.Stat(resolvedWorkdir)
 	if err != nil {
 		payload.OK = false
 		payload.Error = fmt.Sprintf("invalid workdir: %s", resolvedWorkdir)
-		fmt.Fprintf(os.Stderr, "[WARN] cli send workdir stat failed msg_id=%s session_key=%s path=%s err=%v\n", msgID, key, resolvedWorkdir, err)
+		cliLogWarn("session_send_workdir_stat_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"path":        resolvedWorkdir,
+			"err":         err.Error(),
+		})
 		return payload, err
 	}
 	if !stInfo.IsDir() {
 		err := fmt.Errorf("invalid workdir (not a directory): %s", resolvedWorkdir)
 		payload.OK = false
 		payload.Error = err.Error()
-		fmt.Fprintf(os.Stderr, "[WARN] cli send workdir not dir msg_id=%s session_key=%s path=%s\n", msgID, key, resolvedWorkdir)
+		cliLogWarn("session_send_workdir_not_dir", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"path":        resolvedWorkdir,
+		})
 		return payload, err
 	}
 	meta.Workdir = resolvedWorkdir
@@ -1408,12 +1256,19 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	if err := store.SaveState(st); err != nil {
 		payload.OK = false
 		payload.Error = err.Error()
-		fmt.Fprintf(os.Stderr, "[WARN] cli send save state failed msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_state_save_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return payload, err
 	}
 	if dryRun {
 		payload.TerminalReason = "dry_run"
-		fmt.Fprintf(os.Stderr, "[INFO] cli send dry-run msg_id=%s session_key=%s\n", msgID, key)
+		cliLogInfo("session_send_dry_run", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+		})
 		return payload, nil
 	}
 
@@ -1488,7 +1343,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	})
 	result, execErr := agent.Execute(req)
 	if execErr != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] cli send execute failed msg_id=%s session_key=%s err=%v\n", msgID, key, execErr)
+		cliLogWarn("session_send_execute_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         execErr.Error(),
+		})
 		errText := fmt.Sprintf("执行失败: %v", execErr)
 		_ = store.AppendInteraction(map[string]any{
 			"msg_id":       msgID,
@@ -1541,7 +1400,11 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	if err := store.SaveState(st); err != nil {
 		payload.OK = false
 		payload.Error = err.Error()
-		fmt.Fprintf(os.Stderr, "[WARN] cli send final state save failed msg_id=%s session_key=%s err=%v\n", msgID, key, err)
+		cliLogWarn("session_send_final_state_save_failed", map[string]any{
+			"msg_id":      msgID,
+			"session_key": key,
+			"err":         err.Error(),
+		})
 		return payload, err
 	}
 	reportPath, _ := store.WriteReport(map[string]any{
@@ -1587,7 +1450,12 @@ func sendViaSessionKey(cfg config.AppConfig, key, body, mt, source, msgID string
 	}
 	payload.TerminalReason = nonEmpty(strings.TrimSpace(result.TerminalReason), terminalReasonForStatus(result.Status))
 	payload.ElapsedSec = result.ElapsedSec
-	fmt.Fprintf(os.Stderr, "[INFO] cli send done msg_id=%s session_key=%s status=%s elapsed=%ds\n", msgID, key, result.Status, result.ElapsedSec)
+	cliLogInfo("session_send_done", map[string]any{
+		"msg_id":      msgID,
+		"session_key": key,
+		"status":      result.Status,
+		"elapsed_sec": result.ElapsedSec,
+	})
 	return payload, nil
 }
 
@@ -2243,7 +2111,6 @@ func buildChannelAdapter(cfg config.AppConfig) core.ChannelAdapter {
 	switch strings.ToLower(strings.TrimSpace(cfg.ChannelType)) {
 	case "dingtalk":
 		return dingtalk.NewAdapter(dingtalk.Options{
-			RepoRoot:              cfg.RepoRoot,
 			FetchMaxEvents:        cfg.DingTalkFetchMax,
 			DMPolicy:              cfg.DingTalkDMPolicy,
 			GroupPolicy:           cfg.DingTalkGroupPolicy,
@@ -2371,7 +2238,7 @@ func waitForRunningStatus(repoRoot string, timeout time.Duration) (StatusPayload
 }
 
 func loadEnvDefaults(repoRoot string) {
-	_ = envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env"))
+	_ = repoRoot
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
 		return
@@ -2430,13 +2297,19 @@ func statusMetadataString(p StatusPayload, key string) string {
 }
 
 func effectiveStatusChannel(p StatusPayload, cfg config.AppConfig) string {
-	_ = cfg
-	return statusMetadataString(p, "channel")
+	channel := statusMetadataString(p, "channel")
+	if channel != "" {
+		return channel
+	}
+	return strings.TrimSpace(cfg.ChannelType)
 }
 
 func effectiveStatusWorkdir(p StatusPayload, cfg config.AppConfig) string {
-	_ = cfg
-	return statusMetadataString(p, "workdir")
+	workdir := statusMetadataString(p, "workdir")
+	if workdir != "" {
+		return workdir
+	}
+	return strings.TrimSpace(cfg.Workdir)
 }
 
 func effectiveStatusLockFile(p StatusPayload, cfg config.AppConfig) string {
@@ -2512,6 +2385,29 @@ func printJSONActionError(action, code, message string) {
 	})
 }
 
+func resolveACPBinary(command string) string {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+func ensureACPCommandAvailable(repoRoot string) error {
+	cfg, err := config.Load(repoRoot, "")
+	if err != nil {
+		return err
+	}
+	acpBin := resolveACPBinary(cfg.ACPAgentCmd)
+	if acpBin == "" {
+		return fmt.Errorf("ACP_AGENT_CMD is empty")
+	}
+	if _, err := exec.LookPath(acpBin); err != nil {
+		return fmt.Errorf("acp command not found: %s", acpBin)
+	}
+	return nil
+}
+
 func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayload {
 	p := HealthPayload{
 		OK:     false,
@@ -2528,16 +2424,16 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 		})
 	}
 
-	envPath := filepath.Join(repoRoot, ".env")
+	envPath := filepath.Join(config.CAGHomeDir(), ".env")
 	if _, err := os.Stat(envPath); err != nil {
-		add("env", false, ".env missing", "run `cag config` first")
+		add("env", false, "~/.cag/.env missing", "run `cag config` first")
 		return p
 	}
-	add("env", true, ".env loaded", "")
+	add("env", true, "~/.cag/.env loaded", "")
 
 	cfg, err := config.Load(repoRoot, "")
 	if err != nil {
-		add("config", false, err.Error(), "fix .env values and re-run")
+		add("config", false, err.Error(), "fix ~/.cag/.env values and re-run")
 		return p
 	}
 	p.Channel = cfg.ChannelType
@@ -2548,12 +2444,10 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 		add("workdir", true, "workdir ready", "")
 	}
 
-	acpCmd := strings.TrimSpace(cfg.ACPAgentCmd)
-	acpBin := acpCmd
-	if fields := strings.Fields(acpCmd); len(fields) > 0 {
-		acpBin = fields[0]
-	}
-	if _, err := exec.LookPath(acpBin); err != nil {
+	acpBin := resolveACPBinary(cfg.ACPAgentCmd)
+	if acpBin == "" {
+		add("acp", false, "ACP_AGENT_CMD is empty", "set ACP_AGENT_CMD to a valid agent binary")
+	} else if _, err := exec.LookPath(acpBin); err != nil {
 		add("acp", false, fmt.Sprintf("acp command not found: %s", acpBin), "install codex and ensure ACP_AGENT_CMD is in PATH")
 	} else {
 		add("acp", true, fmt.Sprintf("acp command ready: %s", acpBin), "")
@@ -2567,12 +2461,12 @@ func buildHealthPayload(repoRoot, action string, includePaths bool) HealthPayloa
 			add("imessage.binary", true, "imsg ready", "")
 		}
 		if strings.TrimSpace(cfg.IMessageFetchCmd) == "" {
-			add("imessage.fetch_cmd", false, "IMESSAGE_FETCH_CMD is empty", "set IMESSAGE_FETCH_CMD in .env")
+			add("imessage.fetch_cmd", false, "IMESSAGE_FETCH_CMD is empty", "set IMESSAGE_FETCH_CMD in ~/.cag/.env")
 		} else {
 			add("imessage.fetch_cmd", true, "IMESSAGE_FETCH_CMD configured", "")
 		}
 		if strings.TrimSpace(cfg.IMessageSendCmd) == "" {
-			add("imessage.send_cmd", false, "IMESSAGE_SEND_CMD is empty", "set IMESSAGE_SEND_CMD in .env")
+			add("imessage.send_cmd", false, "IMESSAGE_SEND_CMD is empty", "set IMESSAGE_SEND_CMD in ~/.cag/.env")
 		} else {
 			add("imessage.send_cmd", true, "IMESSAGE_SEND_CMD configured", "")
 		}

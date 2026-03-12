@@ -10,7 +10,6 @@ import (
 )
 
 type AppConfig struct {
-	RepoRoot                string
 	ChannelType             string
 	Workdir                 string
 	FetchCmd                string
@@ -80,6 +79,15 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 	}
 
 	getString := func(key, fallback string) string {
+		if spec, ok := LookupSpec(key); ok && spec.Scope == ScopeRuntimeDB {
+			if v := strings.TrimSpace(runtimeValues[key]); v != "" {
+				return v
+			}
+			if v, ok := os.LookupEnv(key); ok {
+				return v
+			}
+			return fallback
+		}
 		if v, ok := os.LookupEnv(key); ok {
 			return v
 		}
@@ -151,7 +159,6 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 	}
 
 	cfg := AppConfig{
-		RepoRoot:                repoRoot,
 		ChannelType:             channel,
 		Workdir:                 workdir,
 		FetchCmd:                strings.TrimSpace(getString("SMS_FETCH_CMD", channelFetchCmdDefault)),
@@ -211,9 +218,7 @@ func Load(repoRoot, workdirArg string) (AppConfig, error) {
 }
 
 func loadEnvDefaults(repoRoot string) error {
-	if err := envfile.LoadDotEnvSetDefault(filepath.Join(repoRoot, ".env")); err != nil {
-		return err
-	}
+	_ = repoRoot
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
 		return nil
