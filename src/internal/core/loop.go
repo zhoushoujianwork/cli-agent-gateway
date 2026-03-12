@@ -15,6 +15,7 @@ import (
 
 type Loop struct {
 	Channel             ChannelAdapter
+	ChannelName         string
 	Agent               AgentAdapter
 	Storage             storage.Backend
 	RemoteUserID        string
@@ -64,6 +65,11 @@ func (l *Loop) RunForever() error {
 			}
 		} else {
 			loopLogWarn("state_reload_failed", map[string]any{"err": loadErr.Error()})
+		}
+		if !l.channelIngressEnabled(st) {
+			loopLogInfo("channel_disabled", map[string]any{"channel": nonEmpty(l.ChannelName, "command")})
+			time.Sleep(time.Duration(l.PollIntervalSec) * time.Second)
+			continue
 		}
 		msgs, err := l.Channel.Fetch()
 		if err != nil {
@@ -701,6 +707,18 @@ func progressIntervalSec() int {
 		return 0
 	}
 	return n
+}
+
+func (l *Loop) channelIngressEnabled(st storage.StateData) bool {
+	channel := strings.ToLower(strings.TrimSpace(nonEmpty(l.ChannelName, "command")))
+	if st.ChannelStates == nil {
+		return true
+	}
+	rec, ok := st.ChannelStates[channel]
+	if !ok {
+		return true
+	}
+	return rec.Enabled
 }
 
 func (l *Loop) logACPEvents(msgID string, events []map[string]any) {

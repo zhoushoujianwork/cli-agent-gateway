@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	gatewayv1 "cli-agent-gateway/internal/gen/gatewayv1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -25,5 +26,25 @@ func TestShouldRefreshGatewaydForRestart(t *testing.T) {
 	}
 	if shouldRefreshGatewaydForRestart("rpc error: code = Unavailable desc = connection closed") {
 		t.Fatalf("did not expect unrelated restart error to trigger refresh")
+	}
+}
+
+func TestShouldRefreshGatewaydForActionResponse(t *testing.T) {
+	if !shouldRefreshGatewaydForActionResponse(&gatewayv1.ActionResponse{
+		Ok:    false,
+		Error: "unsupported action: channel.disable",
+	}) {
+		t.Fatalf("expected unsupported action response to trigger gatewayd refresh")
+	}
+	if shouldRefreshGatewaydForActionResponse(&gatewayv1.ActionResponse{
+		Ok:    false,
+		Error: "session not found: foo",
+	}) {
+		t.Fatalf("did not expect regular action failure to trigger gatewayd refresh")
+	}
+	if shouldRefreshGatewaydForActionResponse(&gatewayv1.ActionResponse{
+		Ok: true,
+	}) {
+		t.Fatalf("did not expect ok response to trigger gatewayd refresh")
 	}
 }

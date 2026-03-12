@@ -14,6 +14,7 @@ It should help the user:
 - inspect session history
 - inspect runtime state
 - inspect channel inbox
+- enable or disable configured channels
 - create or remove bindings
 
 The GUI does not own routing logic or runtime truth.
@@ -57,6 +58,7 @@ Rules:
 - each startup step should emit `step_start` and `step_done` with elapsed time and summary status
 - GUI startup must not auto-start `gatewayd`
 - GUI shutdown must not auto-stop `gatewayd`
+- channel configuration failures must be logged and shown as health warnings, but they must not block gateway service startup by themselves
 - startup may continue after a non-fatal step failure so the GUI can still show partial state
 - startup completion should emit one summary line with overall outcome such as `ready`, `degraded`, or `blocked`
 
@@ -117,19 +119,20 @@ Recommended step names:
 
 ## Status Semantics
 
-The GUI must present one top-level gateway service state, not two peer daemon states.
+The GUI must present one top-level gateway service state.
 
-- `gatewayd-status` reports the health of the managed `gatewayd` daemon
-- that daemon includes both the external gRPC/control-plane surface and the core runtime management responsibilities
-- session rows report per-session runtime attachment such as `attached` or `detached`
-- `runtime status` is a deeper diagnostic view into runtime-related state owned by `gatewayd`; it should not be presented as a second independent service badge
+- the only user-facing service is `gatewayd`
+- any runtime or worker state is internal implementation detail behind `gatewayd`
+- GUI may still probe internal state to verify readiness, but it must not expose that probe as a second peer service
 
 Rules:
 
-- the header should present one `gatewayd` service badge for top-level daemon health
-- the GUI must not imply that `gatewayd` and runtime are separate peer processes that can be independently healthy at the top level
-- a selected session may still show its own runtime attachment state such as `attached` or `detached`
-- operator logs should make it obvious which state changed
+- `Running` means the gateway service is fully ready
+- `Stopped` means the gateway service is fully stopped
+- if internal readiness probes disagree with `gatewayd-status`, the GUI must treat the gateway as failed and trigger one gateway-level recovery attempt instead of presenting two separate service states
+- the header must show one gateway badge only
+- session rows may still show session-local attachment state such as `attached` or `detached`
+- operator logs should make it obvious when the gateway entered an internal mismatch state and when GUI triggered recovery
 
 ## Write Model
 
@@ -163,9 +166,20 @@ Rules:
 - list bindings
   - `cag binding list --json`
 - bind a channel conversation
+  - `cag session bind --key <session_key> --channel <name> --conversation-id <id> --json`
   - `cag binding create --channel <name> --conversation-id <id> --session-key <session_key> --json`
 - unbind a channel conversation
+  - `cag session unbind --key <session_key> --channel <name> --conversation-id <id> --json`
   - `cag binding delete --channel <name> --conversation-id <id> --json`
+
+### Channel Availability Operations
+
+- list channel availability
+  - `cag channel list --json`
+- enable one configured channel ingress
+  - `cag channel enable --channel <name> --json`
+- disable one configured channel ingress
+  - `cag channel disable --channel <name> --json`
 
 ### Channel Inbox Operations
 
@@ -229,6 +243,7 @@ Actions:
 - bind to existing session
 - create session and bind
 - ignore or archive later if needed
+- jump to channel availability controls when ingress should be paused globally
 
 ### Bindings Panel
 
@@ -243,11 +258,24 @@ Actions:
 - jump to session
 - jump to conversation detail
 
+### Channel Settings Panel
+
+Shows:
+
+- configured channels
+- whether each configured channel is enabled or disabled
+
+Actions:
+
+- enable configured channel ingress
+- disable configured channel ingress
+
 ## Routing UX Rules
 
 - GUI-selected session is explicit write target.
 - `latest` is only a convenience for initial selection after refresh.
 - Unassigned channel conversations are visible but must not execute.
+- Disabled channels remain configured and visible, but new ingress must not execute until re-enabled.
 - Binding from the GUI must always be explicit: choose a concrete unassigned conversation, then choose the target session.
 - The GUI should clearly show whether a conversation is:
   - bound

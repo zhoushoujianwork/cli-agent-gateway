@@ -174,6 +174,10 @@ func (s *gatewayControlServer) handleAction(root string, req *gatewayv1.ActionRe
 		return handleSessionList(store, req)
 	case "session.show":
 		return handleSessionShow(store, req)
+	case "session.bind":
+		return handleBindingCreate(store, req)
+	case "session.unbind":
+		return handleBindingDelete(store, req)
 	case "session.attach":
 		return handleSessionAttach(store, manager, cfg, req)
 	case "session.detach":
@@ -187,7 +191,11 @@ func (s *gatewayControlServer) handleAction(root string, req *gatewayv1.ActionRe
 	case "session.delete":
 		return handleSessionDelete(store, manager, req)
 	case "channel.list":
-		return handleChannelList(cfg), nil
+		return handleChannelList(store, cfg)
+	case "channel.enable":
+		return handleChannelSetEnabled(store, cfg, req, true)
+	case "channel.disable":
+		return handleChannelSetEnabled(store, cfg, req, false)
 	case "channel.inbox":
 		return handleChannelInbox(store, req)
 	case "channel.show":
@@ -581,17 +589,58 @@ func handleSessionDelete(store *sessionctl.Store, manager *sessionctl.RuntimeMan
 	}, nil
 }
 
-func handleChannelList(cfg config.AppConfig) map[string]any {
+func handleChannelList(store *sessionctl.Store, cfg config.AppConfig) (map[string]any, error) {
+	st, err := store.Load()
+	if err != nil {
+		return nil, err
+	}
+	items := make([]map[string]any, 0, len(knownChannels()))
+	for _, channel := range knownChannels() {
+		configured := channelConfigured(cfg, channel)
+		items = append(items, map[string]any{
+			"channel":    channel,
+			"configured": configured,
+			"enabled":    channelEnabled(st, cfg, channel),
+			"manageable": channelManageable(channel),
+		})
+	}
 	return map[string]any{
 		"ok":     true,
 		"action": "channel.list",
-		"items": []map[string]any{
-			{"channel": "gui", "configured": true},
-			{"channel": "command", "configured": strings.EqualFold(strings.TrimSpace(cfg.ChannelType), "command")},
-			{"channel": "dingtalk", "configured": strings.EqualFold(strings.TrimSpace(cfg.ChannelType), "dingtalk")},
-			{"channel": "imessage", "configured": strings.EqualFold(strings.TrimSpace(cfg.ChannelType), "imessage")},
-		},
+		"items":  items,
+	}, nil
+}
+
+func handleChannelSetEnabled(store *sessionctl.Store, cfg config.AppConfig, req *gatewayv1.ActionRequest, enabled bool) (map[string]any, error) {
+	channel := strings.ToLower(strings.TrimSpace(req.GetChannel()))
+	if channel == "" {
+		return nil, fmt.Errorf("channel required")
 	}
+	if !channelManageable(channel) {
+		return nil, fmt.Errorf("channel does not support enable/disable: %s", channel)
+	}
+	if !channelConfigured(cfg, channel) {
+		return nil, fmt.Errorf("channel not configured: %s", channel)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.Mutate(func(st *storage.StateData) error {
+		st.ChannelStates[channel] = storage.ChannelStateRecord{
+			Channel:   channel,
+			Enabled:   enabled,
+			UpdatedAt: now,
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"ok":         true,
+		"action":     requestedAction(req, "channel.update"),
+		"channel":    channel,
+		"configured": true,
+		"enabled":    enabled,
+		"updated_at": now,
+	}, nil
 }
 
 func handleChannelInbox(store *sessionctl.Store, req *gatewayv1.ActionRequest) (map[string]any, error) {
@@ -676,7 +725,7 @@ func handleBindingCreate(store *sessionctl.Store, req *gatewayv1.ActionRequest) 
 	}
 	return map[string]any{
 		"ok":               true,
-		"action":           "binding.create",
+		"action":           requestedAction(req, "binding.create"),
 		"conversation_key": key,
 		"session_key":      session.Key,
 		"updated_at":       now,
@@ -689,9 +738,34 @@ func handleBindingDelete(store *sessionctl.Store, req *gatewayv1.ActionRequest) 
 		return nil, fmt.Errorf("channel and conversation id required")
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var deleted storage.BindingRecord
 	if _, err := store.Mutate(func(st *storage.StateData) error {
-		if _, ok := st.Bindings[key]; !ok {
+		binding, ok := st.Bindings[key]
+		if !ok {
 			return fmt.Errorf("binding not found: %s", key)
+		}
+		sessionKey := sessionctl.NormalizeSessionKey(req.GetSessionKey())
+		if sessionKey != "" && binding.SessionKey != sessionKey {
+			return fmt.Errorf("binding belongs to session %s, not %s", binding.SessionKey, sessionKey)
+		}
+		deleted = binding
+		if rec, ok := st.Unassigned[key]; ok {
+			rec.UpdatedAt = now
+			st.Unassigned[key] = rec
+		} else {
+			st.Unassigned[key] = storage.ConversationRecord{
+				ConversationKey: binding.ConversationKey,
+				Channel:         binding.Channel,
+				ConversationID:  binding.ConversationID,
+				ThreadID:        binding.ThreadID,
+				LastSeenAt:      now,
+				UpdatedAt:       now,
+			}
+		}
+		session := st.Sessions[binding.SessionKey]
+		if strings.TrimSpace(session.Key) != "" {
+			session.UpdatedAt = now
+			st.Sessions[binding.SessionKey] = session
 		}
 		delete(st.Bindings, key)
 		return nil
@@ -700,8 +774,9 @@ func handleBindingDelete(store *sessionctl.Store, req *gatewayv1.ActionRequest) 
 	}
 	return map[string]any{
 		"ok":               true,
-		"action":           "binding.delete",
+		"action":           requestedAction(req, "binding.delete"),
 		"conversation_key": key,
+		"session_key":      deleted.SessionKey,
 		"updated_at":       now,
 	}, nil
 }
@@ -861,6 +936,52 @@ func handleRuntimeLogs(root string) map[string]any {
 	}
 }
 
+func knownChannels() []string {
+	return []string{"gui", "command", "dingtalk", "imessage"}
+}
+
+func channelManageable(channel string) bool {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case "command", "dingtalk", "imessage":
+		return true
+	default:
+		return false
+	}
+}
+
+func channelConfigured(cfg config.AppConfig, channel string) bool {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	if channel == "gui" {
+		return true
+	}
+	return channel != "" && strings.EqualFold(strings.TrimSpace(cfg.ChannelType), channel)
+}
+
+func channelEnabled(st storage.StateData, cfg config.AppConfig, channel string) bool {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	if !channelConfigured(cfg, channel) {
+		return channel == "gui"
+	}
+	if !channelManageable(channel) {
+		return true
+	}
+	rec, ok := st.ChannelStates[channel]
+	if !ok {
+		return true
+	}
+	return rec.Enabled
+}
+
+func requestedAction(req *gatewayv1.ActionRequest, fallback string) string {
+	if req == nil {
+		return fallback
+	}
+	if action := strings.TrimSpace(req.GetAction()); action != "" {
+		return action
+	}
+	return fallback
+}
+
 func loadSessionByKey(store *sessionctl.Store, key string, allowArchived bool) (storage.StateData, storage.SessionRecord, error) {
 	st, err := store.Load()
 	if err != nil {
@@ -928,21 +1049,30 @@ func tryActionViaGRPC(repoRoot string, req *gatewayv1.ActionRequest) (*gatewayv1
 	ctx, cancel := context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout(repoRoot))
 	defer cancel()
 	resp, err := cli.Action(ctx, req)
-	if err == nil {
+	if err == nil && !shouldRefreshGatewaydForActionResponse(resp) {
 		return resp, nil
 	}
-	if !shouldRefreshGatewaydForAction(err) {
+	if err != nil && !shouldRefreshGatewaydForAction(err) {
 		return nil, err
 	}
 	if _, shutdownErr := shutdownManagedGatewayd(repoRoot); shutdownErr != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
+		return resp, nil
 	}
 	if ensureErr := ensureGatewaydRunning(repoRoot); ensureErr != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
+		return resp, nil
 	}
 	cli, conn, dialErr := grpcGatewayClient(repoRoot)
 	if dialErr != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
+		return resp, nil
 	}
 	defer conn.Close()
 	ctx, cancel = context.WithTimeout(context.Background(), sendViaSessionGRPCTimeout(repoRoot))
@@ -960,6 +1090,17 @@ func shouldRefreshGatewaydForAction(err error) bool {
 	}
 	msg := strings.ToLower(strings.TrimSpace(st.Message()))
 	return strings.Contains(msg, "unknown method action") || strings.Contains(msg, "/action")
+}
+
+func shouldRefreshGatewaydForActionResponse(resp *gatewayv1.ActionResponse) bool {
+	if resp == nil || resp.GetOk() {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(resp.GetError()))
+	if msg == "" {
+		return false
+	}
+	return strings.Contains(msg, "unsupported action:")
 }
 
 func decodeActionPayload(resp *gatewayv1.ActionResponse) (map[string]any, error) {

@@ -44,12 +44,16 @@ func commandSpecs() []CommandSpec {
 		{Path: "session delete", Purpose: "Archive a session and remove its bindings", FeatureGroup: "session-lifecycle", SunsetGroup: "session"},
 		{Path: "session list", Purpose: "List gateway sessions", FeatureGroup: "session-read-model", SunsetGroup: "session"},
 		{Path: "session show", Purpose: "Show one session with bindings/runtime", FeatureGroup: "session-read-model", SunsetGroup: "session"},
+		{Path: "session bind", Purpose: "Bind a channel conversation to one session", FeatureGroup: "session-routing", SunsetGroup: "session"},
+		{Path: "session unbind", Purpose: "Remove one channel binding from one session", FeatureGroup: "session-routing", SunsetGroup: "session"},
 		{Path: "session send", Purpose: "Send a message into a session runtime", FeatureGroup: "session-io", SunsetGroup: "session"},
 		{Path: "session messages", Purpose: "Read session messages and timeline", FeatureGroup: "session-read-model", SunsetGroup: "session"},
 		{Path: "session clear", Purpose: "Reset live session context while keeping history", FeatureGroup: "session-runtime", SunsetGroup: "session"},
 		{Path: "session attach", Purpose: "Attach a live runtime to a session", FeatureGroup: "session-runtime", SunsetGroup: "session"},
 		{Path: "session detach", Purpose: "Detach the live runtime from a session", FeatureGroup: "session-runtime", SunsetGroup: "session"},
 		{Path: "channel list", Purpose: "List supported channel entrypoints", FeatureGroup: "channel-read-model", SunsetGroup: "channel"},
+		{Path: "channel enable", Purpose: "Enable a configured channel", FeatureGroup: "channel-routing", SunsetGroup: "channel"},
+		{Path: "channel disable", Purpose: "Disable a configured channel", FeatureGroup: "channel-routing", SunsetGroup: "channel"},
 		{Path: "channel inbox", Purpose: "List unassigned channel conversations", FeatureGroup: "channel-routing", SunsetGroup: "channel"},
 		{Path: "channel show", Purpose: "Show one channel conversation or binding state", FeatureGroup: "channel-routing", SunsetGroup: "channel"},
 		{Path: "binding create", Purpose: "Bind a channel conversation to a session", FeatureGroup: "binding-routing", SunsetGroup: "binding"},
@@ -70,6 +74,8 @@ func newSessionCmd(repoRoot string) *cobra.Command {
 		newSessionKeyActionCmd(repoRoot, "delete", "Delete a task session"),
 		newSessionListCmd(repoRoot),
 		newSessionKeyActionCmd(repoRoot, "show", "Show one task session"),
+		newSessionBindCmd(repoRoot, "bind", "Bind a channel conversation to a session"),
+		newSessionBindCmd(repoRoot, "unbind", "Remove a channel binding from a session"),
 		newSessionSendCmd(repoRoot),
 		newSessionKeyActionCmd(repoRoot, "messages", "Read session messages and timeline"),
 		newSessionKeyActionCmd(repoRoot, "clear", "Reset live session context while keeping history"),
@@ -151,6 +157,38 @@ func newSessionListCmd(repoRoot string) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
 	cmd.Flags().BoolVar(&includeArchived, "include-archived", false, "include archived sessions")
+	return cmd
+}
+
+func newSessionBindCmd(repoRoot, name, short string) *cobra.Command {
+	var key string
+	var channel string
+	var conversationID string
+	var threadID string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:          name,
+		Short:        short,
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "session."+name, jsonOut, &gatewayv1.ActionRequest{
+				SessionKey:     key,
+				Channel:        channel,
+				ConversationId: conversationID,
+				ThreadId:       threadID,
+			}))
+		},
+	}
+	cmd.Flags().StringVar(&key, "key", "", "session key")
+	cmd.Flags().StringVar(&channel, "channel", "", "channel")
+	cmd.Flags().StringVar(&conversationID, "conversation-id", "", "conversation id")
+	cmd.Flags().StringVar(&threadID, "thread-id", "", "thread id")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	_ = cmd.MarkFlagRequired("key")
+	_ = cmd.MarkFlagRequired("channel")
+	_ = cmd.MarkFlagRequired("conversation-id")
 	return cmd
 }
 

@@ -49,6 +49,11 @@ Examples:
 - one DingTalk DM conversation
 - one iMessage conversation
 
+Configured channel backends may also have an explicit ingress availability state:
+
+- `enabled`: channel ingress may fetch and execute through bindings
+- `disabled`: channel ingress is paused but its config remains intact
+
 ### Binding
 
 A binding explicitly maps one channel conversation to one session.
@@ -58,6 +63,8 @@ Without a binding:
 - the conversation is visible
 - the message may be recorded
 - but the message must not execute
+
+Bindings may be managed either from the routing object view (`cag binding ...`) or from the target session view (`cag session bind|unbind`).
 
 ### Runtime
 
@@ -103,6 +110,7 @@ flowchart TD
 - If the incoming conversation has a binding, route to that bound session.
 - If the incoming conversation has no binding, do not execute.
 - Put the conversation into an unassigned inbox for GUI/CLI management.
+- If the configured channel is disabled, do not fetch or execute new ingress for that channel until it is explicitly re-enabled.
 
 ### Explicit Non-Goals
 
@@ -155,6 +163,7 @@ The system should expose:
 - session detail
 - session messages
 - runtime list
+- channel list with configured/enabled state
 - binding list
 - unassigned channel inbox
 - machine-readable logs and reports

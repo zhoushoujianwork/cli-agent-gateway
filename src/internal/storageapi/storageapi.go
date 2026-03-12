@@ -7,6 +7,7 @@ type StateData struct {
 	SessionDeleted map[string]string             `json:"session_deleted,omitempty"`
 	Sessions       map[string]SessionRecord      `json:"sessions,omitempty"`
 	Bindings       map[string]BindingRecord      `json:"bindings,omitempty"`
+	ChannelStates  map[string]ChannelStateRecord `json:"channel_states,omitempty"`
 	RuntimeIndex   map[string]RuntimeRecord      `json:"runtime_index,omitempty"`
 	Unassigned     map[string]ConversationRecord `json:"unassigned_conversations,omitempty"`
 	UserAccess     map[string]UserAccessRecord   `json:"user_access,omitempty"`
@@ -35,6 +36,12 @@ type BindingRecord struct {
 	ThreadID        string `json:"thread_id,omitempty"`
 	SessionKey      string `json:"session_key"`
 	UpdatedAt       string `json:"updated_at,omitempty"`
+}
+
+type ChannelStateRecord struct {
+	Channel   string `json:"channel"`
+	Enabled   bool   `json:"enabled"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
 type RuntimeRecord struct {

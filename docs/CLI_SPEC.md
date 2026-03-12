@@ -22,6 +22,8 @@ cag session create
 cag session delete
 cag session list
 cag session show
+cag session bind
+cag session unbind
 cag session send
 cag session messages
 cag session clear
@@ -29,6 +31,8 @@ cag session attach
 cag session detach
 
 cag channel list
+cag channel enable
+cag channel disable
 cag channel inbox
 cag channel show
 
@@ -176,6 +180,36 @@ These annotations exist so an obsolete command family can be removed in one pass
   - recent activity
   - current bindings
 
+### `cag session bind`
+
+- `path`: `session bind`
+- `purpose`: bind one channel conversation to one explicit session
+- `feature_group`: `session-routing`
+- `sunset_group`: `session-v2`
+- inputs:
+  - `--key <session_key>`
+  - `--channel <name>`
+  - `--conversation-id <id>`
+  - optional `--thread-id <id>`
+- rules:
+  - must fail if the target session does not exist or is archived
+  - must remove the conversation from the unassigned inbox if present
+
+### `cag session unbind`
+
+- `path`: `session unbind`
+- `purpose`: remove one explicit binding from one session
+- `feature_group`: `session-routing`
+- `sunset_group`: `session-v2`
+- inputs:
+  - `--key <session_key>`
+  - `--channel <name>`
+  - `--conversation-id <id>`
+  - optional `--thread-id <id>`
+- rules:
+  - must fail if the binding does not belong to the specified session
+  - the conversation should return to the unassigned inbox after unbind
+
 ### `cag session send`
 
 - `path`: `session send`
@@ -248,6 +282,34 @@ These annotations exist so an obsolete command family can be removed in one pass
 - `purpose`: list supported channel types and configured channel backends
 - `feature_group`: `channel-read-model`
 - `sunset_group`: `channel-v2`
+- result:
+  - each row includes whether the channel is `configured`
+  - each row includes whether the channel is currently `enabled`
+  - manageable channels may be configured but temporarily disabled without removing config
+
+### `cag channel enable`
+
+- `path`: `channel enable`
+- `purpose`: re-enable a configured channel ingress without removing its config
+- `feature_group`: `channel-routing`
+- `sunset_group`: `channel-v2`
+- inputs:
+  - `--channel <name>`
+- rules:
+  - only configured non-GUI channel backends may be enabled
+  - enabling restores channel ingress processing for that channel
+
+### `cag channel disable`
+
+- `path`: `channel disable`
+- `purpose`: pause a configured channel ingress while keeping its config
+- `feature_group`: `channel-routing`
+- `sunset_group`: `channel-v2`
+- inputs:
+  - `--channel <name>`
+- rules:
+  - only configured non-GUI channel backends may be disabled
+  - disabling must block new channel ingress execution until re-enabled
 
 ### `cag channel inbox`
 
@@ -282,6 +344,8 @@ These annotations exist so an obsolete command family can be removed in one pass
   - `--conversation-id <id>`
   - optional `--thread-id <id>`
   - `--session-key <session_key>`
+- note:
+  - `cag session bind` is the session-oriented equivalent and should be preferred when the operator starts from a concrete session
 
 ### `cag binding delete`
 
@@ -293,6 +357,8 @@ These annotations exist so an obsolete command family can be removed in one pass
   - `--channel <name>`
   - `--conversation-id <id>`
   - optional `--thread-id <id>`
+- note:
+  - `cag session unbind` is the session-oriented equivalent and may additionally assert the expected target session
 
 ### `cag binding list`
 
@@ -344,6 +410,7 @@ These annotations exist so an obsolete command family can be removed in one pass
 ## Routing Contract
 
 - `session send` must always target an explicit `--key`.
+- configured channel backends may be temporarily paused via `channel disable` and resumed via `channel enable`.
 - `channel inbox` items are not auto-routed.
 - binding is the only write-routing rule for channel ingress.
 - `latest` is read-model only.

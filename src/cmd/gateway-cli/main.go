@@ -209,6 +209,7 @@ func runGoMain(repoRoot string, args []string) int {
 	}
 	loop := &core.Loop{
 		Channel:             channel,
+		ChannelName:         strings.TrimSpace(cfg.ChannelType),
 		Agent:               agent,
 		Storage:             store,
 		RemoteUserID:        cfg.RemoteUserID,

@@ -9,6 +9,8 @@ func newChannelCmd(repoRoot string) *cobra.Command {
 	cmd := newGroupCmd("channel", "Inspect channel conversations and inbox")
 	cmd.AddCommand(
 		newChannelListCmd(repoRoot),
+		newChannelToggleCmd(repoRoot, "enable", "Enable a configured channel"),
+		newChannelToggleCmd(repoRoot, "disable", "Disable a configured channel"),
 		newChannelInboxCmd(repoRoot),
 		newChannelShowCmd(repoRoot),
 	)
@@ -28,6 +30,27 @@ func newChannelListCmd(repoRoot string) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	return cmd
+}
+
+func newChannelToggleCmd(repoRoot, name, short string) *cobra.Command {
+	var channel string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:          name,
+		Short:        short,
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitCodeToError(runAction(repoRoot, "channel."+name, jsonOut, &gatewayv1.ActionRequest{
+				Channel: channel,
+			}))
+		},
+	}
+	cmd.Flags().StringVar(&channel, "channel", "", "channel")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "json output")
+	_ = cmd.MarkFlagRequired("channel")
 	return cmd
 }
 

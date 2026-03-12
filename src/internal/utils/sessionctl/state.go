@@ -104,6 +104,9 @@ func ensureStateMaps(st *storage.StateData) {
 	if st.Bindings == nil {
 		st.Bindings = map[string]storage.BindingRecord{}
 	}
+	if st.ChannelStates == nil {
+		st.ChannelStates = map[string]storage.ChannelStateRecord{}
+	}
 	if st.RuntimeIndex == nil {
 		st.RuntimeIndex = map[string]storage.RuntimeRecord{}
 	}

@@ -35,6 +35,7 @@ Responsibilities:
 - unbind a channel conversation
 - list bindings
 - expose unassigned conversations
+- validate session-oriented bind and unbind mutations
 
 Owns:
 
@@ -42,6 +43,14 @@ Owns:
 - `conversation_id`
 - optional `thread_id`
 - target `session_key`
+
+### Channel Availability
+
+Responsibilities:
+
+- report whether a configured channel is enabled
+- enable one configured channel ingress
+- disable one configured channel ingress without removing config
 
 ### Runtime Manager
 
@@ -111,6 +120,8 @@ flowchart TD
 4. If binding does not exist:
    - record as unassigned
    - do not execute
+5. If the configured channel is disabled:
+   - do not fetch or execute new ingress for that channel
 
 ## Runtime Policy
 

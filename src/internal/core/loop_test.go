@@ -114,3 +114,25 @@ func TestEnsureSessionWorkdirKeepsExistingValue(t *testing.T) {
 		t.Fatalf("expected stored workdir=%s got=%s", custom, next.SessionMeta["sess-b"].Workdir)
 	}
 }
+
+func TestChannelIngressEnabledDefaultsTrue(t *testing.T) {
+	loop := &Loop{ChannelName: "dingtalk"}
+	if !loop.channelIngressEnabled(storage.StateData{}) {
+		t.Fatalf("expected channel ingress enabled by default")
+	}
+}
+
+func TestChannelIngressEnabledHonorsStoredDisable(t *testing.T) {
+	loop := &Loop{ChannelName: "dingtalk"}
+	st := storage.StateData{
+		ChannelStates: map[string]storage.ChannelStateRecord{
+			"dingtalk": {
+				Channel: "dingtalk",
+				Enabled: false,
+			},
+		},
+	}
+	if loop.channelIngressEnabled(st) {
+		t.Fatalf("expected disabled channel ingress to be blocked")
+	}
+}
