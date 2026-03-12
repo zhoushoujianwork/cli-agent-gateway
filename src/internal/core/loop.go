@@ -25,6 +25,11 @@ type Loop struct {
 	PollIntervalSec     int
 	ReplyStyleEnabled   bool
 	ReplyStylePrompt    string
+
+	channelStateSeen bool
+	channelEnabled   bool
+	fetchErrorActive bool
+	lastFetchError   string
 }
 
 func loopLogInfo(event string, fields map[string]any) {
@@ -66,17 +71,26 @@ func (l *Loop) RunForever() error {
 		} else {
 			loopLogWarn("state_reload_failed", map[string]any{"err": loadErr.Error()})
 		}
-		if !l.channelIngressEnabled(st) {
-			loopLogInfo("channel_disabled", map[string]any{"channel": nonEmpty(l.ChannelName, "command")})
+		if enabled := l.channelIngressEnabled(st); !enabled {
+			if event, ok := l.channelStateTransitionEvent(false); ok {
+				loopLogInfo(event, map[string]any{"channel": nonEmpty(l.ChannelName, "command")})
+			}
 			time.Sleep(time.Duration(l.PollIntervalSec) * time.Second)
 			continue
+		} else {
+			if event, ok := l.channelStateTransitionEvent(true); ok {
+				loopLogInfo(event, map[string]any{"channel": nonEmpty(l.ChannelName, "command")})
+			}
 		}
 		msgs, err := l.Channel.Fetch()
 		if err != nil {
-			loopLogWarn("fetch_failed", map[string]any{"err": err.Error()})
+			if l.shouldLogFetchFailure(err) {
+				loopLogWarn("fetch_failed", map[string]any{"err": err.Error()})
+			}
 			time.Sleep(time.Duration(l.PollIntervalSec) * time.Second)
 			continue
 		}
+		l.noteFetchSuccess()
 		if len(msgs) > 0 {
 			loopLogInfo("fetch_ok", map[string]any{"count": len(msgs)})
 		}
@@ -719,6 +733,43 @@ func (l *Loop) channelIngressEnabled(st storage.StateData) bool {
 		return true
 	}
 	return rec.Enabled
+}
+
+func (l *Loop) channelStateTransitionEvent(enabled bool) (string, bool) {
+	if !l.channelStateSeen {
+		l.channelStateSeen = true
+		l.channelEnabled = enabled
+		if enabled {
+			return "", false
+		}
+		return "channel_disabled", true
+	}
+	if l.channelEnabled == enabled {
+		return "", false
+	}
+	l.channelEnabled = enabled
+	if enabled {
+		return "channel_enabled", true
+	}
+	return "channel_disabled", true
+}
+
+func (l *Loop) shouldLogFetchFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.TrimSpace(err.Error())
+	if !l.fetchErrorActive || l.lastFetchError != msg {
+		l.fetchErrorActive = true
+		l.lastFetchError = msg
+		return true
+	}
+	return false
+}
+
+func (l *Loop) noteFetchSuccess() {
+	l.fetchErrorActive = false
+	l.lastFetchError = ""
 }
 
 func (l *Loop) logACPEvents(msgID string, events []map[string]any) {
